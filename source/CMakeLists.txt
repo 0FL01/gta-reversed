@@ -5,6 +5,25 @@ option(${RE_PROJECT}_WITH_OPENAL "Use OpenAL" OFF)
 option(${RE_PROJECT}_WITH_SDL3 "Use SDL3" OFF)
 option(${RE_PROJECT}_STANDALONE "Build standalone executable" OFF)
 option(${RE_PROJECT}_DUMP_HOOKS_ONLY "Dump hooks only" OFF)
+option(${RE_PROJECT}_BUILD_LEGACY "Build legacy gta_reversed ASI/DLL track" ON)
+
+# mad-sa native Linux skeleton (R1): standalone oswrapper + main, no Win libs.
+# Configure with `-DGTASA_BUILD_LEGACY=OFF` to build only `mad-sa-linux`.
+if(NOT ${RE_PROJECT}_BUILD_LEGACY)
+    add_executable(mad-sa-linux
+        oswrapper/oswrapper_linux.cpp
+        app/platform/linux/MainLinux.cpp
+    )
+    target_compile_features(mad-sa-linux PRIVATE cxx_std_23)
+    target_include_directories(mad-sa-linux PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    set_target_properties(mad-sa-linux PROPERTIES
+        OUTPUT_NAME "mad-sa-linux"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+    )
+    find_package(Threads REQUIRED)
+    target_link_libraries(mad-sa-linux PRIVATE Threads::Threads)
+    return()
+endif()
 
 if (${RE_PROJECT}_WITH_SDL3)
     add_compile_definitions(NOTSA_USE_SDL3)
@@ -87,7 +106,9 @@ set_target_properties(${RE_PROJECT_LIB_NAME}
     RUNTIME_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/bin/${CMAKE_BUILD_TYPE}/"
     COMPILE_WARNING_AS_ERROR ON
 )
-target_link_options(${RE_PROJECT_LIB_NAME} PRIVATE "/SUBSYSTEM:WINDOWS")
+if(WIN32)
+    target_link_options(${RE_PROJECT_LIB_NAME} PRIVATE "/SUBSYSTEM:WINDOWS")
+endif()
 
 #--------------------------------------------------------------------
 # Add dependencies
@@ -121,13 +142,17 @@ target_link_libraries(${RE_PROJECT_LIB_NAME} PRIVATE
     vorbis::vorbis
     imgui::imgui
     libjpeg-turbo::libjpeg-turbo
-    ddraw
-    Winmm
-    dxguid
-    strmiids
-    d3d9
     SDL3::SDL3
 )
+if(WIN32)
+    target_link_libraries(${RE_PROJECT_LIB_NAME} PRIVATE
+        ddraw
+        Winmm
+        dxguid
+        strmiids
+        d3d9
+    )
+endif()
 
 
 target_include_directories(${RE_PROJECT_LIB_NAME} PRIVATE
@@ -243,7 +268,9 @@ if (${RE_PROJECT}_WITH_OPENAL)
 else()
     target_compile_definitions(${RE_PROJECT_LIB_NAME} PRIVATE USE_DSOUND)
 
-    target_link_libraries(${RE_PROJECT_LIB_NAME} PRIVATE dsound)
+    if(WIN32)
+        target_link_libraries(${RE_PROJECT_LIB_NAME} PRIVATE dsound)
+    endif()
 endif()
 
 
