@@ -34,11 +34,12 @@ using uint64 = uint64_t;
 
 #include "oswrapper/oswrapper.h"
 #include "app/platform/linux/WorldShot.h"
+#include "app/platform/linux/SceneShot.h"
 
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --headless [--ticks N] | --shot <out.tga> [--frames N]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -321,8 +322,10 @@ void LookAtMatrix(const float* eye, const float* center, const float* up, float*
 
 // Rasterizes real /game geometry (WorldShot triangle soup) with CPU Lambert
 // shading. No synthetic gradient: every non-background pixel comes from a
-// DFF triangle parsed by librw.
-void DrawWorldFrame(const WorldShotScene& scene, int width, int height, float angleDeg) {
+// DFF triangle parsed by librw. camEyeOverride (nullable) replaces the
+// default orbit eye with an explicit world-space camera position.
+void DrawWorldFrame(const WorldShotScene& scene, int width, int height, float angleDeg,
+                    const float* camEyeOverride) {
     float center[3] = {
         0.5f * (scene.bboxMin[0] + scene.bboxMax[0]),
         0.5f * (scene.bboxMin[1] + scene.bboxMax[1]),
@@ -364,6 +367,11 @@ void DrawWorldFrame(const WorldShotScene& scene, int width, int height, float an
         center[1] + dir[1] * dist,
         center[2] + dir[2] * dist,
     };
+    if (camEyeOverride) {
+        eye[0] = camEyeOverride[0];
+        eye[1] = camEyeOverride[1];
+        eye[2] = camEyeOverride[2];
+    }
     float up[3] = { 0.0f, 0.0f, 1.0f };
     float view[16] = {};
     LookAtMatrix(eye, center, up, view);
@@ -489,7 +497,7 @@ int RunShot(int argc, char** argv) {
     );
     for (int i = 0; i < frames; ++i) {
         float t = frames <= 1 ? 1.0f : static_cast<float>(i) / static_cast<float>(frames - 1);
-        DrawWorldFrame(scene, width, height, 20.0f + 40.0f * t);
+        DrawWorldFrame(scene, width, height, 20.0f + 40.0f * t, nullptr);
         SDL_Event event = {};
         while (SDL_PollEvent(&event)) {
         }
@@ -566,6 +574,182 @@ int RunShot(int argc, char** argv) {
     WorldShot_Shutdown();
     return 0;
 }
+
+// R6a: multi-model world scene from real IDE/IPL records. Same EGL pbuffer
+// path as RunShot; the pixel loop/checksum are identical so checksums stay
+// comparable across modes (gradient vs single-DFF vs scene).
+int RunShotScene(int argc, char** argv) {
+    const char* outPath = ArgValue(argc, argv, "--shot-scene", "scene.tga");
+    const char* framesArg = ArgValue(argc, argv, "--frames", "120");
+    int frames = std::atoi(framesArg);
+    if (!outPath || outPath[0] == '\0' || frames <= 0) {
+        (void)std::printf("sceneshot-fail bad args shot-scene='%s' frames='%s'\n", outPath, framesArg);
+        return 1;
+    }
+    float camEye[3] = {};
+    const float* camOverride = nullptr;
+    const char* camArg = ArgValue(argc, argv, "--cam", nullptr);
+    if (camArg) {
+        float cx = 0.0f;
+        float cy = 0.0f;
+        float cz = 0.0f;
+        if (std::sscanf(camArg, "%f , %f , %f", &cx, &cy, &cz) != 3) {
+            (void)std::printf("sceneshot-fail bad --cam '%s' (want x,y,z)\n", camArg);
+            return 1;
+        }
+        camEye[0] = cx;
+        camEye[1] = cy;
+        camEye[2] = cz;
+        camOverride = camEye;
+    }
+    const int width = 640;
+    const int height = 480;
+    auto getPlatformDisplay = reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(
+        eglGetProcAddress("eglGetPlatformDisplayEXT")
+    );
+    if (!getPlatformDisplay) {
+        (void)std::printf("sceneshot-fail no eglGetPlatformDisplayEXT\n");
+        return 1;
+    }
+#ifndef EGL_PLATFORM_SURFACELESS_MESA
+#define EGL_PLATFORM_SURFACELESS_MESA 0x31DD
+#endif
+    EGLDisplay display = getPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
+    if (display == EGL_NO_DISPLAY) {
+        (void)std::printf("sceneshot-fail no surfaceless display 0x%x\n", eglGetError());
+        return 1;
+    }
+    if (!eglInitialize(display, nullptr, nullptr)) {
+        (void)std::printf("sceneshot-fail egl init 0x%x\n", eglGetError());
+        return 1;
+    }
+    const EGLint configAttrs[] = {
+        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
+        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+        EGL_DEPTH_SIZE, 24,
+        EGL_NONE
+    };
+    EGLConfig config = nullptr;
+    EGLint configCount = 0;
+    if (!eglChooseConfig(display, configAttrs, &config, 1, &configCount) || configCount < 1) {
+        (void)std::printf("sceneshot-fail choose config 0x%x\n", eglGetError());
+        eglTerminate(display);
+        return 1;
+    }
+    const EGLint pbufferAttrs[] = { EGL_WIDTH, width, EGL_HEIGHT, height, EGL_NONE };
+    EGLSurface surface = eglCreatePbufferSurface(display, config, pbufferAttrs);
+    if (surface == EGL_NO_SURFACE) {
+        (void)std::printf("sceneshot-fail pbuffer 0x%x\n", eglGetError());
+        eglTerminate(display);
+        return 1;
+    }
+    (void)eglBindAPI(EGL_OPENGL_API);
+    EGLContext context = eglCreateContext(display, config, EGL_NO_CONTEXT, nullptr);
+    if (context == EGL_NO_CONTEXT) {
+        (void)std::printf("sceneshot-fail context 0x%x\n", eglGetError());
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    if (!eglMakeCurrent(display, surface, surface, context)) {
+        (void)std::printf("sceneshot-fail make current 0x%x\n", eglGetError());
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    const char* glVersion = reinterpret_cast<const char*>(glGetString(GL_VERSION));
+    (void)std::printf("sceneshot-gl %s\n", glVersion ? glVersion : "(null)");
+    std::string gameDir = ResolveGameDir(argc, argv);
+    WorldShotScene scene{};
+    SceneShotStats sst{};
+    char sceneErr[512] = {};
+    if (!SceneShot_Init(gameDir.c_str(), scene, sst, sceneErr, sizeof(sceneErr))) {
+        (void)std::printf("sceneshot-fail scene %s (game=%s)\n", sceneErr, gameDir.c_str());
+        SceneShot_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    (void)std::printf(
+        "sceneshot-load models=%d tris=%d verts=%d texdicts=%d textures=%d missTex=%d missDff=%d "
+        "skippedSkin=%d bbox=[%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f] list=%s\n",
+        sst.models, sst.tris, sst.verts, sst.texDicts, sst.textures, sst.missTex, sst.missDff,
+        sst.skippedSkin, scene.bboxMin[0], scene.bboxMin[1], scene.bboxMin[2], scene.bboxMax[0],
+        scene.bboxMax[1], scene.bboxMax[2], sst.list
+    );
+    for (int i = 0; i < frames; ++i) {
+        float t = frames <= 1 ? 1.0f : static_cast<float>(i) / static_cast<float>(frames - 1);
+        DrawWorldFrame(scene, width, height, 20.0f + 40.0f * t, camOverride);
+        SDL_Event event = {};
+        while (SDL_PollEvent(&event)) {
+        }
+    }
+    std::vector<uint8> pixels(static_cast<size_t>(width) * static_cast<size_t>(height) * 4);
+    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+    GLenum glErr = glGetError();
+    if (glErr != GL_NO_ERROR) {
+        (void)std::printf("sceneshot-fail read pixels 0x%x\n", glErr);
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    uint64_t sumR = 0;
+    uint64_t sumG = 0;
+    uint64_t sumB = 0;
+    uint64_t nonBlack = 0;
+    uint64_t checksum = 1469598103934665603ULL;
+    for (size_t i = 0; i < pixels.size(); i += 4) {
+        uint64_t r = pixels[i];
+        uint64_t g = pixels[i + 1];
+        uint64_t b = pixels[i + 2];
+        sumR += r;
+        sumG += g;
+        sumB += b;
+        if (r + g + b > 16) {
+            ++nonBlack;
+        }
+        checksum ^= r + (g << 8) + (b << 16);
+        checksum *= 1099511628211ULL;
+    }
+    uint64_t total = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
+    if (nonBlack == 0) {
+        (void)std::printf("sceneshot-fail black frame\n");
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    if (!WriteTga24(outPath, width, height, pixels)) {
+        (void)std::printf("sceneshot-fail write '%s'\n", outPath);
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    eglDestroyContext(display, context);
+    eglDestroySurface(display, surface);
+    eglTerminate(display);
+    OS_DebugOut("mad-sa-linux GL scene shot");
+    (void)std::printf(
+        "sceneshot-ok models=%d tris=%d verts=%d txd=%d frames=%d out=%s nonblack=%llu/%llu "
+        "avg=%llu,%llu,%llu checksum=%llu\n",
+        sst.models, sst.tris, sst.verts, sst.textures, frames, outPath,
+        static_cast<unsigned long long>(nonBlack), static_cast<unsigned long long>(total),
+        static_cast<unsigned long long>(sumR / total), static_cast<unsigned long long>(sumG / total),
+        static_cast<unsigned long long>(sumB / total), static_cast<unsigned long long>(checksum)
+    );
+    SceneShot_Shutdown();
+    return 0;
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -584,6 +768,9 @@ int main(int argc, char** argv) {
     }
     if (HasArg(argc, argv, "--headless")) {
         return RunHeadless(argc, argv);
+    }
+    if (HasArg(argc, argv, "--shot-scene")) {
+        return RunShotScene(argc, argv);
     }
     if (HasArg(argc, argv, "--shot")) {
         return RunShot(argc, argv);
