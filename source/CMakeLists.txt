@@ -36,9 +36,19 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
         app/platform/linux/MenuNav.cpp
         app/platform/linux/ColLoad.cpp
         app/platform/linux/Collide.cpp
+        app/platform/linux/RadioDecode.cpp
     )
     target_compile_features(mad-sa-linux PRIVATE cxx_std_23)
     target_include_directories(mad-sa-linux PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    # Radio streams decode through system libvorbisfile/libogg (already in
+    # mad-sa:dev as libvorbis-dev/libogg-dev, same precedent as system
+    # OpenAL/Mesa: no Conan addition, no Dockerfile change). This is the
+    # game's own decoder family (CAEVorbisDecoder is ov_open_callbacks over
+    # the de-obfuscated stream).
+    find_path(VORBIS_INCLUDE_DIR vorbis/vorbisfile.h REQUIRED)
+    find_library(VORBISFILE_LIBRARY vorbisfile REQUIRED)
+    find_library(VORBIS_LIBRARY vorbis REQUIRED)
+    find_library(OGG_LIBRARY ogg REQUIRED)
     set_target_properties(mad-sa-linux PROPERTIES
         OUTPUT_NAME "mad-sa-linux"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
@@ -47,8 +57,8 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
     find_package(SDL3 REQUIRED)
     find_package(OpenAL REQUIRED)
     find_package(OpenGL REQUIRED)
-    target_link_libraries(mad-sa-linux PRIVATE Threads::Threads SDL3::SDL3 OpenAL::OpenAL OpenGL::GL OpenGL::EGL librw::librw)
-    target_include_directories(mad-sa-linux PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../vendor/librw)
+    target_link_libraries(mad-sa-linux PRIVATE Threads::Threads SDL3::SDL3 OpenAL::OpenAL OpenGL::GL OpenGL::EGL librw::librw ${VORBISFILE_LIBRARY} ${VORBIS_LIBRARY} ${OGG_LIBRARY})
+    target_include_directories(mad-sa-linux PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../vendor/librw ${VORBIS_INCLUDE_DIR})
     return()
 endif()
 
