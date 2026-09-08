@@ -39,5 +39,11 @@ struct MenuShotStats {
 };
 
 bool MenuShot_Render(const char* gameDir, const char* lang, std::vector<uint8_t>& outRGBA,
-                     MenuShotStats& stats, char* err, std::size_t errSize);
+                      MenuShotStats& stats, char* err, std::size_t errSize);
+// Round 8 (R6f): same frame with an explicit highlight index (0..2 selects
+// Start Game / Options / Quit Game). selectedIx==0 is bit-identical to
+// MenuShot_Render (static --shot-menu etalon path).
+bool MenuShot_RenderSelected(const char* gameDir, const char* lang, int selectedIx,
+                             std::vector<uint8_t>& outRGBA, MenuShotStats& stats, char* err,
+                             std::size_t errSize);
 void MenuShot_Shutdown();

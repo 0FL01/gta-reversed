@@ -404,10 +404,15 @@ void MenuShot_Shutdown() {
     }
 }
 
-bool MenuShot_Render(const char* gameDir, const char* lang, std::vector<uint8_t>& outRGBA,
-                     MenuShotStats& stats, char* err, std::size_t errSize) {
+static bool RenderWithSelected(const char* gameDir, const char* lang, int selectedIx,
+                               std::vector<uint8_t>& outRGBA, MenuShotStats& stats, char* err,
+                               std::size_t errSize) {
     stats = MenuShotStats{};
     (void)std::snprintf(stats.lang, sizeof(stats.lang), "%s", lang ? lang : "english");
+    if (selectedIx < 0 || selectedIx > 2) {
+        SetErr(err, errSize, "selectedIx out of range (want 0..2)");
+        return false;
+    }
     if (!gameDir || !gameDir[0]) {
         SetErr(err, errSize, "no game dir");
         return false;
@@ -455,6 +460,10 @@ bool MenuShot_Render(const char* gameDir, const char* lang, std::vector<uint8_t>
     if (!txd) {
         SetErr(err, errSize, "fonts.txd parse failed");
         return false;
+    }
+    if (s_fontTxd) {
+        s_fontTxd->destroy();
+        s_fontTxd = nullptr;
     }
     s_fontTxd = txd;
     const char* wantTex = "font2";
@@ -527,11 +536,11 @@ bool MenuShot_Render(const char* gameDir, const char* lang, std::vector<uint8_t>
     const int step = 64;
     for (int row = 1; row < 4; ++row) {
         int y = y0 + (row - 1) * step;
-        if (row == 1) { // selected: highlight bar + gold ink
+        if (row == 1 + selectedIx) { // selected: highlight bar + gold ink
             FillRect(outRGBA, 132, y - 8, 508, y + itemCellH + 8, 141, 52, 22);
         }
         uint8 cr = 225, cg = 225, cb = 225;
-        if (row == 1) {
+        if (row == 1 + selectedIx) {
             cr = 255;
             cg = 200;
             cb = 90;
@@ -540,4 +549,15 @@ bool MenuShot_Render(const char* gameDir, const char* lang, std::vector<uint8_t>
             DrawCentered(outRGBA, font, items[row], metrics, y, itemCellH, cr, cg, cb, stats);
     }
     return true;
+}
+
+bool MenuShot_Render(const char* gameDir, const char* lang, std::vector<uint8_t>& outRGBA,
+                     MenuShotStats& stats, char* err, std::size_t errSize) {
+    return RenderWithSelected(gameDir, lang, 0, outRGBA, stats, err, errSize);
+}
+
+bool MenuShot_RenderSelected(const char* gameDir, const char* lang, int selectedIx,
+                             std::vector<uint8_t>& outRGBA, MenuShotStats& stats, char* err,
+                             std::size_t errSize) {
+    return RenderWithSelected(gameDir, lang, selectedIx, outRGBA, stats, err, errSize);
 }
