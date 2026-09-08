@@ -36,6 +36,7 @@ using uint64 = uint64_t;
 #include "app/platform/linux/WorldShot.h"
 #include "app/platform/linux/SceneShot.h"
 #include "app/platform/linux/StreamPager.h"
+#include "app/platform/linux/TexSample.h"
 
 #include <sys/resource.h>
 
@@ -290,122 +291,16 @@ bool WriteTga24(const char* path, int width, int height, const std::vector<uint8
     return ok;
 }
 
-void Normalize3(float* v) {
-    float len = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-    if (len > 1e-9f) {
-        v[0] /= len;
-        v[1] /= len;
-        v[2] /= len;
-    }
-}
-
-// Column-major lookAt for the compat fixed pipeline (SA assets are Z-up).
-void LookAtMatrix(const float* eye, const float* center, const float* up, float* m) {
-    float f[3] = { center[0] - eye[0], center[1] - eye[1], center[2] - eye[2] };
-    Normalize3(f);
-    float s[3] = {
-        f[1] * up[2] - f[2] * up[1],
-        f[2] * up[0] - f[0] * up[2],
-        f[0] * up[1] - f[1] * up[0],
-    };
-    Normalize3(s);
-    float u[3] = {
-        s[1] * f[2] - s[2] * f[1],
-        s[2] * f[0] - s[0] * f[2],
-        s[0] * f[1] - s[1] * f[0],
-    };
-    m[0] = s[0]; m[4] = s[1]; m[8] = s[2];
-    m[12] = -(s[0] * eye[0] + s[1] * eye[1] + s[2] * eye[2]);
-    m[1] = u[0]; m[5] = u[1]; m[9] = u[2];
-    m[13] = -(u[0] * eye[0] + u[1] * eye[1] + u[2] * eye[2]);
-    m[2] = -f[0]; m[6] = -f[1]; m[10] = -f[2];
-    m[14] = (f[0] * eye[0] + f[1] * eye[1] + f[2] * eye[2]);
-    m[3] = 0.0f; m[7] = 0.0f; m[11] = 0.0f; m[15] = 1.0f;
-}
-
-// Rasterizes real /game geometry (WorldShot triangle soup) with CPU Lambert
-// shading. No synthetic gradient: every non-background pixel comes from a
-// DFF triangle parsed by librw. camEyeOverride (nullable) replaces the
+// Rasterizes real /game geometry (WorldShot triangle soup) with the CPU
+// sampler in TexSample (decoded TXD texels, perspective-correct UV, CPU
+// Lambert). No synthetic gradient: every non-background pixel comes from a
+// DFF triangle parsed by librw, shaded by a TXD texel (or the honest grey
+// fallback / flat material color). camEyeOverride (nullable) replaces the
 // default orbit eye with an explicit world-space camera position.
 void DrawWorldFrame(const WorldShotScene& scene, int width, int height, float angleDeg,
-                    const float* camEyeOverride) {
-    float center[3] = {
-        0.5f * (scene.bboxMin[0] + scene.bboxMax[0]),
-        0.5f * (scene.bboxMin[1] + scene.bboxMax[1]),
-        0.5f * (scene.bboxMin[2] + scene.bboxMax[2]),
-    };
-    float dx = scene.bboxMax[0] - scene.bboxMin[0];
-    float dy = scene.bboxMax[1] - scene.bboxMin[1];
-    float dz = scene.bboxMax[2] - scene.bboxMin[2];
-    float radius = 0.5f * std::sqrt(dx * dx + dy * dy + dz * dz);
-    if (!(radius > 0.5f)) {
-        radius = 0.5f;
-    }
-    glViewport(0, 0, width, height);
-    glDisable(GL_TEXTURE_2D);
-    glDisable(GL_LIGHTING);
-    glEnable(GL_DEPTH_TEST);
-    glDepthFunc(GL_LESS);
-    glClearColor(0.05f, 0.07f, 0.12f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
-    float aspect = static_cast<float>(width) / static_cast<float>(height);
-    // Fit the bounding sphere: half-angle tan is 0.5 (halfH below), so
-    // dist ~= radius / sin(atan(0.5)) ~= 2.24 * radius; keep a small margin.
-    float dist = radius * 2.35f + 0.5f;
-    float nearPlane = dist - radius * 1.8f;
-    if (nearPlane < 0.1f) {
-        nearPlane = 0.1f;
-    }
-    float farPlane = dist + radius * 6.0f;
-    float halfH = nearPlane * 0.5f;
-    glFrustum(-halfH * aspect, halfH * aspect, -halfH, halfH, nearPlane, farPlane);
-    glMatrixMode(GL_MODELVIEW);
-    glLoadIdentity();
-    float dir[3] = { 0.55f, -0.75f, 0.50f };
-    Normalize3(dir);
-    float eye[3] = {
-        center[0] + dir[0] * dist,
-        center[1] + dir[1] * dist,
-        center[2] + dir[2] * dist,
-    };
-    if (camEyeOverride) {
-        eye[0] = camEyeOverride[0];
-        eye[1] = camEyeOverride[1];
-        eye[2] = camEyeOverride[2];
-    }
-    float up[3] = { 0.0f, 0.0f, 1.0f };
-    float view[16] = {};
-    LookAtMatrix(eye, center, up, view);
-    glMultMatrixf(view);
-    // Turntable around world Z through the model center.
-    glTranslatef(center[0], center[1], center[2]);
-    glRotatef(angleDeg, 0.0f, 0.0f, 1.0f);
-    glTranslatef(-center[0], -center[1], -center[2]);
-    float light[3] = { 0.45f, -0.55f, 0.70f };
-    Normalize3(light);
-    float rad = angleDeg * 3.14159265f / 180.0f;
-    float ca = std::cos(rad);
-    float sa = std::sin(rad);
-    glBegin(GL_TRIANGLES);
-    for (const WorldShotMesh& mesh : scene.meshes) {
-        size_t count = mesh.pos.size();
-        for (size_t i = 0; i + 2 < count; i += 3) {
-            float nx = mesh.nrm[i];
-            float ny = mesh.nrm[i + 1];
-            float nz = mesh.nrm[i + 2];
-            // World-space normal follows the same Z spin as the vertices.
-            float wx = ca * nx - sa * ny;
-            float wy = sa * nx + ca * ny;
-            float d = wx * light[0] + wy * light[1] + nz * light[2];
-            float k = 0.32f + 0.68f * (d > 0.0f ? d : 0.0f);
-            glColor3f(mesh.color[0] * k, mesh.color[1] * k, mesh.color[2] * k);
-            glVertex3f(mesh.pos[i], mesh.pos[i + 1], mesh.pos[i + 2]);
-        }
-    }
-    glEnd();
-    glFinish();
+                    const float* camEyeOverride, std::vector<uint8>& outPixels,
+                    TexFrameStats& stats) {
+    TexSample_RenderOrbit(scene, width, height, angleDeg, camEyeOverride, outPixels, stats);
 }
 
 int RunShot(int argc, char** argv) {
@@ -499,23 +394,15 @@ int RunShot(int argc, char** argv) {
         scene.bboxMax[0], scene.bboxMax[1], scene.bboxMax[2]
     );
     for (int i = 0; i < frames; ++i) {
-        float t = frames <= 1 ? 1.0f : static_cast<float>(i) / static_cast<float>(frames - 1);
-        DrawWorldFrame(scene, width, height, 20.0f + 40.0f * t, nullptr);
         SDL_Event event = {};
         while (SDL_PollEvent(&event)) {
         }
     }
-    std::vector<uint8> pixels(static_cast<size_t>(width) * static_cast<size_t>(height) * 4);
-    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
-    GLenum glErr = glGetError();
-    if (glErr != GL_NO_ERROR) {
-        (void)std::printf("shot-fail read pixels 0x%x\n", glErr);
-        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-        eglDestroyContext(display, context);
-        eglDestroySurface(display, surface);
-        eglTerminate(display);
-        return 1;
-    }
+    // The captured frame is the final turntable angle (as before: only the
+    // last frame was ever read back). CPU rasterizer, no GL drawing.
+    std::vector<uint8> pixels;
+    TexFrameStats texStats{};
+    DrawWorldFrame(scene, width, height, 60.0f, nullptr, pixels, texStats);
     uint64_t sumR = 0;
     uint64_t sumG = 0;
     uint64_t sumB = 0;
@@ -556,6 +443,17 @@ int RunShot(int argc, char** argv) {
     eglDestroySurface(display, surface);
     eglTerminate(display);
     OS_DebugOut("mad-sa-linux GL shot");
+    (void)std::printf(
+        "texshot-ok tris=%d sampledTri=%d texelFetch=%ld greyFallback=%d flatTri=%d texPixels=%ld "
+        "uv=[%.3f,%.3f]x[%.3f,%.3f] firstTex=%s texel=%d,%d,%d,%d pixel=%d,%d,%d render=cpu\n",
+        texStats.tris, texStats.sampledTri, texStats.texelFetch, texStats.fallbackTri, texStats.flatTri,
+        texStats.texPixels, texStats.haveUV ? texStats.uvMin[0] : 0.0f,
+        texStats.haveUV ? texStats.uvMax[0] : 0.0f, texStats.haveUV ? texStats.uvMin[1] : 0.0f,
+        texStats.haveUV ? texStats.uvMax[1] : 0.0f, texStats.haveFirst ? texStats.firstTex : "-",
+        texStats.firstTexel[0], texStats.firstTexel[1], texStats.firstTexel[2],
+        texStats.firstTexel[3], texStats.firstPixel[0], texStats.firstPixel[1],
+        texStats.firstPixel[2]
+    );
     (void)std::printf(
         "worldshot-ok dff=%s tris=%d verts=%d txd=%s textures=%d frames=%d out=%s nonblack=%llu/%llu checksum=%llu\n",
         wst.dffName, wst.triangles, wst.vertices,
@@ -685,23 +583,13 @@ int RunShotScene(int argc, char** argv) {
         scene.bboxMax[1], scene.bboxMax[2], sst.list
     );
     for (int i = 0; i < frames; ++i) {
-        float t = frames <= 1 ? 1.0f : static_cast<float>(i) / static_cast<float>(frames - 1);
-        DrawWorldFrame(scene, width, height, 20.0f + 40.0f * t, camOverride);
         SDL_Event event = {};
         while (SDL_PollEvent(&event)) {
         }
     }
-    std::vector<uint8> pixels(static_cast<size_t>(width) * static_cast<size_t>(height) * 4);
-    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
-    GLenum glErr = glGetError();
-    if (glErr != GL_NO_ERROR) {
-        (void)std::printf("sceneshot-fail read pixels 0x%x\n", glErr);
-        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-        eglDestroyContext(display, context);
-        eglDestroySurface(display, surface);
-        eglTerminate(display);
-        return 1;
-    }
+    std::vector<uint8> pixels;
+    TexFrameStats texStats{};
+    DrawWorldFrame(scene, width, height, 60.0f, camOverride, pixels, texStats);
     uint64_t sumR = 0;
     uint64_t sumG = 0;
     uint64_t sumB = 0;
@@ -743,6 +631,17 @@ int RunShotScene(int argc, char** argv) {
     eglTerminate(display);
     OS_DebugOut("mad-sa-linux GL scene shot");
     (void)std::printf(
+        "tex-ok tris=%d sampledTri=%d texelFetch=%ld greyFallback=%d flatTri=%d texPixels=%ld "
+        "uv=[%.3f,%.3f]x[%.3f,%.3f] firstTex=%s texel=%d,%d,%d,%d pixel=%d,%d,%d render=cpu\n",
+        texStats.tris, texStats.sampledTri, texStats.texelFetch, texStats.fallbackTri, texStats.flatTri,
+        texStats.texPixels, texStats.haveUV ? texStats.uvMin[0] : 0.0f,
+        texStats.haveUV ? texStats.uvMax[0] : 0.0f, texStats.haveUV ? texStats.uvMin[1] : 0.0f,
+        texStats.haveUV ? texStats.uvMax[1] : 0.0f, texStats.haveFirst ? texStats.firstTex : "-",
+        texStats.firstTexel[0], texStats.firstTexel[1], texStats.firstTexel[2],
+        texStats.firstTexel[3], texStats.firstPixel[0], texStats.firstPixel[1],
+        texStats.firstPixel[2]
+    );
+    (void)std::printf(
         "sceneshot-ok models=%d tris=%d verts=%d txd=%d frames=%d out=%s nonblack=%llu/%llu "
         "avg=%llu,%llu,%llu checksum=%llu\n",
         sst.models, sst.tris, sst.verts, sst.textures, frames, outPath,
@@ -754,50 +653,14 @@ int RunShotScene(int argc, char** argv) {
     return 0;
 }
 
-// R6b: path-driven frame. Same triangle soup + CPU Lambert as DrawWorldFrame
+// R6b: path-driven frame. Same triangle soup + CPU sampler as DrawWorldFrame
 // but the camera is fully determined by the path: eye at the waypoint,
 // lookAt forward along the segment yaw with a fixed -10deg pitch, fixed
 // 60deg-vertical frustum. No turntable: re-running the same path must give
 // the same pixels.
 void DrawE2EFrame(const WorldShotScene& scene, int width, int height, const float* eye,
-                  const float* target) {
-    glViewport(0, 0, width, height);
-    glDisable(GL_TEXTURE_2D);
-    glDisable(GL_LIGHTING);
-    glEnable(GL_DEPTH_TEST);
-    glDepthFunc(GL_LESS);
-    glClearColor(0.05f, 0.07f, 0.12f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
-    float aspect = static_cast<float>(width) / static_cast<float>(height);
-    const float nearPlane = 1.0f;
-    const float farPlane = 6000.0f;
-    const float halfH = nearPlane * 0.57735027f; // tan(30deg)
-    glFrustum(-halfH * aspect, halfH * aspect, -halfH, halfH, nearPlane, farPlane);
-    glMatrixMode(GL_MODELVIEW);
-    glLoadIdentity();
-    float up[3] = { 0.0f, 0.0f, 1.0f };
-    float view[16] = {};
-    LookAtMatrix(eye, target, up, view);
-    glMultMatrixf(view);
-    float light[3] = { 0.45f, -0.55f, 0.70f };
-    Normalize3(light);
-    glBegin(GL_TRIANGLES);
-    for (const WorldShotMesh& mesh : scene.meshes) {
-        size_t count = mesh.pos.size();
-        for (size_t i = 0; i + 2 < count; i += 3) {
-            float nx = mesh.nrm[i];
-            float ny = mesh.nrm[i + 1];
-            float nz = mesh.nrm[i + 2];
-            float d = nx * light[0] + ny * light[1] + nz * light[2];
-            float k = 0.32f + 0.68f * (d > 0.0f ? d : 0.0f);
-            glColor3f(mesh.color[0] * k, mesh.color[1] * k, mesh.color[2] * k);
-            glVertex3f(mesh.pos[i], mesh.pos[i + 1], mesh.pos[i + 2]);
-        }
-    }
-    glEnd();
-    glFinish();
+                  const float* target, std::vector<uint8>& outPixels, TexFrameStats& stats) {
+    TexSample_RenderPath(scene, width, height, eye, target, outPixels, stats);
 }
 
 uint64_t PixelsChecksum(const std::vector<uint8>& pixels, uint64_t& sumR, uint64_t& sumG, uint64_t& sumB,
@@ -952,6 +815,7 @@ int RunE2E(int argc, char** argv) {
     );
     std::vector<uint64_t> checksums;
     checksums.reserve(static_cast<size_t>(waypoints));
+    TexFrameStats texAgg{};
     int totalFrames = 0;
     bool failed = false;
     for (int w = 0; w < waypoints && !failed; ++w) {
@@ -1002,19 +866,54 @@ int RunE2E(int argc, char** argv) {
             );
         }
         for (int f = 0; f < framesPerLeg; ++f) {
-            DrawE2EFrame(scene, width, height, eye, target);
             SDL_Event event = {};
             while (SDL_PollEvent(&event)) {
             }
         }
         totalFrames += framesPerLeg;
-        std::vector<uint8> pixels(static_cast<size_t>(width) * static_cast<size_t>(height) * 4);
-        glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
-        GLenum glErr = glGetError();
-        if (glErr != GL_NO_ERROR) {
-            (void)std::printf("e2e-fail read pixels wp=%d 0x%x\n", w, glErr);
-            failed = true;
-            break;
+        std::vector<uint8> pixels;
+        TexFrameStats texStats{};
+        DrawE2EFrame(scene, width, height, eye, target, pixels, texStats);
+        texAgg.tris += texStats.tris;
+        texAgg.sampledTri += texStats.sampledTri;
+        texAgg.fallbackTri += texStats.fallbackTri;
+        texAgg.flatTri += texStats.flatTri;
+        texAgg.texelFetch += texStats.texelFetch;
+        texAgg.texPixels += texStats.texPixels;
+        texAgg.fallbackPixels += texStats.fallbackPixels;
+        texAgg.flatPixels += texStats.flatPixels;
+        if (texStats.haveUV) {
+            if (!texAgg.haveUV) {
+                texAgg.uvMin[0] = texStats.uvMin[0];
+                texAgg.uvMax[0] = texStats.uvMax[0];
+                texAgg.uvMin[1] = texStats.uvMin[1];
+                texAgg.uvMax[1] = texStats.uvMax[1];
+                texAgg.haveUV = true;
+            } else {
+                if (texStats.uvMin[0] < texAgg.uvMin[0]) {
+                    texAgg.uvMin[0] = texStats.uvMin[0];
+                }
+                if (texStats.uvMax[0] > texAgg.uvMax[0]) {
+                    texAgg.uvMax[0] = texStats.uvMax[0];
+                }
+                if (texStats.uvMin[1] < texAgg.uvMin[1]) {
+                    texAgg.uvMin[1] = texStats.uvMin[1];
+                }
+                if (texStats.uvMax[1] > texAgg.uvMax[1]) {
+                    texAgg.uvMax[1] = texStats.uvMax[1];
+                }
+            }
+        }
+        if (!texAgg.haveFirst && texStats.haveFirst) {
+            texAgg.haveFirst = true;
+            (void)std::snprintf(texAgg.firstTex, sizeof(texAgg.firstTex), "%s",
+                                texStats.firstTex);
+            for (int k = 0; k < 4; ++k) {
+                texAgg.firstTexel[k] = texStats.firstTexel[k];
+            }
+            for (int k = 0; k < 3; ++k) {
+                texAgg.firstPixel[k] = texStats.firstPixel[k];
+            }
         }
         uint64_t sumR = 0;
         uint64_t sumG = 0;
@@ -1071,6 +970,16 @@ int RunE2E(int argc, char** argv) {
         cs += cell;
     }
     OS_DebugOut("mad-sa-linux e2e living world");
+    (void)std::printf(
+        "texe2e-ok tris=%d sampledTri=%d texelFetch=%ld greyFallback=%d flatTri=%d texPixels=%ld "
+        "uv=[%.3f,%.3f]x[%.3f,%.3f] firstTex=%s texel=%d,%d,%d,%d pixel=%d,%d,%d render=cpu\n",
+        texAgg.tris, texAgg.sampledTri, texAgg.texelFetch, texAgg.fallbackTri, texAgg.flatTri,
+        texAgg.texPixels, texAgg.haveUV ? texAgg.uvMin[0] : 0.0f,
+        texAgg.haveUV ? texAgg.uvMax[0] : 0.0f, texAgg.haveUV ? texAgg.uvMin[1] : 0.0f,
+        texAgg.haveUV ? texAgg.uvMax[1] : 0.0f, texAgg.haveFirst ? texAgg.firstTex : "-",
+        texAgg.firstTexel[0], texAgg.firstTexel[1], texAgg.firstTexel[2], texAgg.firstTexel[3],
+        texAgg.firstPixel[0], texAgg.firstPixel[1], texAgg.firstPixel[2]
+    );
     (void)std::printf(
         "world-ok waypoints=%d frames=%d sectorsLoaded=%d sectorsEvicted=%d modelsPeak=%d "
         "trisPeak=%d checksums=%s\n",

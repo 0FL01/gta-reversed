@@ -17,6 +17,8 @@
 #include <map>
 #include <set>
 
+#include "app/platform/linux/TexSample.h"
+
 // --- Basic RE types (mirrors `source/Base.h`, standalone-safe) ---
 // Must precede `oswrapper.h`, same as in MainLinux.cpp.
 using int8 = int8_t;
@@ -442,21 +444,6 @@ bool RwInitEngine() {
     return true;
 }
 
-rw::Clump* ParseClump(const std::vector<uint8>& bytes) {
-    if (bytes.size() < 12) {
-        return nil;
-    }
-    rw::StreamMemory stream;
-    stream.open(const_cast<uint8*>(bytes.data()), static_cast<uint32>(bytes.size()));
-    if (!rw::findChunk(&stream, rw::ID_CLUMP, nil, nil)) {
-        stream.close();
-        return nil;
-    }
-    rw::Clump* clump = rw::Clump::streamRead(&stream);
-    stream.close();
-    return clump;
-}
-
 rw::TexDictionary* ParseTxd(const std::vector<uint8>& bytes) {
     if (bytes.size() < 12) {
         return nil;
@@ -515,15 +502,27 @@ struct CachedModel {
     // Object-space flat triangle soup (LTM applied, instance pending).
     std::vector<float> pos;
     std::vector<float> nrm;
+    std::vector<float> uv; // 6 floats per triangle (u,v per vertex)
+    // Per-triangle local image index: >=0 into images, -1 flat, -2 missing.
+    std::vector<int> triImg;
+    std::vector<float> triCol; // 3 floats per triangle (material color)
+    std::vector<WorldShotImage> images; // decoded TXD texels for this model
     int tris = 0;
 };
 
-// Flattens every atomic of the clump to object space. Returns false for
-// skinned geometry (not a static world object) or zero triangles.
-bool FlattenClumpStatic(rw::Clump* clump, CachedModel& out) {
+// Flattens every atomic of the linked clump to object space. Returns false
+// for skinned geometry (not a static world object) or zero triangles.
+// Material linkage comes from lc (LinkedParse): nil = flat (-1), resolved
+// real = decoded image, wanted-but-missing = -2 (grey fallback at render).
+bool FlattenClumpStatic(rw::Clump* clump, const LinkedClump& lc, CachedModel& out) {
     out.pos.clear();
     out.nrm.clear();
+    out.uv.clear();
+    out.triImg.clear();
+    out.triCol.clear();
+    out.images.clear();
     out.tris = 0;
+    std::map<const rw::Texture*, int> imgCache;
     FORLIST(link, clump->atomics) {
         rw::Atomic* atomic = rw::Atomic::fromClump(link);
         rw::Geometry* geo = atomic ? atomic->geometry : nil;
@@ -539,6 +538,7 @@ bool FlattenClumpStatic(rw::Clump* clump, CachedModel& out) {
         const int numVerts = geo->numVertices;
         rw::V3d* verts = geo->morphTargets[0].vertices;
         rw::V3d* norms = (geo->flags & rw::Geometry::NORMALS) ? geo->morphTargets[0].normals : nil;
+        rw::TexCoords* uvs = geo->texCoords[0];
         std::vector<rw::V3d> objVerts(static_cast<size_t>(numVerts));
         std::vector<rw::V3d> objNorms(norms ? static_cast<size_t>(numVerts) : 0);
         rw::Frame* frame = atomic->getFrame();
@@ -557,14 +557,52 @@ bool FlattenClumpStatic(rw::Clump* clump, CachedModel& out) {
             }
         }
         size_t base = out.pos.size();
+        size_t triBase = out.triImg.size();
         out.pos.resize(base + static_cast<size_t>(geo->numTriangles) * 9);
         out.nrm.resize(base + static_cast<size_t>(geo->numTriangles) * 9);
+        out.uv.resize(base / 3 * 2 + static_cast<size_t>(geo->numTriangles) * 6);
         size_t w = base;
+        size_t wuv = triBase * 6;
         int kept = 0;
+        std::vector<int> keptImg;
+        std::vector<float> keptCol;
+        keptImg.reserve(static_cast<size_t>(geo->numTriangles));
+        keptCol.reserve(static_cast<size_t>(geo->numTriangles) * 3);
         for (int t = 0; t < geo->numTriangles; ++t) {
             const rw::Triangle& tri = geo->triangles[t];
             if (tri.v[0] >= numVerts || tri.v[1] >= numVerts || tri.v[2] >= numVerts) {
                 continue;
+            }
+            int imgIdx = -1;
+            float matCol[3] = { 1.0f, 1.0f, 1.0f };
+            rw::Material* mat =
+                (tri.matId < geo->matList.numMaterials) ? geo->matList.materials[tri.matId] : nil;
+            if (mat) {
+                matCol[0] = mat->color.red / 255.0f;
+                matCol[1] = mat->color.green / 255.0f;
+                matCol[2] = mat->color.blue / 255.0f;
+                if (mat->texture) {
+                    auto rit = lc.resolved.find(mat->texture);
+                    if (rit != lc.resolved.end() && rit->second.real) {
+                        const rw::Texture* real = rit->second.real;
+                        auto cit = imgCache.find(real);
+                        if (cit != imgCache.end()) {
+                            imgIdx = cit->second;
+                        } else {
+                            TexImage decoded;
+                            if (TexSample_Decode(real, decoded)) {
+                                decoded.filter = rit->second.filter;
+                                imgIdx = static_cast<int>(out.images.size());
+                                out.images.push_back(std::move(decoded));
+                                imgCache[real] = imgIdx;
+                            } else {
+                                imgIdx = -2;
+                            }
+                        }
+                    } else {
+                        imgIdx = -2;
+                    }
+                }
             }
             const rw::V3d* p[3] = { &objVerts[tri.v[0]], &objVerts[tri.v[1]], &objVerts[tri.v[2]] };
             float face[3];
@@ -595,12 +633,31 @@ bool FlattenClumpStatic(rw::Clump* clump, CachedModel& out) {
                     out.nrm[w + 1] = face[1];
                     out.nrm[w + 2] = face[2];
                 }
+                if (uvs) {
+                    out.uv[wuv] = uvs[tri.v[k]].u;
+                    out.uv[wuv + 1] = uvs[tri.v[k]].v;
+                } else {
+                    out.uv[wuv] = 0.0f;
+                    out.uv[wuv + 1] = 0.0f;
+                }
                 w += 3;
+                wuv += 2;
             }
+            keptImg.push_back(imgIdx);
+            keptCol.push_back(matCol[0]);
+            keptCol.push_back(matCol[1]);
+            keptCol.push_back(matCol[2]);
             ++kept;
         }
         out.pos.resize(base + static_cast<size_t>(kept) * 9);
         out.nrm.resize(base + static_cast<size_t>(kept) * 9);
+        out.uv.resize(triBase * 6 + static_cast<size_t>(kept) * 6);
+        for (int i = 0; i < kept; ++i) {
+            out.triImg.push_back(keptImg[static_cast<size_t>(i)]);
+            out.triCol.push_back(keptCol[static_cast<size_t>(i) * 3]);
+            out.triCol.push_back(keptCol[static_cast<size_t>(i) * 3 + 1]);
+            out.triCol.push_back(keptCol[static_cast<size_t>(i) * 3 + 2]);
+        }
         out.tris += kept;
     }
     return out.tris > 0;
@@ -659,6 +716,7 @@ bool SceneShot_Init(const char* gameDir, WorldShotScene& scene, SceneShotStats& 
                     std::size_t errSize) {
     stats = SceneShotStats{};
     scene.meshes.clear();
+    scene.images.clear();
     if (!gameDir || !gameDir[0]) {
         SetErr(err, errSize, "no game dir");
         return false;
@@ -780,6 +838,7 @@ bool SceneShot_Init(const char* gameDir, WorldShotScene& scene, SceneShotStats& 
     const size_t kScanCap = 3000;
     std::map<std::string, CachedModel> modelCache; // lower name -> mesh (ordered)
     std::set<std::string> failedModels;
+    std::map<std::string, int> globalImg; // texture name -> scene image (ordered)
     std::string listAcc;
     bool haveBox = false;
     size_t scanned = 0;
@@ -852,15 +911,35 @@ bool SceneShot_Init(const char* gameDir, WorldShotScene& scene, SceneShotStats& 
                 failedModels.insert(key);
                 continue;
             }
-            rw::Clump* clump = ParseClump(dffBytes);
-            if (!clump) {
+            // R6c: resolve wanted texture names against the model's TXD
+            // first, then every other resident dictionary (deterministic
+            // s_txdOrder sequence). Dummies never escape LinkedParse.
+            rw::TexDictionary* primary = nil;
+            if (!txdName.empty()) {
+                std::string txdKey = txdName;
+                ToLowerInPlace(txdKey);
+                auto tit = s_txds.find(txdKey);
+                if (tit != s_txds.end()) {
+                    primary = tit->second;
+                }
+            }
+            std::vector<rw::TexDictionary*> fb;
+            for (rw::TexDictionary* txd : s_txdOrder) {
+                if (txd && txd != primary) {
+                    fb.push_back(txd);
+                }
+            }
+            LinkedClump lc = TexSample_LinkedParse(dffBytes.data(), dffBytes.size(), primary,
+                                                   fb.empty() ? nullptr : fb.data(), fb.size());
+            if (!lc.clump) {
+                TexSample_FreeLinked(lc);
                 ++stats.missDff;
                 failedModels.insert(key);
                 continue;
             }
             CachedModel cached;
-            bool ok = FlattenClumpStatic(clump, cached);
-            clump->destroy();
+            bool ok = FlattenClumpStatic(lc.clump, lc, cached);
+            TexSample_FreeLinked(lc);
             if (!ok) {
                 ++stats.skippedSkin; // skinned or GPU-only: honestly skipped
                 failedModels.insert(key);
@@ -872,6 +951,8 @@ bool SceneShot_Init(const char* gameDir, WorldShotScene& scene, SceneShotStats& 
         const CachedModel& cached = cacheIt->second;
 
         // Instance transform: CMatrix::SetRotate(quat) basis + IPL position.
+        // UVs/material colors copy through; local image indices remap to the
+        // scene-global decoded table by texture name (deterministic order).
         float right[3];
         float fwd[3];
         float up[3];
@@ -882,6 +963,29 @@ bool SceneShot_Init(const char* gameDir, WorldShotScene& scene, SceneShotStats& 
         size_t count = cached.pos.size();
         mesh.pos.resize(count);
         mesh.nrm.resize(count);
+        mesh.uv.resize(cached.uv.size());
+        mesh.triImg.resize(cached.triImg.size());
+        mesh.triCol.resize(cached.triCol.size());
+        for (size_t ti = 0; ti < cached.triImg.size(); ++ti) {
+            int local = cached.triImg[ti];
+            if (local >= 0 && local < static_cast<int>(cached.images.size())) {
+                const WorldShotImage& src = cached.images[local];
+                auto git = globalImg.find(src.name);
+                if (git != globalImg.end()) {
+                    mesh.triImg[ti] = git->second;
+                } else {
+                    int gi = static_cast<int>(scene.images.size());
+                    scene.images.push_back(src);
+                    globalImg[src.name] = gi;
+                    mesh.triImg[ti] = gi;
+                }
+            } else {
+                mesh.triImg[ti] = local; // -1 flat or -2 missing
+            }
+            mesh.triCol[ti * 3] = cached.triCol[ti * 3];
+            mesh.triCol[ti * 3 + 1] = cached.triCol[ti * 3 + 1];
+            mesh.triCol[ti * 3 + 2] = cached.triCol[ti * 3 + 2];
+        }
         for (size_t i = 0; i < count; i += 3) {
             float lx = cached.pos[i];
             float ly = cached.pos[i + 1];
@@ -907,6 +1011,14 @@ bool SceneShot_Init(const char* gameDir, WorldShotScene& scene, SceneShotStats& 
             mesh.nrm[i] = rx;
             mesh.nrm[i + 1] = ry;
             mesh.nrm[i + 2] = rz;
+            {
+                // i steps over pos floats; uv has 2 floats per vertex.
+                size_t vi2 = (i / 3) * 2;
+                if (vi2 + 1 < cached.uv.size()) {
+                    mesh.uv[vi2] = cached.uv[vi2];
+                    mesh.uv[vi2 + 1] = cached.uv[vi2 + 1];
+                }
+            }
             if (!haveBox) {
                 scene.bboxMin[0] = scene.bboxMax[0] = wx;
                 scene.bboxMin[1] = scene.bboxMax[1] = wy;

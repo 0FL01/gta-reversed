@@ -3,6 +3,7 @@
 // registration (mirrors librw's clumpview attachPlugins), stream parsing.
 
 #include "app/platform/linux/WorldShot.h"
+#include "app/platform/linux/TexSample.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -10,6 +11,7 @@
 #include <cmath>
 #include <string>
 #include <vector>
+#include <map>
 
 // --- Basic RE types (mirrors `source/Base.h`, standalone-safe) ---
 // Must precede `oswrapper.h`, same as in MainLinux.cpp.
@@ -166,22 +168,6 @@ bool RwInitEngine() {
     return true;
 }
 
-rw::Clump* ParseClump(const std::vector<uint8>& bytes) {
-    if (bytes.size() < 12) {
-        return nil;
-    }
-    rw::StreamMemory stream;
-    // StreamMemory::open does not copy; bytes must outlive the parse.
-    stream.open(const_cast<uint8*>(bytes.data()), static_cast<uint32>(bytes.size()));
-    if (!rw::findChunk(&stream, rw::ID_CLUMP, nil, nil)) {
-        stream.close();
-        return nil;
-    }
-    rw::Clump* clump = rw::Clump::streamRead(&stream);
-    stream.close();
-    return clump;
-}
-
 rw::TexDictionary* ParseTxd(const std::vector<uint8>& bytes) {
     if (bytes.size() < 12) {
         return nil;
@@ -238,13 +224,17 @@ void MeshColor(int index, float* rgb) {
     rgb[2] = pick[2];
 }
 
-// Flattens every atomic of the clump into world-space triangles.
+// Flattens every atomic of the clump into world-space triangles, carrying
+// UVs, per-triangle material colors and decoded TXD image indices.
+// triImg: >=0 scene image, -1 untextured by design, -2 wanted but missing.
 // Returns the triangle count (0 = unusable for render).
-int FlattenClump(rw::Clump* clump, WorldShotScene& scene) {
+int FlattenClump(rw::Clump* clump, const LinkedClump& lc, WorldShotScene& scene) {
     int meshIndex = 0;
     int totalTris = 0;
     int totalVerts = 0;
     scene.meshes.clear();
+    scene.images.clear();
+    std::map<const rw::Texture*, int> imgCache; // real TXD texture -> scene image
     bool first = true;
     {
         FORLIST(link, clump->atomics) {
@@ -259,6 +249,7 @@ int FlattenClump(rw::Clump* clump, WorldShotScene& scene) {
             const int numVerts = geo->numVertices;
             rw::V3d* verts = geo->morphTargets[0].vertices;
             rw::V3d* norms = (geo->flags & rw::Geometry::NORMALS) ? geo->morphTargets[0].normals : nil;
+            rw::TexCoords* uvs = geo->texCoords[0];
             // To world space through the atomic frame (static props: ~identity).
             std::vector<rw::V3d> worldVerts(static_cast<size_t>(numVerts));
             std::vector<rw::V3d> worldNorms(norms ? static_cast<size_t>(numVerts) : 0);
@@ -282,10 +273,47 @@ int FlattenClump(rw::Clump* clump, WorldShotScene& scene) {
             mesh.tris = 0;
             mesh.pos.reserve(static_cast<size_t>(geo->numTriangles) * 9);
             mesh.nrm.reserve(static_cast<size_t>(geo->numTriangles) * 9);
+            mesh.uv.reserve(static_cast<size_t>(geo->numTriangles) * 6);
+            mesh.triImg.reserve(static_cast<size_t>(geo->numTriangles));
+            mesh.triCol.reserve(static_cast<size_t>(geo->numTriangles) * 3);
             for (int t = 0; t < geo->numTriangles; ++t) {
                 const rw::Triangle& tri = geo->triangles[t];
                 if (tri.v[0] >= numVerts || tri.v[1] >= numVerts || tri.v[2] >= numVerts) {
                     continue;
+                }
+                // Material linkage: nil = untextured by design (-1), dummy
+                // with real bytes = decoded image, dummy without = miss (-2).
+                int imgIdx = -1;
+                float matCol[3] = { 1.0f, 1.0f, 1.0f };
+                rw::Material* mat = (tri.matId < geo->matList.numMaterials)
+                                        ? geo->matList.materials[tri.matId]
+                                        : nil;
+                if (mat) {
+                    matCol[0] = mat->color.red / 255.0f;
+                    matCol[1] = mat->color.green / 255.0f;
+                    matCol[2] = mat->color.blue / 255.0f;
+                    if (mat->texture) {
+                        auto rit = lc.resolved.find(mat->texture);
+                        if (rit != lc.resolved.end() && rit->second.real) {
+                            const rw::Texture* real = rit->second.real;
+                            auto cit = imgCache.find(real);
+                            if (cit != imgCache.end()) {
+                                imgIdx = cit->second;
+                            } else {
+                                TexImage decoded;
+                                if (TexSample_Decode(real, decoded)) {
+                                    decoded.filter = rit->second.filter;
+                                    imgIdx = static_cast<int>(scene.images.size());
+                                    scene.images.push_back(std::move(decoded));
+                                    imgCache[real] = imgIdx;
+                                } else {
+                                    imgIdx = -2; // undecodable: honest fallback
+                                }
+                            }
+                        } else {
+                            imgIdx = -2; // wanted but missing
+                        }
+                    }
                 }
                 const rw::V3d* p[3] = {
                     &worldVerts[tri.v[0]],
@@ -320,6 +348,13 @@ int FlattenClump(rw::Clump* clump, WorldShotScene& scene) {
                         mesh.nrm.push_back(face[1]);
                         mesh.nrm.push_back(face[2]);
                     }
+                    if (uvs) {
+                        mesh.uv.push_back(uvs[tri.v[k]].u);
+                        mesh.uv.push_back(uvs[tri.v[k]].v);
+                    } else {
+                        mesh.uv.push_back(0.0f);
+                        mesh.uv.push_back(0.0f);
+                    }
                     if (first) {
                         scene.bboxMin[0] = scene.bboxMax[0] = p[k]->x;
                         scene.bboxMin[1] = scene.bboxMax[1] = p[k]->y;
@@ -334,6 +369,10 @@ int FlattenClump(rw::Clump* clump, WorldShotScene& scene) {
                         if (p[k]->z > scene.bboxMax[2]) scene.bboxMax[2] = p[k]->z;
                     }
                 }
+                mesh.triImg.push_back(imgIdx);
+                mesh.triCol.push_back(matCol[0]);
+                mesh.triCol.push_back(matCol[1]);
+                mesh.triCol.push_back(matCol[2]);
                 ++mesh.tris;
             }
             if (mesh.tris > 0) {
@@ -383,9 +422,11 @@ bool WorldShot_Init(const char* gameDir, WorldShotScene& scene, char* err, std::
     s_clump = nil;
     s_txd = nil;
 
-    // TXD first: DFF materials resolve texture names against the current
-    // dictionary during Clump::streamRead.
-    static const TxdCandidate kTxds[] = {
+    // Per-DFF TXD resolution (R6c): DFF materials name TXD texels, so each
+    // candidate parses against its own model TXD first (<base>.txd from the
+    // same archive: cityhall_sfs.dff -> cityhall_sfs.txd), then the generic
+    // fallbacks. LinkedParse resolves wanted names across all of them.
+    static const TxdCandidate kTxdFallbacks[] = {
         { "models/gta3.img", "weemap.txd", nullptr, "gta3.img:weemap.txd" },
         { nullptr, nullptr, "models/generic/vehicle.txd", "models/generic/vehicle.txd" },
         { nullptr, nullptr, "models/hud.txd", "models/hud.txd" },
@@ -395,46 +436,6 @@ bool WorldShot_Init(const char* gameDir, WorldShotScene& scene, char* err, std::
     scene.stats.firstTexture[0] = '\0';
     scene.stats.firstTexW = 0;
     scene.stats.firstTexH = 0;
-    for (const TxdCandidate& cand : kTxds) {
-        std::vector<uint8> bytes;
-        if (!LoadAssetBytes(cand.img, cand.entry, cand.loose, bytes)) {
-            continue;
-        }
-        rw::TexDictionary* txd = ParseTxd(bytes);
-        if (!txd || txd->count() <= 0) {
-            if (txd) {
-                txd->destroy();
-            }
-            continue;
-        }
-        s_txd = txd;
-        rw::TexDictionary::setCurrent(txd);
-        (void)std::snprintf(scene.stats.txdName, sizeof(scene.stats.txdName), "%s", cand.label);
-        scene.stats.textures = txd->count();
-        {
-            FORLIST(link, txd->textures) {
-                rw::Texture* tex = rw::Texture::fromDict(link);
-                if (!tex) {
-                    continue;
-                }
-                (void)std::snprintf(
-                    scene.stats.firstTexture, sizeof(scene.stats.firstTexture), "%s", tex->name
-                );
-                scene.stats.firstTexW = tex->raster ? tex->raster->width : 0;
-                scene.stats.firstTexH = tex->raster ? tex->raster->height : 0;
-                break;
-            }
-        }
-        break;
-    }
-    if (!s_txd) {
-        // TXD is best-effort stats, but the stream reader still needs a
-        // current dictionary so textured materials parse to nil safely.
-        s_txd = rw::TexDictionary::create();
-        if (s_txd) {
-            rw::TexDictionary::setCurrent(s_txd);
-        }
-    }
 
     static const DffCandidate kDffs[] = {
         { "models/gta3.img", "fbiranch.dff", nullptr, "gta3.img:fbiranch.dff" },
@@ -446,7 +447,12 @@ bool WorldShot_Init(const char* gameDir, WorldShotScene& scene, char* err, std::
         { nullptr, nullptr, "models/grass/grass0_1.dff", "models/grass/grass0_1.dff" },
     };
     char dffLabel[128] = {};
+    char txdLabel[128] = {};
     int bestTris = 0;
+    int bestTextures = 0;
+    char bestFirstTex[40] = {};
+    int bestFirstW = 0;
+    int bestFirstH = 0;
     // Try every candidate; keep the richest one so the frame shows real
     // 3D volume (flat decals like the helipad rasterize to a thin strip).
     for (const DffCandidate& cand : kDffs) {
@@ -454,22 +460,117 @@ bool WorldShot_Init(const char* gameDir, WorldShotScene& scene, char* err, std::
         if (!LoadAssetBytes(cand.img, cand.entry, cand.loose, bytes)) {
             continue;
         }
-        rw::Clump* clump = ParseClump(bytes);
-        if (!clump) {
-            continue;
-        }
-        WorldShotScene probe;
-        int tris = FlattenClump(clump, probe);
-        if (tris <= 0) {
-            clump->destroy();
-            continue;
-        }
-        if (!s_clump || tris > bestTris) {
-            if (s_clump) {
-                s_clump->destroy();
+        // Primary TXD: <base>.txd next to the DFF (same IMG or loose dir).
+        rw::TexDictionary* primary = nil;
+        char primaryLabel[128] = {};
+        {
+            std::string base;
+            if (cand.entry) {
+                base = cand.entry;
+            } else if (cand.loose) {
+                const char* slash = std::strrchr(cand.loose, '/');
+                base = slash ? slash + 1 : cand.loose;
             }
-            s_clump = clump;
+            size_t dot = base.rfind('.');
+            if (dot != std::string::npos) {
+                std::string txdName = base.substr(0, dot) + ".txd";
+                std::vector<uint8> txdBytes;
+                bool got = false;
+                if (cand.img) {
+                    got = ImgReadEntry(cand.img, txdName.c_str(), txdBytes);
+                } else if (cand.loose) {
+                    std::string dir(cand.loose);
+                    size_t s = dir.rfind('/');
+                    std::string rel = (s == std::string::npos)
+                                          ? txdName
+                                          : dir.substr(0, s + 1) + txdName;
+                    got = LoadAssetBytes(nullptr, nullptr, rel.c_str(), txdBytes);
+                }
+                if (got && !txdBytes.empty()) {
+                    primary = ParseTxd(txdBytes);
+                    if (primary && primary->count() <= 0) {
+                        primary->destroy();
+                        primary = nil;
+                    } else if (primary) {
+                        if (cand.img) {
+                            (void)std::snprintf(primaryLabel, sizeof(primaryLabel),
+                                                "gta3.img:%s", txdName.c_str());
+                        } else {
+                            (void)std::snprintf(primaryLabel, sizeof(primaryLabel), "%s",
+                                                txdName.c_str());
+                        }
+                    }
+                }
+            }
+        }
+        std::vector<rw::TexDictionary*> fallbackDicts;
+        for (const TxdCandidate& fbc : kTxdFallbacks) {
+            std::vector<uint8> txdBytes;
+            if (!LoadAssetBytes(fbc.img, fbc.entry, fbc.loose, txdBytes)) {
+                continue;
+            }
+            rw::TexDictionary* txd = ParseTxd(txdBytes);
+            if (!txd || txd->count() <= 0) {
+                if (txd) {
+                    txd->destroy();
+                }
+                continue;
+            }
+            fallbackDicts.push_back(txd);
+        }
+        LinkedClump lc = TexSample_LinkedParse(bytes.data(), bytes.size(), primary,
+                                               fallbackDicts.empty() ? nullptr
+                                                                     : fallbackDicts.data(),
+                                               fallbackDicts.size());
+        // Stats for this candidate (winner keeps its labels below). The TXD
+        // dicts must stay alive through FlattenClump: decoded texels are
+        // copied out of their rasters there (use-after-free otherwise).
+        char candTxdLabel[128] = {};
+        int candTextures = 0;
+        char candFirstTex[40] = {};
+        int candFirstW = 0;
+        int candFirstH = 0;
+        rw::TexDictionary* statTxd = primary ? primary : (!fallbackDicts.empty() ? fallbackDicts[0]
+                                                                                 : nil);
+        if (primary) {
+            (void)std::snprintf(candTxdLabel, sizeof(candTxdLabel), "%s", primaryLabel);
+        } else if (!fallbackDicts.empty()) {
+            (void)std::snprintf(candTxdLabel, sizeof(candTxdLabel), "%s",
+                                kTxdFallbacks[0].label);
+        }
+        if (statTxd) {
+            candTextures = statTxd->count();
+            FORLIST(link, statTxd->textures) {
+                rw::Texture* tex = rw::Texture::fromDict(link);
+                if (!tex) {
+                    continue;
+                }
+                (void)std::snprintf(candFirstTex, sizeof(candFirstTex), "%s", tex->name);
+                candFirstW = tex->raster ? tex->raster->width : 0;
+                candFirstH = tex->raster ? tex->raster->height : 0;
+                break;
+            }
+        }
+        int tris = 0;
+        WorldShotScene probe;
+        if (lc.clump) {
+            tris = FlattenClump(lc.clump, lc, probe);
+        }
+        TexSample_FreeLinked(lc);
+        if (primary) {
+            primary->destroy();
+            primary = nil;
+        }
+        for (rw::TexDictionary* txd : fallbackDicts) {
+            txd->destroy();
+        }
+        fallbackDicts.clear();
+        if (tris <= 0) {
+            continue;
+        }
+        if (bestTris == 0 || tris > bestTris) {
             scene.meshes = std::move(probe.meshes);
+            scene.images = std::move(probe.images);
             scene.bboxMin[0] = probe.bboxMin[0];
             scene.bboxMin[1] = probe.bboxMin[1];
             scene.bboxMin[2] = probe.bboxMin[2];
@@ -480,18 +581,25 @@ bool WorldShot_Init(const char* gameDir, WorldShotScene& scene, char* err, std::
             scene.stats.triangles = probe.stats.triangles;
             scene.stats.vertices = probe.stats.vertices;
             (void)std::snprintf(dffLabel, sizeof(dffLabel), "%s", cand.label);
+            (void)std::snprintf(txdLabel, sizeof(txdLabel), "%s", candTxdLabel);
+            bestTextures = candTextures;
+            (void)std::snprintf(bestFirstTex, sizeof(bestFirstTex), "%s", candFirstTex);
+            bestFirstW = candFirstW;
+            bestFirstH = candFirstH;
             bestTris = tris;
-        } else {
-            clump->destroy();
         }
     }
-    if (!s_clump) {
+    if (bestTris == 0) {
         SetErr(err, errSize, "no DFF candidate parsed (gta3.img fbiranch/cityhall/hanger/bridge/helipad, generic/arrow, grass)");
         return false;
     }
     (void)std::snprintf(scene.stats.dffName, sizeof(scene.stats.dffName), "%s", dffLabel);
-    // TXD stays best-effort: the proof is rasterized DFF geometry; texture
-    // stats above report what actually loaded (possibly none).
+    (void)std::snprintf(scene.stats.txdName, sizeof(scene.stats.txdName), "%s", txdLabel);
+    scene.stats.textures = bestTextures;
+    (void)std::snprintf(scene.stats.firstTexture, sizeof(scene.stats.firstTexture), "%s",
+                        bestFirstTex);
+    scene.stats.firstTexW = bestFirstW;
+    scene.stats.firstTexH = bestFirstH;
     return true;
 }
 
