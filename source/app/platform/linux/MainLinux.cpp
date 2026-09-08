@@ -40,13 +40,14 @@ using uint64 = uint64_t;
 #include "app/platform/linux/SfxDecode.h"
 #include "app/platform/linux/GxtText.h"
 #include "app/platform/linux/MenuShot.h"
+#include "app/platform/linux/MenuNav.h"
 
 #include <sys/resource.h>
 
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] | --shot-menu <out.tga> [--lang english] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -1176,6 +1177,83 @@ int RunShotMenu(int argc, char** argv) {
     return 0;
 }
 
+// R6f: closed-loop menu navigation. Every seq command travels as a real
+// SDL_EVENT_KEY_DOWN through SDL_PushEvent (MenuNav.cpp MenuNav_PushCommand)
+// and is applied only inside the SDL_PollEvent drain (MenuNav_PumpEvents:
+// down=(s+1)%3, up=(s+2)%3, enter pins chosen); frames are full MenuShot
+// re-renders at the live highlight. H0 is the pre-input frame (== static
+// --shot-menu when sel=0). Log carries one checksum per frame (H0 + per cmd).
+int RunMenuNav(int argc, char** argv) {
+    const char* seq = ArgValue(argc, argv, "--menu-nav", nullptr);
+    const char* outPath = ArgValue(argc, argv, "--out", "nav.tga");
+    const char* lang = ArgValue(argc, argv, "--lang", "english");
+    if (!seq || seq[0] == '\0' || !outPath || outPath[0] == '\0' || !lang || lang[0] == '\0') {
+        (void)std::printf("nav-fail bad args menu-nav='%s' out='%s' lang='%s'\n",
+                           seq ? seq : "(null)", outPath ? outPath : "(null)",
+                           lang ? lang : "(null)");
+        return 1;
+    }
+    std::string gameDir = ResolveGameDir(argc, argv);
+    std::vector<uint8> pixels;
+    MenuNavResult nav{};
+    char navErr[512] = {};
+    if (!MenuNav_Run(gameDir.c_str(), lang, seq, pixels, nav, navErr, sizeof(navErr))) {
+        (void)std::printf("nav-fail %s (game=%s seq=\"%s\")\n", navErr, gameDir.c_str(), seq);
+        MenuShot_Shutdown();
+        return 1;
+    }
+    (void)std::printf("navtext-load lang=%s file=%s keys=%d\n", nav.lastStats.lang,
+                       nav.lastStats.gxtFile, nav.lastStats.gxtKeys);
+    for (int i = 0; i < 4; ++i) {
+        (void)std::printf("navitem key=%s text=\"%s\"\n", nav.lastStats.itemKey[i],
+                           nav.lastStats.itemText[i]);
+    }
+    (void)std::printf("navfont name=%s %dx%d solidTexels=%ld glyphs=%d\n", nav.lastStats.fontName,
+                       nav.lastStats.fontW, nav.lastStats.fontH, nav.lastStats.solidTexels,
+                       nav.lastStats.glyphs);
+    uint64_t sumR = 0;
+    uint64_t sumG = 0;
+    uint64_t sumB = 0;
+    uint64_t nonBlack = 0;
+    uint64_t finalChecksum = PixelsChecksum(pixels, sumR, sumG, sumB, nonBlack);
+    uint64_t total = 640ULL * 480ULL;
+    if (pixels.size() != total * 4 || nonBlack == 0) {
+        (void)std::printf("nav-fail bad frame pixels=%d nonblack=%llu\n",
+                           static_cast<int>(pixels.size()),
+                           static_cast<unsigned long long>(nonBlack));
+        MenuShot_Shutdown();
+        return 1;
+    }
+    if (!WriteTga24(outPath, 640, 480, pixels)) {
+        (void)std::printf("nav-fail write '%s'\n", outPath);
+        MenuShot_Shutdown();
+        return 1;
+    }
+    std::string cs;
+    for (std::size_t i = 0; i < nav.checksums.size(); ++i) {
+        char cell[32];
+        (void)std::snprintf(cell, sizeof(cell), "%s%llu", i ? "," : "",
+                             static_cast<unsigned long long>(nav.checksums[i]));
+        cs += cell;
+    }
+    int steps = nav.checksums.empty() ? 0 : static_cast<int>(nav.checksums.size()) - 1;
+    OS_DebugOut("mad-sa-linux menu nav");
+    (void)std::printf("nav-choose index=%d key=%s text=\"%s\"\n", nav.chosen,
+                       nav.chosen >= 0 ? nav.chosenKey : "-",
+                       nav.chosen >= 0 ? nav.chosenText : "-");
+    (void)std::printf("nav-ok seq=\"%s\" steps=%d selected=%d chosen=%d checksums=%s\n", seq, steps,
+                       nav.selected, nav.chosen, cs.c_str());
+    (void)std::printf(
+        "navshot-ok out=%s nonblack=%llu/%llu avg=%llu,%llu,%llu checksum=%llu\n", outPath,
+        static_cast<unsigned long long>(nonBlack), static_cast<unsigned long long>(total),
+        static_cast<unsigned long long>(sumR / total),
+        static_cast<unsigned long long>(sumG / total),
+        static_cast<unsigned long long>(sumB / total),
+        static_cast<unsigned long long>(finalChecksum));
+    MenuShot_Shutdown();
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1197,6 +1275,9 @@ int main(int argc, char** argv) {
     }
     if (HasArg(argc, argv, "--headless")) {
         return RunHeadless(argc, argv);
+    }
+    if (HasArg(argc, argv, "--menu-nav")) {
+        return RunMenuNav(argc, argv);
     }
     if (HasArg(argc, argv, "--e2e")) {
         return RunE2E(argc, argv);
