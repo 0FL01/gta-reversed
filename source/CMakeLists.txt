@@ -13,10 +13,12 @@ option(${RE_PROJECT}_BUILD_LEGACY "Build legacy gta_reversed ASI/DLL track" ON)
 # `-DCMAKE_TOOLCHAIN_FILE=<conan_toolchain.cmake>`). OpenAL and OpenGL/EGL
 # come from the system (`libopenal-dev`, Mesa in `mad-sa:dev`).
 if(NOT ${RE_PROJECT}_BUILD_LEGACY)
-    # librw (W1): SA-world render backend source. GL3 + SDL3 to match the
-    # native track (SDL3 from Conan, Mesa GL in `mad-sa:dev`).
-    set(LIBRW_PLATFORM "GL3" CACHE STRING "" FORCE)
-    set(LIBRW_GL3_GFXLIB "SDL3" CACHE STRING "" FORCE)
+    # librw (W1): SA DFF/TXD *parsing* source for the world-shot slice.
+    # NULL platform: no librw window/GL driver (headless EGL pbuffer owned by
+    # MainLinux; librw is used through streams only). Rendering is our own
+    # fixed-pipeline code in WorldShot/RunShot, so a NULL engine open/start
+    # is enough to make texture globals valid for Material::streamRead.
+    set(LIBRW_PLATFORM "NULL" CACHE STRING "" FORCE)
     set(LIBRW_TOOLS OFF CACHE BOOL "" FORCE)
     set(LIBRW_EXAMPLES OFF CACHE BOOL "" FORCE)
     set(LIBRW_INSTALL OFF CACHE BOOL "" FORCE)
@@ -24,6 +26,7 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
     add_executable(mad-sa-linux
         oswrapper/oswrapper_linux.cpp
         app/platform/linux/MainLinux.cpp
+        app/platform/linux/WorldShot.cpp
     )
     target_compile_features(mad-sa-linux PRIVATE cxx_std_23)
     target_include_directories(mad-sa-linux PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

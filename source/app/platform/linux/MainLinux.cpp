@@ -2,6 +2,7 @@
 // Standalone `main()` for the `mad-sa-linux` ELF track. It must not depend on
 // the Windows DLL/hook model (`dllmain`/`InjectHooks`) nor on Win libraries.
 #include <cassert>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -32,6 +33,7 @@ using uint64 = uint64_t;
 #endif
 
 #include "oswrapper/oswrapper.h"
+#include "app/platform/linux/WorldShot.h"
 
 namespace {
 void PrintUsage(const char* prog) {
@@ -284,6 +286,117 @@ bool WriteTga24(const char* path, int width, int height, const std::vector<uint8
     return ok;
 }
 
+void Normalize3(float* v) {
+    float len = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    if (len > 1e-9f) {
+        v[0] /= len;
+        v[1] /= len;
+        v[2] /= len;
+    }
+}
+
+// Column-major lookAt for the compat fixed pipeline (SA assets are Z-up).
+void LookAtMatrix(const float* eye, const float* center, const float* up, float* m) {
+    float f[3] = { center[0] - eye[0], center[1] - eye[1], center[2] - eye[2] };
+    Normalize3(f);
+    float s[3] = {
+        f[1] * up[2] - f[2] * up[1],
+        f[2] * up[0] - f[0] * up[2],
+        f[0] * up[1] - f[1] * up[0],
+    };
+    Normalize3(s);
+    float u[3] = {
+        s[1] * f[2] - s[2] * f[1],
+        s[2] * f[0] - s[0] * f[2],
+        s[0] * f[1] - s[1] * f[0],
+    };
+    m[0] = s[0]; m[4] = s[1]; m[8] = s[2];
+    m[12] = -(s[0] * eye[0] + s[1] * eye[1] + s[2] * eye[2]);
+    m[1] = u[0]; m[5] = u[1]; m[9] = u[2];
+    m[13] = -(u[0] * eye[0] + u[1] * eye[1] + u[2] * eye[2]);
+    m[2] = -f[0]; m[6] = -f[1]; m[10] = -f[2];
+    m[14] = (f[0] * eye[0] + f[1] * eye[1] + f[2] * eye[2]);
+    m[3] = 0.0f; m[7] = 0.0f; m[11] = 0.0f; m[15] = 1.0f;
+}
+
+// Rasterizes real /game geometry (WorldShot triangle soup) with CPU Lambert
+// shading. No synthetic gradient: every non-background pixel comes from a
+// DFF triangle parsed by librw.
+void DrawWorldFrame(const WorldShotScene& scene, int width, int height, float angleDeg) {
+    float center[3] = {
+        0.5f * (scene.bboxMin[0] + scene.bboxMax[0]),
+        0.5f * (scene.bboxMin[1] + scene.bboxMax[1]),
+        0.5f * (scene.bboxMin[2] + scene.bboxMax[2]),
+    };
+    float dx = scene.bboxMax[0] - scene.bboxMin[0];
+    float dy = scene.bboxMax[1] - scene.bboxMin[1];
+    float dz = scene.bboxMax[2] - scene.bboxMin[2];
+    float radius = 0.5f * std::sqrt(dx * dx + dy * dy + dz * dz);
+    if (!(radius > 0.5f)) {
+        radius = 0.5f;
+    }
+    glViewport(0, 0, width, height);
+    glDisable(GL_TEXTURE_2D);
+    glDisable(GL_LIGHTING);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LESS);
+    glClearColor(0.05f, 0.07f, 0.12f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    float aspect = static_cast<float>(width) / static_cast<float>(height);
+    // Fit the bounding sphere: half-angle tan is 0.5 (halfH below), so
+    // dist ~= radius / sin(atan(0.5)) ~= 2.24 * radius; keep a small margin.
+    float dist = radius * 2.35f + 0.5f;
+    float nearPlane = dist - radius * 1.8f;
+    if (nearPlane < 0.1f) {
+        nearPlane = 0.1f;
+    }
+    float farPlane = dist + radius * 6.0f;
+    float halfH = nearPlane * 0.5f;
+    glFrustum(-halfH * aspect, halfH * aspect, -halfH, halfH, nearPlane, farPlane);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    float dir[3] = { 0.55f, -0.75f, 0.50f };
+    Normalize3(dir);
+    float eye[3] = {
+        center[0] + dir[0] * dist,
+        center[1] + dir[1] * dist,
+        center[2] + dir[2] * dist,
+    };
+    float up[3] = { 0.0f, 0.0f, 1.0f };
+    float view[16] = {};
+    LookAtMatrix(eye, center, up, view);
+    glMultMatrixf(view);
+    // Turntable around world Z through the model center.
+    glTranslatef(center[0], center[1], center[2]);
+    glRotatef(angleDeg, 0.0f, 0.0f, 1.0f);
+    glTranslatef(-center[0], -center[1], -center[2]);
+    float light[3] = { 0.45f, -0.55f, 0.70f };
+    Normalize3(light);
+    float rad = angleDeg * 3.14159265f / 180.0f;
+    float ca = std::cos(rad);
+    float sa = std::sin(rad);
+    glBegin(GL_TRIANGLES);
+    for (const WorldShotMesh& mesh : scene.meshes) {
+        size_t count = mesh.pos.size();
+        for (size_t i = 0; i + 2 < count; i += 3) {
+            float nx = mesh.nrm[i];
+            float ny = mesh.nrm[i + 1];
+            float nz = mesh.nrm[i + 2];
+            // World-space normal follows the same Z spin as the vertices.
+            float wx = ca * nx - sa * ny;
+            float wy = sa * nx + ca * ny;
+            float d = wx * light[0] + wy * light[1] + nz * light[2];
+            float k = 0.32f + 0.68f * (d > 0.0f ? d : 0.0f);
+            glColor3f(mesh.color[0] * k, mesh.color[1] * k, mesh.color[2] * k);
+            glVertex3f(mesh.pos[i], mesh.pos[i + 1], mesh.pos[i + 2]);
+        }
+    }
+    glEnd();
+    glFinish();
+}
+
 int RunShot(int argc, char** argv) {
     const char* outPath = ArgValue(argc, argv, "--shot", "out.tga");
     const char* framesArg = ArgValue(argc, argv, "--frames", "120");
@@ -351,12 +464,32 @@ int RunShot(int argc, char** argv) {
     }
     const char* glVersion = reinterpret_cast<const char*>(glGetString(GL_VERSION));
     (void)std::printf("shot-gl %s\n", glVersion ? glVersion : "(null)");
-    glViewport(0, 0, width, height);
+    std::string gameDir = ResolveGameDir(argc, argv);
+    WorldShotScene scene{};
+    char worldErr[256] = {};
+    if (!WorldShot_Init(gameDir.c_str(), scene, worldErr, sizeof(worldErr))) {
+        (void)std::printf("shot-fail worldshot %s (game=%s)\n", worldErr, gameDir.c_str());
+        WorldShot_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    const WorldShotStats& wst = scene.stats;
+    (void)std::printf(
+        "worldshot-load dff=%s atomics=%d tris=%d verts=%d txd=%s textures=%d firstTex=%s %dx%d "
+        "bbox=[%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f]\n",
+        wst.dffName, wst.atomics, wst.triangles, wst.vertices,
+        wst.txdName, wst.textures,
+        wst.firstTexture[0] ? wst.firstTexture : "-",
+        wst.firstTexW, wst.firstTexH,
+        scene.bboxMin[0], scene.bboxMin[1], scene.bboxMin[2],
+        scene.bboxMax[0], scene.bboxMax[1], scene.bboxMax[2]
+    );
     for (int i = 0; i < frames; ++i) {
         float t = frames <= 1 ? 1.0f : static_cast<float>(i) / static_cast<float>(frames - 1);
-        glClearColor(0.15f + 0.55f * t, 0.35f, 0.85f - 0.35f * t, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
-        glFinish();
+        DrawWorldFrame(scene, width, height, 20.0f + 40.0f * t);
         SDL_Event event = {};
         while (SDL_PollEvent(&event)) {
         }
@@ -413,6 +546,15 @@ int RunShot(int argc, char** argv) {
     eglTerminate(display);
     OS_DebugOut("mad-sa-linux GL shot");
     (void)std::printf(
+        "worldshot-ok dff=%s tris=%d verts=%d txd=%s textures=%d frames=%d out=%s nonblack=%llu/%llu checksum=%llu\n",
+        wst.dffName, wst.triangles, wst.vertices,
+        wst.txdName, wst.textures,
+        frames, outPath,
+        static_cast<unsigned long long>(nonBlack),
+        static_cast<unsigned long long>(total),
+        static_cast<unsigned long long>(checksum)
+    );
+    (void)std::printf(
         "shot-ok frames=%d out=%s nonblack=%llu/%llu avg=%llu,%llu,%llu checksum=%llu\n",
         frames, outPath,
         static_cast<unsigned long long>(nonBlack), static_cast<unsigned long long>(total),
@@ -421,6 +563,7 @@ int RunShot(int argc, char** argv) {
         static_cast<unsigned long long>(sumB / total),
         static_cast<unsigned long long>(checksum)
     );
+    WorldShot_Shutdown();
     return 0;
 }
 } // namespace
