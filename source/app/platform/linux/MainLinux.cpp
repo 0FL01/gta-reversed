@@ -42,13 +42,14 @@ using uint64 = uint64_t;
 #include "app/platform/linux/MenuShot.h"
 #include "app/platform/linux/MenuNav.h"
 #include "app/platform/linux/ColLoad.h"
+#include "app/platform/linux/RadioDecode.h"
 
 #include <sys/resource.h>
 
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -1255,6 +1256,130 @@ int RunMenuNav(int argc, char** argv) {
     return 0;
 }
 
+// Round 10 (R6h): real radio sound. Decodes the first S seconds (default 5)
+// of the station's first track (StrmPaks.dat + TrakLkup.dat cut table,
+// XOR de-obfuscation, Vorbis decode — see RadioDecode) to stereo PCM16,
+// uploads it to one OpenAL buffer on the null sink (same ALSOFT_DRIVERS
+// trick as R4/R6d) with size/frequency/bits/channels verification, and
+// reports stream-verified metrics. No synthesis anywhere on this path.
+int RunSmokeRadio(int argc, char** argv) {
+    const char* stationArg = ArgValue(argc, argv, "--station", "RE");
+    int seconds = std::atoi(ArgValue(argc, argv, "--seconds", "5"));
+    if (!stationArg || stationArg[0] == '\0' || seconds <= 0) {
+        (void)std::printf("radio-fail bad args station='%s' seconds='%s'\n",
+                           stationArg ? stationArg : "(null)",
+                           ArgValue(argc, argv, "--seconds", "5"));
+        return 1;
+    }
+    std::string gameDir = ResolveGameDir(argc, argv);
+    OS_SetFilePathOffset(gameDir.c_str());
+
+    RadioDecodeResult decoded;
+    if (!RadioDecode_Station(stationArg, seconds, decoded)) {
+        (void)std::printf("radio-fail station=%s reason=%s\n", stationArg,
+                           decoded.failReason.c_str());
+        return 1;
+    }
+
+    bool forcedNull = false;
+    if (!std::getenv("ALSOFT_DRIVERS")) {
+        (void)setenv("ALSOFT_DRIVERS", "null", 1);
+        forcedNull = true;
+    }
+    const char* backend = forcedNull ? "null" : "default";
+    ALCdevice* device = alcOpenDevice(nullptr);
+    if (!device) {
+        (void)std::printf("radio-fail open device\n");
+        return 1;
+    }
+    ALCcontext* context = alcCreateContext(device, nullptr);
+    if (!context || alcMakeContextCurrent(context) == ALC_FALSE) {
+        (void)std::printf("radio-fail create context\n");
+        if (context) {
+            alcDestroyContext(context);
+        }
+        alcCloseDevice(device);
+        return 1;
+    }
+    ALuint buffer = 0;
+    alGenBuffers(1, &buffer);
+    if (alGetError() != AL_NO_ERROR || buffer == 0) {
+        (void)std::printf("radio-fail gen buffer\n");
+        alcMakeContextCurrent(nullptr);
+        alcDestroyContext(context);
+        alcCloseDevice(device);
+        return 1;
+    }
+    // Game parity: CAEVorbisDecoder always sinks stereo PCM16 (mono is
+    // duplicated in FillBuffer); RadioDecode produces stereo accordingly.
+    alBufferData(buffer, AL_FORMAT_STEREO16, decoded.pcm.data(),
+                 static_cast<ALsizei>(decoded.decodedBytes),
+                 static_cast<ALsizei>(decoded.rateHz));
+    if (alGetError() != AL_NO_ERROR) {
+        (void)std::printf("radio-fail buffer data\n");
+        alDeleteBuffers(1, &buffer);
+        alcMakeContextCurrent(nullptr);
+        alcDestroyContext(context);
+        alcCloseDevice(device);
+        return 1;
+    }
+    // Verify the upload stuck: size/frequency/bits/channels round-trip.
+    ALint gotSize = 0, gotFreq = 0, gotBits = 0, gotCh = 0;
+    alGetBufferi(buffer, AL_SIZE, &gotSize);
+    alGetBufferi(buffer, AL_FREQUENCY, &gotFreq);
+    alGetBufferi(buffer, AL_BITS, &gotBits);
+    alGetBufferi(buffer, AL_CHANNELS, &gotCh);
+    if (alGetError() != AL_NO_ERROR ||
+        gotSize != (ALint)decoded.decodedBytes ||
+        gotFreq != (ALint)decoded.rateHz || gotBits != 16 || gotCh != 2) {
+        (void)std::printf("radio-fail buffer verify\n");
+        alDeleteBuffers(1, &buffer);
+        alcMakeContextCurrent(nullptr);
+        alcDestroyContext(context);
+        alcCloseDevice(device);
+        return 1;
+    }
+    // Honest non-silence gate: peak must clearly exceed the floor.
+    double ratio = decoded.rms > 0.0
+                       ? static_cast<double>(decoded.peak) / decoded.rms
+                       : 0.0;
+    if (!(decoded.decodedBytes > 50000 && decoded.rms > 0.0 &&
+          ratio > 1.5)) {
+        (void)std::printf("radio-fail silence gate bytes=%llu rms=%.1f peak=%d\n",
+                           static_cast<unsigned long long>(decoded.decodedBytes),
+                           decoded.rms, decoded.peak);
+        alDeleteBuffers(1, &buffer);
+        alcMakeContextCurrent(nullptr);
+        alcDestroyContext(context);
+        alcCloseDevice(device);
+        return 1;
+    }
+    // De-obfuscation/codec layout: exact cut position, codec, rate, beats,
+    // and the on-disk vs decrypted head bytes (hex proof in the log).
+    (void)std::printf(
+        "radio-detail station=%s pack=%d tracks=%d track=%u audioOffset=%u "
+        "audioSize=%u codec=vorbis-xor16 rate=%u srcCh=%d outCh=2 "
+        "beats=%u firstBeat={time=%u key=%u} raw=%s dec=%s\n",
+        decoded.station.c_str(), decoded.packId, decoded.trackCount,
+        decoded.trackId, decoded.audioOffset, decoded.audioSize,
+        decoded.rateHz, decoded.srcChannels, decoded.beatCount,
+        decoded.firstBeatTime, decoded.firstBeatKey,
+        decoded.headRawHex.c_str(), decoded.headDecHex.c_str());
+    (void)std::printf(
+        "radio-ok station=%s seconds=%d decodedBytes=%llu rms=%.1f peak=%d "
+        "bufChecksum=%llu backend=%s\n",
+        decoded.station.c_str(), decoded.seconds,
+        static_cast<unsigned long long>(decoded.decodedBytes), decoded.rms,
+        decoded.peak, static_cast<unsigned long long>(decoded.bufChecksum),
+        backend);
+    alDeleteBuffers(1, &buffer);
+    alcMakeContextCurrent(nullptr);
+    alcDestroyContext(context);
+    alcCloseDevice(device);
+    OS_DebugOut("mad-sa-linux real radio audio");
+    return 0;
+}
+
 // R6g: ground under feet. Probes N fixed world points (IPL-dense downtown
 // LA <-> airport corridor) with a vertical raycast against bound COL
 // models. Heights come only from COL bytes; a miss reports h=-50.00 with
@@ -1359,6 +1484,9 @@ int main(int argc, char** argv) {
     }
     if (HasArg(argc, argv, "--smoke-audio-real")) {
         return RunSmokeAudioReal(argc, argv);
+    }
+    if (HasArg(argc, argv, "--smoke-radio")) {
+        return RunSmokeRadio(argc, argv);
     }
     if (HasArg(argc, argv, "--smoke-audio")) {
         return RunSmokeAudio();
