@@ -43,13 +43,14 @@ using uint64 = uint64_t;
 #include "app/platform/linux/MenuNav.h"
 #include "app/platform/linux/ColLoad.h"
 #include "app/platform/linux/RadioDecode.h"
+#include "app/platform/linux/SkinPed.h"
 
 #include <sys/resource.h>
 
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -1256,6 +1257,193 @@ int RunMenuNav(int argc, char** argv) {
     return 0;
 }
 
+// Round 11 (R6i): skinned character in bind pose. Loads one skinned DFF
+// (default --model cj; cj.dff does not ship, so the documented fallback
+// picks the first skinned DFF in gta3.img archive order and names it in
+// the log), runs CPU bind-pose skinning (anim=bind, no HAnim), and renders
+// through the same CPU orbit rasterizer. No synthesis: every vertex, bone
+// index and weight comes from DFF bytes; the round gates wsum~=1.0.
+int RunShotPed(int argc, char** argv) {
+    const char* outPath = ArgValue(argc, argv, "--shot-ped", "ped.tga");
+    const char* model = ArgValue(argc, argv, "--model", "cj");
+    if (!outPath || outPath[0] == '\0' || !model || model[0] == '\0') {
+        (void)std::printf("ped-fail bad args shot-ped='%s' model='%s'\n", outPath ? outPath : "(null)",
+                           model ? model : "(null)");
+        return 1;
+    }
+    const int width = 640;
+    const int height = 480;
+    auto getPlatformDisplay = reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(
+        eglGetProcAddress("eglGetPlatformDisplayEXT")
+    );
+    if (!getPlatformDisplay) {
+        (void)std::printf("ped-fail no eglGetPlatformDisplayEXT\n");
+        return 1;
+    }
+#ifndef EGL_PLATFORM_SURFACELESS_MESA
+#define EGL_PLATFORM_SURFACELESS_MESA 0x31DD
+#endif
+    EGLDisplay display = getPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
+    if (display == EGL_NO_DISPLAY) {
+        (void)std::printf("ped-fail no surfaceless display 0x%x\n", eglGetError());
+        return 1;
+    }
+    if (!eglInitialize(display, nullptr, nullptr)) {
+        (void)std::printf("ped-fail egl init 0x%x\n", eglGetError());
+        return 1;
+    }
+    const EGLint configAttrs[] = {
+        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
+        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+        EGL_DEPTH_SIZE, 24,
+        EGL_NONE
+    };
+    EGLConfig config = nullptr;
+    EGLint configCount = 0;
+    if (!eglChooseConfig(display, configAttrs, &config, 1, &configCount) || configCount < 1) {
+        (void)std::printf("ped-fail choose config 0x%x\n", eglGetError());
+        eglTerminate(display);
+        return 1;
+    }
+    const EGLint pbufferAttrs[] = { EGL_WIDTH, width, EGL_HEIGHT, height, EGL_NONE };
+    EGLSurface surface = eglCreatePbufferSurface(display, config, pbufferAttrs);
+    if (surface == EGL_NO_SURFACE) {
+        (void)std::printf("ped-fail pbuffer 0x%x\n", eglGetError());
+        eglTerminate(display);
+        return 1;
+    }
+    (void)eglBindAPI(EGL_OPENGL_API);
+    EGLContext context = eglCreateContext(display, config, EGL_NO_CONTEXT, nullptr);
+    if (context == EGL_NO_CONTEXT) {
+        (void)std::printf("ped-fail context 0x%x\n", eglGetError());
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    if (!eglMakeCurrent(display, surface, surface, context)) {
+        (void)std::printf("ped-fail make current 0x%x\n", eglGetError());
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    const char* glVersion = reinterpret_cast<const char*>(glGetString(GL_VERSION));
+    (void)std::printf("ped-gl %s\n", glVersion ? glVersion : "(null)");
+    std::string gameDir = ResolveGameDir(argc, argv);
+    WorldShotScene scene{};
+    SkinPedStats pst{};
+    char pedErr[512] = {};
+    if (!SkinPed_Init(gameDir.c_str(), model, scene, pst, pedErr, sizeof(pedErr))) {
+        (void)std::printf("ped-fail load %s (game=%s model=%s)\n", pedErr, gameDir.c_str(), model);
+        SkinPed_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    (void)std::printf(
+        "ped-load model=%s src=%s txd=%s textures=%d geoms=%d frames=%d "
+        "bbox=[%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f]\n",
+        pst.model, pst.src, pst.txd, pst.textures, pst.geoms, pst.frames,
+        scene.bboxMin[0], scene.bboxMin[1], scene.bboxMin[2],
+        scene.bboxMax[0], scene.bboxMax[1], scene.bboxMax[2]
+    );
+    if (pst.tried > 0) {
+        (void)std::printf("ped-fallback requested=%s picked=%s tried=%d cap=128sec\n", pst.requested,
+                           pst.src, pst.tried);
+    }
+    (void)std::printf("ped-skin bones=%d attached=%d/%d wsum=%.6f binddev=%.8f anim=bind\n",
+                       pst.bones, pst.attached, pst.bones, pst.wsum, pst.binddev);
+    {
+        SkinPedVert v{};
+        if (SkinPed_SampleVert(v)) {
+            (void)std::printf(
+                "ped-vert n=0 stored=(%.4f,%.4f,%.4f) skinned=(%.4f,%.4f,%.4f) "
+                "bones=[%d,%d,%d,%d] weights=[%.4f,%.4f,%.4f,%.4f]\n",
+                v.stored[0], v.stored[1], v.stored[2], v.skinned[0], v.skinned[1], v.skinned[2],
+                v.bones[0], v.bones[1], v.bones[2], v.bones[3], v.weights[0], v.weights[1],
+                v.weights[2], v.weights[3]
+            );
+        }
+    }
+    bool gateVerts = pst.verts > 1000;
+    bool gateTris = pst.tris > 1000;
+    bool gateBones = pst.bones >= 10;
+    bool gateWsum = std::fabs(pst.wsum - 1.0) < 0.01;
+    if (!(gateVerts && gateTris && gateBones && gateWsum)) {
+        (void)std::printf(
+            "ped-fail gate verts=%d(>1000) tris=%d(>1000) bones=%d(>=10) wsum=%.6f(~1.0)\n",
+            pst.verts, pst.tris, pst.bones, pst.wsum
+        );
+        SkinPed_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    std::vector<uint8> pixels;
+    TexFrameStats texStats{};
+    DrawWorldFrame(scene, width, height, 60.0f, nullptr, pixels, texStats);
+    uint64_t sumR = 0;
+    uint64_t sumG = 0;
+    uint64_t sumB = 0;
+    uint64_t nonBlack = 0;
+    uint64_t checksum = PixelsChecksum(pixels, sumR, sumG, sumB, nonBlack);
+    uint64_t total = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
+    if (nonBlack == 0) {
+        (void)std::printf("ped-fail black frame\n");
+        SkinPed_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    if (!WriteTga24(outPath, width, height, pixels)) {
+        (void)std::printf("ped-fail write '%s'\n", outPath);
+        SkinPed_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    eglDestroyContext(display, context);
+    eglDestroySurface(display, surface);
+    eglTerminate(display);
+    OS_DebugOut("mad-sa-linux ped shot");
+    (void)std::printf(
+        "texped-ok tris=%d sampledTri=%d texelFetch=%ld greyFallback=%d flatTri=%d texPixels=%ld "
+        "uv=[%.3f,%.3f]x[%.3f,%.3f] firstTex=%s texel=%d,%d,%d,%d pixel=%d,%d,%d render=cpu\n",
+        texStats.tris, texStats.sampledTri, texStats.texelFetch, texStats.fallbackTri, texStats.flatTri,
+        texStats.texPixels, texStats.haveUV ? texStats.uvMin[0] : 0.0f,
+        texStats.haveUV ? texStats.uvMax[0] : 0.0f, texStats.haveUV ? texStats.uvMin[1] : 0.0f,
+        texStats.haveUV ? texStats.uvMax[1] : 0.0f, texStats.haveFirst ? texStats.firstTex : "-",
+        texStats.firstTexel[0], texStats.firstTexel[1], texStats.firstTexel[2],
+        texStats.firstTexel[3], texStats.firstPixel[0], texStats.firstPixel[1],
+        texStats.firstPixel[2]
+    );
+    (void)std::printf(
+        "ped-ok model=%s verts=%d tris=%d bones=%d weights=W4sum=%.6f checksum=%llu anim=bind "
+        "src=%s\n",
+        pst.model, pst.verts, pst.tris, pst.bones, pst.wsum,
+        static_cast<unsigned long long>(checksum), pst.src
+    );
+    (void)std::printf(
+        "pedshot-ok out=%s nonblack=%llu/%llu avg=%llu,%llu,%llu checksum=%llu\n", outPath,
+        static_cast<unsigned long long>(nonBlack), static_cast<unsigned long long>(total),
+        static_cast<unsigned long long>(sumR / total),
+        static_cast<unsigned long long>(sumG / total),
+        static_cast<unsigned long long>(sumB / total), static_cast<unsigned long long>(checksum)
+    );
+    SkinPed_Shutdown();
+    return 0;
+}
+
 // Round 10 (R6h): real radio sound. Decodes the first S seconds (default 5)
 // of the station's first track (StrmPaks.dat + TrakLkup.dat cut table,
 // XOR de-obfuscation, Vorbis decode — see RadioDecode) to stereo PCM16,
@@ -1505,6 +1693,9 @@ int main(int argc, char** argv) {
     }
     if (HasArg(argc, argv, "--shot-menu")) {
         return RunShotMenu(argc, argv);
+    }
+    if (HasArg(argc, argv, "--shot-ped")) {
+        return RunShotPed(argc, argv);
     }
     if (HasArg(argc, argv, "--shot-scene")) {
         return RunShotScene(argc, argv);
