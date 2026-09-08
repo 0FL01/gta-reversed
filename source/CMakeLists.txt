@@ -7,8 +7,10 @@ option(${RE_PROJECT}_STANDALONE "Build standalone executable" OFF)
 option(${RE_PROJECT}_DUMP_HOOKS_ONLY "Dump hooks only" OFF)
 option(${RE_PROJECT}_BUILD_LEGACY "Build legacy gta_reversed ASI/DLL track" ON)
 
-# mad-sa native Linux skeleton (R1): standalone oswrapper + main, no Win libs.
+# mad-sa native Linux track (R1 skeleton, R2 SDL3 video).
 # Configure with `-DGTASA_BUILD_LEGACY=OFF` to build only `mad-sa-linux`.
+# R2 needs SDL3 via Conan (`conan install --requires=sdl/3.4.14 ...` +
+# `-DCMAKE_TOOLCHAIN_FILE=<conan_toolchain.cmake>`).
 if(NOT ${RE_PROJECT}_BUILD_LEGACY)
     add_executable(mad-sa-linux
         oswrapper/oswrapper_linux.cpp
@@ -21,7 +23,8 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
     )
     find_package(Threads REQUIRED)
-    target_link_libraries(mad-sa-linux PRIVATE Threads::Threads)
+    find_package(SDL3 REQUIRED)
+    target_link_libraries(mad-sa-linux PRIVATE Threads::Threads SDL3::SDL3)
     return()
 endif()
 

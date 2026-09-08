@@ -1,9 +1,11 @@
-// mad-sa Linux native entry point (R1 skeleton).
+// mad-sa Linux native entry point (R1 skeleton, R2 SDL3 video).
 // Standalone `main()` for the `mad-sa-linux` ELF track. It must not depend on
 // the Windows DLL/hook model (`dllmain`/`InjectHooks`) nor on Win libraries.
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+
+#include <SDL3/SDL.h>
 
 using int8 = int8_t;
 using int16 = int16_t;
@@ -22,7 +24,7 @@ using uint64 = uint64_t;
 
 namespace {
 void PrintUsage(const char* prog) {
-    (void)std::printf("usage: %s --smoke\n", prog ? prog : "mad-sa-linux");
+    (void)std::printf("usage: %s --smoke | --smoke-video\n", prog ? prog : "mad-sa-linux");
 }
 
 bool HasArg(int argc, char** argv, const char* want) {
@@ -33,6 +35,34 @@ bool HasArg(int argc, char** argv, const char* want) {
     }
     return false;
 }
+
+int RunSmokeVideo() {
+    if (!SDL_Init(SDL_INIT_VIDEO)) {
+        (void)std::printf("video-fail init: %s\n", SDL_GetError());
+        return 1;
+    }
+    SDL_Window* window = SDL_CreateWindow("mad-sa", 640, 480, 0);
+    if (!window) {
+        (void)std::printf("video-fail window: %s\n", SDL_GetError());
+        SDL_Quit();
+        return 1;
+    }
+    for (int i = 0; i < 10; ++i) {
+        SDL_Event event = {};
+        while (SDL_PollEvent(&event)) {
+            if (event.type == SDL_EVENT_QUIT) {
+                i = 10;
+                break;
+            }
+        }
+        OS_ThreadSleep(10);
+    }
+    SDL_DestroyWindow(window);
+    SDL_Quit();
+    OS_DebugOut("mad-sa-linux video smoke");
+    (void)std::printf("video-ok\n");
+    return 0;
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -42,6 +72,9 @@ int main(int argc, char** argv) {
         double accurate = OS_TimeAccurate();
         (void)std::printf("smoke-ok ms=%u accurate=%.3f\n", ms, accurate);
         return 0;
+    }
+    if (HasArg(argc, argv, "--smoke-video")) {
+        return RunSmokeVideo();
     }
     if (HasArg(argc, argv, "--help") || HasArg(argc, argv, "-h")) {
         PrintUsage(argc > 0 ? argv[0] : nullptr);
