@@ -13,6 +13,14 @@ option(${RE_PROJECT}_BUILD_LEGACY "Build legacy gta_reversed ASI/DLL track" ON)
 # `-DCMAKE_TOOLCHAIN_FILE=<conan_toolchain.cmake>`). OpenAL and OpenGL/EGL
 # come from the system (`libopenal-dev`, Mesa in `mad-sa:dev`).
 if(NOT ${RE_PROJECT}_BUILD_LEGACY)
+    # librw (W1): SA-world render backend source. GL3 + SDL3 to match the
+    # native track (SDL3 from Conan, Mesa GL in `mad-sa:dev`).
+    set(LIBRW_PLATFORM "GL3" CACHE STRING "" FORCE)
+    set(LIBRW_GL3_GFXLIB "SDL3" CACHE STRING "" FORCE)
+    set(LIBRW_TOOLS OFF CACHE BOOL "" FORCE)
+    set(LIBRW_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(LIBRW_INSTALL OFF CACHE BOOL "" FORCE)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../vendor/librw ${CMAKE_BINARY_DIR}/vendor/librw)
     add_executable(mad-sa-linux
         oswrapper/oswrapper_linux.cpp
         app/platform/linux/MainLinux.cpp
@@ -27,7 +35,8 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
     find_package(SDL3 REQUIRED)
     find_package(OpenAL REQUIRED)
     find_package(OpenGL REQUIRED)
-    target_link_libraries(mad-sa-linux PRIVATE Threads::Threads SDL3::SDL3 OpenAL::OpenAL OpenGL::GL OpenGL::EGL)
+    target_link_libraries(mad-sa-linux PRIVATE Threads::Threads SDL3::SDL3 OpenAL::OpenAL OpenGL::GL OpenGL::EGL librw::librw)
+    target_include_directories(mad-sa-linux PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../vendor/librw)
     return()
 endif()
 
