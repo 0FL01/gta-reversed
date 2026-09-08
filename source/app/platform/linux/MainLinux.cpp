@@ -35,11 +35,14 @@ using uint64 = uint64_t;
 #include "oswrapper/oswrapper.h"
 #include "app/platform/linux/WorldShot.h"
 #include "app/platform/linux/SceneShot.h"
+#include "app/platform/linux/StreamPager.h"
+
+#include <sys/resource.h>
 
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -750,6 +753,332 @@ int RunShotScene(int argc, char** argv) {
     SceneShot_Shutdown();
     return 0;
 }
+
+// R6b: path-driven frame. Same triangle soup + CPU Lambert as DrawWorldFrame
+// but the camera is fully determined by the path: eye at the waypoint,
+// lookAt forward along the segment yaw with a fixed -10deg pitch, fixed
+// 60deg-vertical frustum. No turntable: re-running the same path must give
+// the same pixels.
+void DrawE2EFrame(const WorldShotScene& scene, int width, int height, const float* eye,
+                  const float* target) {
+    glViewport(0, 0, width, height);
+    glDisable(GL_TEXTURE_2D);
+    glDisable(GL_LIGHTING);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LESS);
+    glClearColor(0.05f, 0.07f, 0.12f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    float aspect = static_cast<float>(width) / static_cast<float>(height);
+    const float nearPlane = 1.0f;
+    const float farPlane = 6000.0f;
+    const float halfH = nearPlane * 0.57735027f; // tan(30deg)
+    glFrustum(-halfH * aspect, halfH * aspect, -halfH, halfH, nearPlane, farPlane);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    float up[3] = { 0.0f, 0.0f, 1.0f };
+    float view[16] = {};
+    LookAtMatrix(eye, target, up, view);
+    glMultMatrixf(view);
+    float light[3] = { 0.45f, -0.55f, 0.70f };
+    Normalize3(light);
+    glBegin(GL_TRIANGLES);
+    for (const WorldShotMesh& mesh : scene.meshes) {
+        size_t count = mesh.pos.size();
+        for (size_t i = 0; i + 2 < count; i += 3) {
+            float nx = mesh.nrm[i];
+            float ny = mesh.nrm[i + 1];
+            float nz = mesh.nrm[i + 2];
+            float d = nx * light[0] + ny * light[1] + nz * light[2];
+            float k = 0.32f + 0.68f * (d > 0.0f ? d : 0.0f);
+            glColor3f(mesh.color[0] * k, mesh.color[1] * k, mesh.color[2] * k);
+            glVertex3f(mesh.pos[i], mesh.pos[i + 1], mesh.pos[i + 2]);
+        }
+    }
+    glEnd();
+    glFinish();
+}
+
+uint64_t PixelsChecksum(const std::vector<uint8>& pixels, uint64_t& sumR, uint64_t& sumG, uint64_t& sumB,
+                        uint64_t& nonBlack) {
+    sumR = 0;
+    sumG = 0;
+    sumB = 0;
+    nonBlack = 0;
+    uint64_t checksum = 1469598103934665603ULL;
+    for (size_t i = 0; i < pixels.size(); i += 4) {
+        uint64_t r = pixels[i];
+        uint64_t g = pixels[i + 1];
+        uint64_t b = pixels[i + 2];
+        sumR += r;
+        sumG += g;
+        sumB += b;
+        if (r + g + b > 16) {
+            ++nonBlack;
+        }
+        checksum ^= r + (g << 8) + (b << 16);
+        checksum *= 1099511628211ULL;
+    }
+    return checksum;
+}
+
+// R6b e2e: camera walks a straight A->B path split into W waypoints; at each
+// waypoint the streaming pager pages grid sectors around the camera (evicting
+// past R+hysteresis), F frames are rendered, and one TGA per waypoint is
+// written. Summary line carries the acceptance fields.
+int RunE2E(int argc, char** argv) {
+    float ax = 1600.0f;
+    float ay = -1700.0f;
+    float az = 70.0f;
+    float bx = 1683.0f;
+    float by = -2285.0f;
+    float bz = 50.0f;
+    const char* pathArg = ArgValue(argc, argv, "--path", nullptr);
+    if (pathArg) {
+        float pax = 0, pay = 0, paz = 0, pbx = 0, pby = 0, pbz = 0;
+        if (std::sscanf(pathArg, "%f , %f , %f : %f , %f , %f", &pax, &pay, &paz, &pbx, &pby,
+                         &pbz) != 6) {
+            (void)std::printf("e2e-fail bad --path '%s' (want Ax,Ay,Az:Bx,By,Bz)\n", pathArg);
+            return 1;
+        }
+        ax = pax;
+        ay = pay;
+        az = paz;
+        bx = pbx;
+        by = pby;
+        bz = pbz;
+    }
+    int waypoints = std::atoi(ArgValue(argc, argv, "--waypoints", "3"));
+    int framesPerLeg = std::atoi(ArgValue(argc, argv, "--frames-per-leg", "5"));
+    if (waypoints < 1 || waypoints > 64 || framesPerLeg < 1 || framesPerLeg > 120) {
+        (void)std::printf(
+            "e2e-fail bad args waypoints='%s' frames-per-leg='%s'\n", ArgValue(argc, argv, "--waypoints", "3"),
+            ArgValue(argc, argv, "--frames-per-leg", "5")
+        );
+        return 1;
+    }
+    // Output prefix: --out wins; else a non-flag token right after --e2e; else "e2e".
+    std::string prefix = "e2e";
+    const char* outArg = ArgValue(argc, argv, "--out", nullptr);
+    if (outArg && outArg[0] != '\0') {
+        prefix = outArg;
+    } else {
+        for (int i = 1; i + 1 < argc; ++i) {
+            if (std::strcmp(argv[i], "--e2e") == 0 && argv[i + 1][0] != '-') {
+                prefix = argv[i + 1];
+                break;
+            }
+        }
+    }
+    const int width = 640;
+    const int height = 480;
+    auto getPlatformDisplay = reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(
+        eglGetProcAddress("eglGetPlatformDisplayEXT")
+    );
+    if (!getPlatformDisplay) {
+        (void)std::printf("e2e-fail no eglGetPlatformDisplayEXT\n");
+        return 1;
+    }
+#ifndef EGL_PLATFORM_SURFACELESS_MESA
+#define EGL_PLATFORM_SURFACELESS_MESA 0x31DD
+#endif
+    EGLDisplay display = getPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
+    if (display == EGL_NO_DISPLAY) {
+        (void)std::printf("e2e-fail no surfaceless display 0x%x\n", eglGetError());
+        return 1;
+    }
+    if (!eglInitialize(display, nullptr, nullptr)) {
+        (void)std::printf("e2e-fail egl init 0x%x\n", eglGetError());
+        return 1;
+    }
+    const EGLint configAttrs[] = {
+        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
+        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+        EGL_DEPTH_SIZE, 24,
+        EGL_NONE
+    };
+    EGLConfig config = nullptr;
+    EGLint configCount = 0;
+    if (!eglChooseConfig(display, configAttrs, &config, 1, &configCount) || configCount < 1) {
+        (void)std::printf("e2e-fail choose config 0x%x\n", eglGetError());
+        eglTerminate(display);
+        return 1;
+    }
+    const EGLint pbufferAttrs[] = { EGL_WIDTH, width, EGL_HEIGHT, height, EGL_NONE };
+    EGLSurface surface = eglCreatePbufferSurface(display, config, pbufferAttrs);
+    if (surface == EGL_NO_SURFACE) {
+        (void)std::printf("e2e-fail pbuffer 0x%x\n", eglGetError());
+        eglTerminate(display);
+        return 1;
+    }
+    (void)eglBindAPI(EGL_OPENGL_API);
+    EGLContext context = eglCreateContext(display, config, EGL_NO_CONTEXT, nullptr);
+    if (context == EGL_NO_CONTEXT) {
+        (void)std::printf("e2e-fail context 0x%x\n", eglGetError());
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    if (!eglMakeCurrent(display, surface, surface, context)) {
+        (void)std::printf("e2e-fail make current 0x%x\n", eglGetError());
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    const char* glVersion = reinterpret_cast<const char*>(glGetString(GL_VERSION));
+    (void)std::printf("e2e-gl %s\n", glVersion ? glVersion : "(null)");
+    std::string gameDir = ResolveGameDir(argc, argv);
+    E2ELoadInfo load{};
+    char pagerErr[512] = {};
+    if (!StreamPager_Init(gameDir.c_str(), load, pagerErr, sizeof(pagerErr))) {
+        (void)std::printf("e2e-fail pager-init %s (game=%s)\n", pagerErr, gameDir.c_str());
+        StreamPager_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    (void)std::printf(
+        "e2e-load iplTotal=%d kept=%d ide=%d ideFiles=%d iplFiles=%d cell=300 R=300 H=100 cap=80\n",
+        load.iplTotal, load.iplKept, load.ideModels, load.ideFiles, load.iplFiles
+    );
+    (void)std::printf(
+        "e2e-path A=%.2f,%.2f,%.2f B=%.2f,%.2f,%.2f W=%d F=%d\n", ax, ay, az, bx, by, bz, waypoints,
+        framesPerLeg
+    );
+    std::vector<uint64_t> checksums;
+    checksums.reserve(static_cast<size_t>(waypoints));
+    int totalFrames = 0;
+    bool failed = false;
+    for (int w = 0; w < waypoints && !failed; ++w) {
+        float t = waypoints <= 1 ? 0.0f : static_cast<float>(w) / static_cast<float>(waypoints - 1);
+        float eye[3] = { ax + (bx - ax) * t, ay + (by - ay) * t, az + (bz - az) * t };
+        // Course yaw from the segment through this waypoint (fixed formula).
+        float dx = 0.0f;
+        float dy = 0.0f;
+        if (waypoints <= 1) {
+            dx = bx - ax;
+            dy = by - ay;
+        } else if (w + 1 < waypoints) {
+            float nt = static_cast<float>(w + 1) / static_cast<float>(waypoints - 1);
+            dx = (ax + (bx - ax) * nt) - eye[0];
+            dy = (ay + (by - ay) * nt) - eye[1];
+        } else {
+            float pt = static_cast<float>(w - 1) / static_cast<float>(waypoints - 1);
+            dx = eye[0] - (ax + (bx - ax) * pt);
+            dy = eye[1] - (ay + (by - ay) * pt);
+        }
+        if (dx == 0.0f && dy == 0.0f) {
+            dx = 1.0f;
+        }
+        float yaw = std::atan2(dy, dx);
+        constexpr float kPitch = -10.0f * 3.14159265f / 180.0f;
+        float cp = std::cos(kPitch);
+        float fx = std::cos(yaw) * cp;
+        float fy = std::sin(yaw) * cp;
+        float fz = std::sin(kPitch);
+        float target[3] = { eye[0] + fx * 200.0f, eye[1] + fy * 200.0f, eye[2] + fz * 200.0f };
+        WorldShotScene scene{};
+        E2EPagerFrame pf{};
+        if (!StreamPager_Update(eye[0], eye[1], eye[2], scene, pf, pagerErr, sizeof(pagerErr))) {
+            (void)std::printf("e2e-fail pager-update wp=%d %s\n", w, pagerErr);
+            failed = true;
+            break;
+        }
+        (void)std::printf(
+            "e2e-pager wp=%d cam=%.2f,%.2f,%.2f yaw=%.3f active=%d loaded=%d evicted=%d "
+            "instances=%d models=%d cached=%d tris=%d fallback=%d\n",
+            w, eye[0], eye[1], eye[2], yaw, pf.activeCells, pf.loadedCells, pf.evictedCells,
+            pf.instances, pf.modelsUnique, pf.cacheModels, pf.tris, pf.fallback
+        );
+        for (int e = 0; e < pf.evictedShown; ++e) {
+            (void)std::printf(
+                "e2e-evict wp=%d sector=(%d,%d) dist=%d\n", w, pf.evictedCX[e], pf.evictedCY[e],
+                pf.evictedDist[e]
+            );
+        }
+        for (int f = 0; f < framesPerLeg; ++f) {
+            DrawE2EFrame(scene, width, height, eye, target);
+            SDL_Event event = {};
+            while (SDL_PollEvent(&event)) {
+            }
+        }
+        totalFrames += framesPerLeg;
+        std::vector<uint8> pixels(static_cast<size_t>(width) * static_cast<size_t>(height) * 4);
+        glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+        GLenum glErr = glGetError();
+        if (glErr != GL_NO_ERROR) {
+            (void)std::printf("e2e-fail read pixels wp=%d 0x%x\n", w, glErr);
+            failed = true;
+            break;
+        }
+        uint64_t sumR = 0;
+        uint64_t sumG = 0;
+        uint64_t sumB = 0;
+        uint64_t nonBlack = 0;
+        uint64_t checksum = PixelsChecksum(pixels, sumR, sumG, sumB, nonBlack);
+        uint64_t total = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
+        if (nonBlack == 0) {
+            (void)std::printf("e2e-fail black frame wp=%d\n", w);
+            failed = true;
+            break;
+        }
+        char outPath[1024];
+        (void)std::snprintf(outPath, sizeof(outPath), "%s_W%d.tga", prefix.c_str(), w);
+        if (!WriteTga24(outPath, width, height, pixels)) {
+            (void)std::printf("e2e-fail write '%s'\n", outPath);
+            failed = true;
+            break;
+        }
+        checksums.push_back(checksum);
+        (void)std::printf(
+            "e2e-shot wp=%d out=%s instances=%d tris=%d nonblack=%llu/%llu avg=%llu,%llu,%llu "
+            "checksum=%llu\n",
+            w, outPath, pf.instances, pf.tris, static_cast<unsigned long long>(nonBlack),
+            static_cast<unsigned long long>(total), static_cast<unsigned long long>(sumR / total),
+            static_cast<unsigned long long>(sumG / total),
+            static_cast<unsigned long long>(sumB / total), static_cast<unsigned long long>(checksum)
+        );
+    }
+    int sectorsLoaded = 0;
+    int sectorsEvicted = 0;
+    int modelsPeak = 0;
+    int trisPeak = 0;
+    StreamPager_Counters(sectorsLoaded, sectorsEvicted, modelsPeak, trisPeak);
+    struct rusage ru = {};
+    long rssMb = 0;
+    if (getrusage(RUSAGE_SELF, &ru) == 0) {
+        rssMb = ru.ru_maxrss / 1024; // Linux ru_maxrss is KiB
+    }
+    (void)std::printf("e2e-mem rssPeakMb=%ld\n", rssMb);
+    eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    eglDestroyContext(display, context);
+    eglDestroySurface(display, surface);
+    eglTerminate(display);
+    if (failed) {
+        StreamPager_Shutdown();
+        return 1;
+    }
+    std::string cs;
+    for (size_t i = 0; i < checksums.size(); ++i) {
+        char cell[32];
+        (void)std::snprintf(cell, sizeof(cell), "%s%llu", i ? "," : "",
+                            static_cast<unsigned long long>(checksums[i]));
+        cs += cell;
+    }
+    OS_DebugOut("mad-sa-linux e2e living world");
+    (void)std::printf(
+        "world-ok waypoints=%d frames=%d sectorsLoaded=%d sectorsEvicted=%d modelsPeak=%d "
+        "trisPeak=%d checksums=%s\n",
+        waypoints, totalFrames, sectorsLoaded, sectorsEvicted, modelsPeak, trisPeak, cs.c_str()
+    );
+    StreamPager_Shutdown();
+    return 0;
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -768,6 +1097,9 @@ int main(int argc, char** argv) {
     }
     if (HasArg(argc, argv, "--headless")) {
         return RunHeadless(argc, argv);
+    }
+    if (HasArg(argc, argv, "--e2e")) {
+        return RunE2E(argc, argv);
     }
     if (HasArg(argc, argv, "--shot-scene")) {
         return RunShotScene(argc, argv);
