@@ -223,7 +223,7 @@ void CollectDatLists(const std::string& text, std::vector<std::string>& ide,
         if (path.empty()) {
             continue;
         }
-        if (kind[0] == 'E') {
+        if (kind[1] == 'D') {
             ide.push_back(path);
         } else {
             ipl.push_back(path);
@@ -772,14 +772,14 @@ bool SceneShot_Init(const char* gameDir, WorldShotScene& scene, SceneShotStats& 
         rw::TexDictionary::setCurrent(empty);
     }
 
-    // --- 5. Greedy scene fill over IPL order. ---
-    const int kMaxModels = 16;
-    const int kWantModels = 10;
+    // --- 5. Greedy scene fill over IPL order. Repeated models are placed
+    // per IPL record but parsed once (modelname -> mesh cache).
+    const int kMaxModels = 64;
+    const int kWantModels = 24;
     const int kWantTris = 24000;
-    const size_t kScanCap = 600;
+    const size_t kScanCap = 3000;
     std::map<std::string, CachedModel> modelCache; // lower name -> mesh (ordered)
     std::set<std::string> failedModels;
-    std::set<std::string> usedModels;
     std::string listAcc;
     bool haveBox = false;
     size_t scanned = 0;
@@ -800,8 +800,8 @@ bool SceneShot_Init(const char* gameDir, WorldShotScene& scene, SceneShotStats& 
         }
         std::string key = inst.model;
         ToLowerInPlace(key);
-        if (usedModels.find(key) != usedModels.end() || failedModels.find(key) != failedModels.end()) {
-            continue; // cache: repeated models load once
+        if (failedModels.find(key) != failedModels.end()) {
+            continue; // known-bad: missing DFF, skinned, or animated
         }
         if (animModels.find(key) != animModels.end()) {
             failedModels.insert(key);
@@ -934,7 +934,6 @@ bool SceneShot_Init(const char* gameDir, WorldShotScene& scene, SceneShotStats& 
             }
         }
         scene.meshes.push_back(std::move(mesh));
-        usedModels.insert(key);
         ++stats.models;
         stats.tris += cached.tris;
         stats.verts += cached.tris * 3;
