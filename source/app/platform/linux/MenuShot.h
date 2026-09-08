@@ -1,0 +1,43 @@
+// MenuShot: main-menu 2D frame from real GXT strings + real TXD font texels.
+// Round 7 (R6e). Menu contents follow game_sa/Frontend/FrontendScreensPC.h
+// screen 34 (Main Menu, used as spec only): title key FEM_MM, items FEP_STG
+// (Start Game) / FEP_OPT (Options) / FEP_QUI (Quit Game). Glyphs come from
+// models/fonts.txd texture "font2" (CFont::Initialise binds Sprite[0]=font2,
+// and FONT_MENU selects texture 0 via SetFontStyle) decoded with the existing
+// TexSample decoder. Glyph mapping is the ASCII-order tile grid verified
+// per-glyph against the decoded texture: 16 columns x 13 rows (= 208 cells,
+// exactly the 208 fonts.dat prop entries) of 32x40 px cells, col = byte&15,
+// row = (byte>>4)-2 (bytes 0x20-0xFF); rows hold space/punct, digits,
+// capitals, lowercase top-down, each rendered glyph ('A','O','S','t','M','a',
+// 'i','n','u','Q','p','o','s','G','e',...) is legible in its cell. No
+// procedural glyphs, no hardcoded strings: every letter pixel is a font2
+// texel, every word is GXT TDAT bytes. Pure CPU 2D blit (nearest-neighbor +
+// alpha "over", source width clipped to the fonts.dat advance so wide glyphs
+// never drag the neighbour's edge in), no GL textures needed. Output is
+// bottom-up RGBA (glReadPixels layout) so the shared TGA writer applies
+// unchanged. Deterministic: integer math only.
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <vector>
+
+struct MenuShotStats {
+    char lang[32] = {};
+    char gxtFile[64] = {};
+    int gxtKeys = 0; // MAIN TKEY entry count
+    char itemKey[4][16] = {};
+    char itemText[4][256] = {};
+    int strings = 0; // menu strings found in the table (want 4)
+    char fontName[32] = {};
+    int fontW = 0;
+    int fontH = 0;
+    long solidTexels = 0; // font texels with alpha>=128 (glyph ink present)
+    int glyphs = 0;       // non-space glyphs drawn (want >= 30)
+    uint32_t missing[16] = {};
+    int missingCount = 0; // distinct non-space bytes with empty tiles
+};
+
+bool MenuShot_Render(const char* gameDir, const char* lang, std::vector<uint8_t>& outRGBA,
+                     MenuShotStats& stats, char* err, std::size_t errSize);
+void MenuShot_Shutdown();

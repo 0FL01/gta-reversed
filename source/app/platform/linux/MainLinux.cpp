@@ -38,13 +38,15 @@ using uint64 = uint64_t;
 #include "app/platform/linux/StreamPager.h"
 #include "app/platform/linux/TexSample.h"
 #include "app/platform/linux/SfxDecode.h"
+#include "app/platform/linux/GxtText.h"
+#include "app/platform/linux/MenuShot.h"
 
 #include <sys/resource.h>
 
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] | --shot-menu <out.tga> [--lang english] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -1106,6 +1108,74 @@ int RunE2E(int argc, char** argv) {
     StreamPager_Shutdown();
     return 0;
 }
+// R6e: main-menu 2D frame. Strings come from the GXT MAIN table, letter
+// pixels come from the fonts.txd font2 texels (MenuShot CPU blit, no GL).
+int RunShotMenu(int argc, char** argv) {
+    const char* outPath = ArgValue(argc, argv, "--shot-menu", "menu.tga");
+    const char* lang = ArgValue(argc, argv, "--lang", "english");
+    if (!outPath || outPath[0] == '\0' || !lang || lang[0] == '\0') {
+        (void)std::printf("menu-fail bad args shot-menu='%s' lang='%s'\n", outPath, lang);
+        return 1;
+    }
+    std::string gameDir = ResolveGameDir(argc, argv);
+    std::vector<uint8> pixels;
+    MenuShotStats mst{};
+    char menuErr[512] = {};
+    if (!MenuShot_Render(gameDir.c_str(), lang, pixels, mst, menuErr, sizeof(menuErr))) {
+        (void)std::printf("menu-fail %s (game=%s lang=%s)\n", menuErr, gameDir.c_str(), lang);
+        MenuShot_Shutdown();
+        return 1;
+    }
+    (void)std::printf("menutext-load lang=%s file=%s keys=%d\n", mst.lang, mst.gxtFile, mst.gxtKeys);
+    for (int i = 0; i < 4; ++i) {
+        (void)std::printf("menuitem key=%s text=\"%s\"\n", mst.itemKey[i], mst.itemText[i]);
+    }
+    (void)std::printf(
+        "fonttex name=%s %dx%d solidTexels=%ld\n", mst.fontName, mst.fontW, mst.fontH,
+        mst.solidTexels
+    );
+    uint64_t sumR = 0;
+    uint64_t sumG = 0;
+    uint64_t sumB = 0;
+    uint64_t nonBlack = 0;
+    uint64_t checksum = PixelsChecksum(pixels, sumR, sumG, sumB, nonBlack);
+    uint64_t total = 640ULL * 480ULL;
+    if (pixels.size() != total * 4 || nonBlack == 0) {
+        (void)std::printf("menu-fail bad frame pixels=%d nonblack=%llu\n",
+                           static_cast<int>(pixels.size()),
+                           static_cast<unsigned long long>(nonBlack));
+        MenuShot_Shutdown();
+        return 1;
+    }
+    if (!WriteTga24(outPath, 640, 480, pixels)) {
+        (void)std::printf("menu-fail write '%s'\n", outPath);
+        MenuShot_Shutdown();
+        return 1;
+    }
+    std::string miss = "";
+    for (int i = 0; i < mst.missingCount; ++i) {
+        char cell[16];
+        (void)std::snprintf(cell, sizeof(cell), "%s0x%02X", i ? "," : "",
+                             mst.missing[i]);
+        miss += cell;
+    }
+    OS_DebugOut("mad-sa-linux menu shot");
+    (void)std::printf(
+        "menu-ok lang=%s strings=%d glyphs=%d missingGlyphs=%d missing=[%s] checksum=%llu\n",
+        mst.lang, mst.strings, mst.glyphs, mst.missingCount, miss.c_str(),
+        static_cast<unsigned long long>(checksum)
+    );
+    (void)std::printf(
+        "menushot-ok out=%s nonblack=%llu/%llu avg=%llu,%llu,%llu checksum=%llu\n", outPath,
+        static_cast<unsigned long long>(nonBlack), static_cast<unsigned long long>(total),
+        static_cast<unsigned long long>(sumR / total),
+        static_cast<unsigned long long>(sumG / total),
+        static_cast<unsigned long long>(sumB / total), static_cast<unsigned long long>(checksum)
+    );
+    MenuShot_Shutdown();
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1130,6 +1200,9 @@ int main(int argc, char** argv) {
     }
     if (HasArg(argc, argv, "--e2e")) {
         return RunE2E(argc, argv);
+    }
+    if (HasArg(argc, argv, "--shot-menu")) {
+        return RunShotMenu(argc, argv);
     }
     if (HasArg(argc, argv, "--shot-scene")) {
         return RunShotScene(argc, argv);
