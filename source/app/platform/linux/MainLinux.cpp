@@ -37,13 +37,14 @@ using uint64 = uint64_t;
 #include "app/platform/linux/SceneShot.h"
 #include "app/platform/linux/StreamPager.h"
 #include "app/platform/linux/TexSample.h"
+#include "app/platform/linux/SfxDecode.h"
 
 #include <sys/resource.h>
 
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -258,6 +259,123 @@ int RunSmokeAudio() {
     alcCloseDevice(device);
     OS_DebugOut("mad-sa-linux audio smoke");
     (void)std::printf("audio-ok backend=%s\n", backend);
+    return 0;
+}
+
+// Round 6 (R6d): real SFX sound. Decodes K sounds from audio/sfx/<BANK>
+// (default GENRL) through SfxDecode (BankLkup.dat + BankSlot-layout bank
+// headers, signed PCM16 mono at the per-sound rate), uploads each to an
+// OpenAL buffer on the null sink (same ALSOFT_DRIVERS trick as R4), and
+// reports buffer-verified metrics. No synthesis anywhere on this path.
+int RunSmokeAudioReal(int argc, char** argv) {
+    const char* bankArg = ArgValue(argc, argv, "--bank", "GENRL");
+    int want = std::atoi(ArgValue(argc, argv, "--samples", "16"));
+    if (want <= 0) {
+        (void)std::printf("audio-real-fail bad --samples '%s'\n",
+                           ArgValue(argc, argv, "--samples", "16"));
+        return 1;
+    }
+    std::string gameDir = ResolveGameDir(argc, argv);
+    OS_SetFilePathOffset(gameDir.c_str());
+
+    SfxDecodeResult decoded;
+    if (!SfxDecode_PakBank(bankArg, want, decoded)) {
+        (void)std::printf("audio-real-fail bank=%s reason=%s\n", bankArg,
+                           decoded.failReason.c_str());
+        return 1;
+    }
+
+    bool forcedNull = false;
+    if (!std::getenv("ALSOFT_DRIVERS")) {
+        (void)setenv("ALSOFT_DRIVERS", "null", 1);
+        forcedNull = true;
+    }
+    const char* backend = forcedNull ? "null" : "default";
+    ALCdevice* device = alcOpenDevice(nullptr);
+    if (!device) {
+        (void)std::printf("audio-real-fail open device\n");
+        return 1;
+    }
+    ALCcontext* context = alcCreateContext(device, nullptr);
+    if (!context || alcMakeContextCurrent(context) == ALC_FALSE) {
+        (void)std::printf("audio-real-fail create context\n");
+        if (context) {
+            alcDestroyContext(context);
+        }
+        alcCloseDevice(device);
+        return 1;
+    }
+    const size_t count = decoded.sounds.size();
+    std::vector<ALuint> buffers(count, 0);
+    alGenBuffers(static_cast<ALsizei>(count), buffers.data());
+    if (alGetError() != AL_NO_ERROR) {
+        (void)std::printf("audio-real-fail gen buffers\n");
+        alcMakeContextCurrent(nullptr);
+        alcDestroyContext(context);
+        alcCloseDevice(device);
+        return 1;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        const SfxSound& sound = decoded.sounds[i];
+        alBufferData(buffers[i], AL_FORMAT_MONO16, sound.pcm.data(),
+                     static_cast<ALsizei>(sound.dataSize), sound.rateHz);
+        if (alGetError() != AL_NO_ERROR) {
+            (void)std::printf("audio-real-fail buffer data sound=%d\n",
+                               sound.soundIndex);
+            alDeleteBuffers(static_cast<ALsizei>(count), buffers.data());
+            alcMakeContextCurrent(nullptr);
+            alcDestroyContext(context);
+            alcCloseDevice(device);
+            return 1;
+        }
+        // Verify the upload stuck: size/frequency/bits/channels round-trip.
+        ALint gotSize = 0, gotFreq = 0, gotBits = 0, gotCh = 0;
+        alGetBufferi(buffers[i], AL_SIZE, &gotSize);
+        alGetBufferi(buffers[i], AL_FREQUENCY, &gotFreq);
+        alGetBufferi(buffers[i], AL_BITS, &gotBits);
+        alGetBufferi(buffers[i], AL_CHANNELS, &gotCh);
+        if (alGetError() != AL_NO_ERROR || gotSize != (ALint)sound.dataSize ||
+            gotFreq != (ALint)sound.rateHz || gotBits != 16 || gotCh != 1) {
+            (void)std::printf("audio-real-fail buffer verify sound=%d\n",
+                               sound.soundIndex);
+            alDeleteBuffers(static_cast<ALsizei>(count), buffers.data());
+            alcMakeContextCurrent(nullptr);
+            alcDestroyContext(context);
+            alcCloseDevice(device);
+            return 1;
+        }
+    }
+    // Worked example for the report: first decoded sound end to end.
+    {
+        const SfxSound& first = decoded.sounds.front();
+        int64_t sumSq = 0;
+        for (int16_t v : first.pcm) {
+            sumSq += static_cast<int64_t>(v) * v;
+        }
+        const double firstRms = first.pcm.empty()
+                                    ? 0.0
+                                    : std::sqrt(static_cast<double>(sumSq) /
+                                                first.pcm.size());
+        (void)std::printf(
+            "sfx-detail bankId=%d sound=%d rate=%u size=%u rms=%.1f\n",
+            first.bankId, first.soundIndex, first.rateHz, first.dataSize,
+            firstRms);
+    }
+    (void)std::printf(
+        "sample-ok bank=%s samples=%d decodedBytes=%llu durationMs=%lld "
+        "rms=%.1f peak=%d bufChecksum=%llu backend=%s skippedBanks=%d\n",
+        decoded.bankName.c_str(), static_cast<int>(count),
+        static_cast<unsigned long long>(decoded.decodedBytes),
+        static_cast<long long>(std::llround(decoded.durationMs)),
+        decoded.rms, decoded.peak,
+        static_cast<unsigned long long>(decoded.bufChecksum), backend,
+        decoded.skippedBanks);
+    (void)std::printf("audio-real-ok\n");
+    alDeleteBuffers(static_cast<ALsizei>(count), buffers.data());
+    alcMakeContextCurrent(nullptr);
+    alcDestroyContext(context);
+    alcCloseDevice(device);
+    OS_DebugOut("mad-sa-linux real sfx audio");
     return 0;
 }
 
@@ -1000,6 +1118,9 @@ int main(int argc, char** argv) {
     }
     if (HasArg(argc, argv, "--smoke-video")) {
         return RunSmokeVideo();
+    }
+    if (HasArg(argc, argv, "--smoke-audio-real")) {
+        return RunSmokeAudioReal(argc, argv);
     }
     if (HasArg(argc, argv, "--smoke-audio")) {
         return RunSmokeAudio();
