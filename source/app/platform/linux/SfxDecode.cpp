@@ -127,7 +127,7 @@ bool SfxDecode_PakBank(const std::string& bankName, int wantSamples,
         name[len] = '\0';
         if (out.bankName == name) {
             pakNo = static_cast<int>(i);
-            std::memcpy(pakBase, name, sizeof(pakBase) - 1);
+            (void)std::snprintf(pakBase, sizeof(pakBase), "%s", name);
             break;
         }
     }
