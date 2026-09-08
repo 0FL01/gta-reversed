@@ -29,6 +29,7 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
         app/platform/linux/WorldShot.cpp
         app/platform/linux/SceneShot.cpp
         app/platform/linux/StreamPager.cpp
+        app/platform/linux/TexSample.cpp
     )
     target_compile_features(mad-sa-linux PRIVATE cxx_std_23)
     target_include_directories(mad-sa-linux PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

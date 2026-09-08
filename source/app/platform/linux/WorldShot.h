@@ -7,6 +7,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <vector>
 
 struct WorldShotStats {
@@ -25,12 +26,29 @@ struct WorldShotMesh {
     // Flat triangle soup: 9 floats per triangle (pos), same layout (nrm).
     std::vector<float> pos;
     std::vector<float> nrm;
+    // Per-vertex UVs (6 floats per triangle); empty when geometry has none.
+    std::vector<float> uv;
+    // Per-triangle texture image index into WorldShotScene::images:
+    // >=0 decoded TXD texels, -1 untextured by design, -2 wanted but missing.
+    std::vector<int> triImg;
+    // Per-triangle material color (3 floats, 0..1).
+    std::vector<float> triCol;
     float color[3];
     int tris;
 };
 
+// One decoded TXD texture: RGBA8 bytes straight from TXD raster bytes.
+struct WorldShotImage {
+    char name[32];
+    int w;
+    int h;
+    uint32_t filter; // DFF material filterAddressing (wrap modes)
+    std::vector<uint8_t> rgba; // w*h*4, top row first (librw lock order)
+};
+
 struct WorldShotScene {
     std::vector<WorldShotMesh> meshes;
+    std::vector<WorldShotImage> images; // decoded TXD texels (flatten fills)
     float bboxMin[3];
     float bboxMax[3];
     WorldShotStats stats;
