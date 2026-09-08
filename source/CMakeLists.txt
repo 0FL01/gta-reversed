@@ -34,6 +34,8 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
         app/platform/linux/GxtText.cpp
         app/platform/linux/MenuShot.cpp
         app/platform/linux/MenuNav.cpp
+        app/platform/linux/ColLoad.cpp
+        app/platform/linux/Collide.cpp
     )
     target_compile_features(mad-sa-linux PRIVATE cxx_std_23)
     target_include_directories(mad-sa-linux PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

@@ -41,13 +41,14 @@ using uint64 = uint64_t;
 #include "app/platform/linux/GxtText.h"
 #include "app/platform/linux/MenuShot.h"
 #include "app/platform/linux/MenuNav.h"
+#include "app/platform/linux/ColLoad.h"
 
 #include <sys/resource.h>
 
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -1254,6 +1255,95 @@ int RunMenuNav(int argc, char** argv) {
     return 0;
 }
 
+// R6g: ground under feet. Probes N fixed world points (IPL-dense downtown
+// LA <-> airport corridor) with a vertical raycast against bound COL
+// models. Heights come only from COL bytes; a miss reports h=-50.00 with
+// prim=none (ray bottom, never NaN). Checksum is FNV-1a over the heights
+// quantized to 1e-3, so two clean runs must agree bit for bit.
+int RunCollProbe(int argc, char** argv) {
+    // Fixed probe points: exact XY of bound text-IPL instances (model names
+    // verified against the COL set before the round; see R6g evidence).
+    static const double kProbes[][2] = {
+        { 1755.60, -1812.30 }, // Roads03_LAn deck (instance origin sits in the
+                               // crossroads gap; 30m south along the same deck)
+        { 1608.20, -1721.80 }, // GSFreeway7_LAn (downtown freeway)
+        { 1544.84, -1516.85 }, // fighotblok1_LAn (downtown block)
+        { 1567.60, -1248.70 }, // LAskyscrap1_LAn (downtown tower)
+        { 1451.99, -1067.40 }, // towerlan2 (north downtown tower)
+        { 1044.91, -2023.39 }, // LAroadsbrk_05_LAs (coast road)
+        { 1645.38, -2292.76 }, // lasairprt4 (airport apron)
+        { 1474.41, -2286.80 }, // lasairprt5 (airport apron)
+        { 1683.22, -2242.96 }, // lasairprterm1_LAS (terminal)
+        { 1683.22, -2328.43 }, // lasairprterm2_LAS (terminal)
+        { 1036.52, -2204.44 }, // LAroads_05_LAs (west airport road)
+        { 2056.88, -2187.35 }, // LAroads_20ghi_LAs (east airport road)
+    };
+    static const int kProbeTotal = 12;
+    int count = std::atoi(ArgValue(argc, argv, "--count", "12"));
+    if (count < 1 || count > kProbeTotal) {
+        (void)std::printf("coll-fail bad --count '%s' (want 1..%d)\n",
+                           ArgValue(argc, argv, "--count", "12"), kProbeTotal);
+        return 1;
+    }
+    std::string gameDir = ResolveGameDir(argc, argv);
+    ColLoadStats stats{};
+    char err[512] = {};
+    if (!ColLoad_Init(gameDir.c_str(), stats, err, sizeof(err))) {
+        (void)std::printf("coll-fail load %s (game=%s)\n", err, gameDir.c_str());
+        ColLoad_Shutdown();
+        return 1;
+    }
+    (void)std::printf("coll-load files=%d models=%d spheres=%ld boxes=%ld verts=%ld tris=%ld "
+                       "instances=%d\n",
+                       stats.files, stats.models, stats.spheres, stats.boxes, stats.verts,
+                       stats.tris, stats.instances);
+    int hits = 0;
+    int nan = 0;
+    uint64_t checksum = 1469598103934665603ULL;
+    for (int i = 0; i < count; ++i) {
+        ColProbeHit hit{};
+        ColLoad_Probe(kProbes[i][0], kProbes[i][1], hit);
+        bool finite = std::isfinite(hit.h);
+        bool inRange = finite && hit.h >= -50.0 && hit.h <= 500.0;
+        if (!finite) {
+            ++nan;
+        }
+        bool isHit = std::strcmp(hit.prim, "none") != 0;
+        if (isHit && inRange) {
+            ++hits;
+        }
+        // FNV-1a over the height quantized to 1e-3 (int64 LE bytes).
+        int64_t q = finite ? static_cast<int64_t>(std::llround(hit.h * 1000.0)) : 0;
+        if (!finite) {
+            q = 0;
+        }
+        for (int b = 0; b < 8; ++b) {
+            checksum ^= static_cast<uint64_t>((q >> (b * 8)) & 0xFF);
+            checksum *= 1099511628211ULL;
+        }
+        (void)std::printf("coll-hit x=%.2f y=%.2f h=%.2f model=%s prim=%s near=%s@%.2f\n",
+                           hit.x, hit.y, finite ? hit.h : -50.0, hit.model, hit.prim, hit.near,
+                           hit.nearDist);
+        if (!inRange) {
+            (void)std::printf("coll-fail height out of range probe=%d h=%.2f\n", i, hit.h);
+            ColLoad_Shutdown();
+            return 1;
+        }
+    }
+    OS_DebugOut("mad-sa-linux collision probe");
+    (void)std::printf("coll-ok probes=%d hits=%d nan=%d checksum=%llu\n", count, hits, nan,
+                       static_cast<unsigned long long>(checksum));
+    ColLoad_Shutdown();
+    if (nan != 0) {
+        return 1;
+    }
+    if (hits * 3 < count * 2) {
+        (void)std::printf("coll-fail sparse hits=%d probes=%d (need >= 2/3)\n", hits, count);
+        return 1;
+    }
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1278,6 +1368,9 @@ int main(int argc, char** argv) {
     }
     if (HasArg(argc, argv, "--menu-nav")) {
         return RunMenuNav(argc, argv);
+    }
+    if (HasArg(argc, argv, "--coll-probe")) {
+        return RunCollProbe(argc, argv);
     }
     if (HasArg(argc, argv, "--e2e")) {
         return RunE2E(argc, argv);
