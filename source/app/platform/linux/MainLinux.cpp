@@ -1,13 +1,17 @@
-// mad-sa Linux native entry point (R1 skeleton, R2 SDL3 video, R3 headless data).
+// mad-sa Linux native entry point (R1 skeleton, R2 SDL3 video, R3 headless data, R4 OpenAL).
 // Standalone `main()` for the `mad-sa-linux` ELF track. It must not depend on
 // the Windows DLL/hook model (`dllmain`/`InjectHooks`) nor on Win libraries.
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
 
 #include <SDL3/SDL.h>
+
+#include <AL/al.h>
+#include <AL/alc.h>
 
 using int8 = int8_t;
 using int16 = int16_t;
@@ -27,7 +31,7 @@ using uint64 = uint64_t;
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --headless [--ticks N]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --headless [--ticks N]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -202,6 +206,48 @@ int RunHeadless(int argc, char** argv) {
     );
     return 0;
 }
+
+int RunSmokeAudio() {
+    bool forcedNull = false;
+    if (!std::getenv("ALSOFT_DRIVERS")) {
+        (void)setenv("ALSOFT_DRIVERS", "null", 1);
+        forcedNull = true;
+    }
+    ALCdevice* device = alcOpenDevice(nullptr);
+    const char* backend = forcedNull ? "null" : "default";
+    if (!device) {
+        (void)std::printf("audio-fail open device\n");
+        return 1;
+    }
+    ALCcontext* context = alcCreateContext(device, nullptr);
+    if (!context) {
+        (void)std::printf("audio-fail create context\n");
+        alcCloseDevice(device);
+        return 1;
+    }
+    if (alcMakeContextCurrent(context) == ALC_FALSE) {
+        (void)std::printf("audio-fail make current\n");
+        alcDestroyContext(context);
+        alcCloseDevice(device);
+        return 1;
+    }
+    ALuint buffer = 0;
+    alGenBuffers(1, &buffer);
+    if (alGetError() != AL_NO_ERROR || buffer == 0) {
+        (void)std::printf("audio-fail gen buffer\n");
+        alcMakeContextCurrent(nullptr);
+        alcDestroyContext(context);
+        alcCloseDevice(device);
+        return 1;
+    }
+    alDeleteBuffers(1, &buffer);
+    alcMakeContextCurrent(nullptr);
+    alcDestroyContext(context);
+    alcCloseDevice(device);
+    OS_DebugOut("mad-sa-linux audio smoke");
+    (void)std::printf("audio-ok backend=%s\n", backend);
+    return 0;
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -214,6 +260,9 @@ int main(int argc, char** argv) {
     }
     if (HasArg(argc, argv, "--smoke-video")) {
         return RunSmokeVideo();
+    }
+    if (HasArg(argc, argv, "--smoke-audio")) {
+        return RunSmokeAudio();
     }
     if (HasArg(argc, argv, "--headless")) {
         return RunHeadless(argc, argv);

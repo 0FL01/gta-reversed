@@ -7,10 +7,11 @@ option(${RE_PROJECT}_STANDALONE "Build standalone executable" OFF)
 option(${RE_PROJECT}_DUMP_HOOKS_ONLY "Dump hooks only" OFF)
 option(${RE_PROJECT}_BUILD_LEGACY "Build legacy gta_reversed ASI/DLL track" ON)
 
-# mad-sa native Linux track (R1 skeleton, R2 SDL3 video).
+# mad-sa native Linux track (R1 skeleton, R2 SDL3 video, R4 OpenAL).
 # Configure with `-DGTASA_BUILD_LEGACY=OFF` to build only `mad-sa-linux`.
 # R2 needs SDL3 via Conan (`conan install --requires=sdl/3.4.14 ...` +
-# `-DCMAKE_TOOLCHAIN_FILE=<conan_toolchain.cmake>`).
+# `-DCMAKE_TOOLCHAIN_FILE=<conan_toolchain.cmake>`). OpenAL comes from the
+# system (`libopenal-dev` in `mad-sa:dev`).
 if(NOT ${RE_PROJECT}_BUILD_LEGACY)
     add_executable(mad-sa-linux
         oswrapper/oswrapper_linux.cpp
@@ -24,7 +25,8 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
     )
     find_package(Threads REQUIRED)
     find_package(SDL3 REQUIRED)
-    target_link_libraries(mad-sa-linux PRIVATE Threads::Threads SDL3::SDL3)
+    find_package(OpenAL REQUIRED)
+    target_link_libraries(mad-sa-linux PRIVATE Threads::Threads SDL3::SDL3 OpenAL::OpenAL)
     return()
 endif()
 
