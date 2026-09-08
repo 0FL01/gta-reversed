@@ -44,13 +44,14 @@ using uint64 = uint64_t;
 #include "app/platform/linux/ColLoad.h"
 #include "app/platform/linux/RadioDecode.h"
 #include "app/platform/linux/SkinPed.h"
+#include "app/platform/linux/IfpAnim.h"
 
 #include <sys/resource.h>
 
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --list-anims | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -1444,6 +1445,245 @@ int RunShotPed(int argc, char** argv) {
     return 0;
 }
 
+// Round 12 (R6j): ped standing via one IFP keyframe. Loads the same DFF as
+// --shot-ped, samples a single keyframe per bone from anim/ped.ifp at
+// fractional time T (default 0.5, no lerp/slerp between frames this round),
+// retargets by bone tag/name (unmapped bones keep bind), skins with the
+// animated matrices, and renders through the same CPU orbit rasterizer.
+// Every quat/trans comes from IFP bytes; procedural uprights are forbidden.
+int RunShotAnim(int argc, char** argv) {
+    const char* outPath = ArgValue(argc, argv, "--shot-anim", "anim.tga");
+    const char* model = ArgValue(argc, argv, "--model", "andre");
+    const char* anim = ArgValue(argc, argv, "--anim", "IDLE_stance");
+    const char* timeArg = ArgValue(argc, argv, "--time", "0.5");
+    double timeFrac = std::atof(timeArg ? timeArg : "0.5");
+    if (!outPath || outPath[0] == '\0' || !model || model[0] == '\0' || !anim ||
+        anim[0] == '\0' || !(timeFrac >= 0.0 && timeFrac <= 1.0)) {
+        (void)std::printf("anim-fail bad args shot-anim='%s' model='%s' anim='%s' time='%s'\n",
+                           outPath ? outPath : "(null)", model ? model : "(null)",
+                           anim ? anim : "(null)", timeArg ? timeArg : "(null)");
+        return 1;
+    }
+    const int width = 640;
+    const int height = 480;
+    auto getPlatformDisplay = reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(
+        eglGetProcAddress("eglGetPlatformDisplayEXT")
+    );
+    if (!getPlatformDisplay) {
+        (void)std::printf("anim-fail no eglGetPlatformDisplayEXT\n");
+        return 1;
+    }
+#ifndef EGL_PLATFORM_SURFACELESS_MESA
+#define EGL_PLATFORM_SURFACELESS_MESA 0x31DD
+#endif
+    EGLDisplay display = getPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
+    if (display == EGL_NO_DISPLAY) {
+        (void)std::printf("anim-fail no surfaceless display 0x%x\n", eglGetError());
+        return 1;
+    }
+    if (!eglInitialize(display, nullptr, nullptr)) {
+        (void)std::printf("anim-fail egl init 0x%x\n", eglGetError());
+        return 1;
+    }
+    const EGLint configAttrs[] = {
+        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
+        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+        EGL_DEPTH_SIZE, 24,
+        EGL_NONE
+    };
+    EGLConfig config = nullptr;
+    EGLint configCount = 0;
+    if (!eglChooseConfig(display, configAttrs, &config, 1, &configCount) || configCount < 1) {
+        (void)std::printf("anim-fail choose config 0x%x\n", eglGetError());
+        eglTerminate(display);
+        return 1;
+    }
+    const EGLint pbufferAttrs[] = { EGL_WIDTH, width, EGL_HEIGHT, height, EGL_NONE };
+    EGLSurface surface = eglCreatePbufferSurface(display, config, pbufferAttrs);
+    if (surface == EGL_NO_SURFACE) {
+        (void)std::printf("anim-fail pbuffer 0x%x\n", eglGetError());
+        eglTerminate(display);
+        return 1;
+    }
+    (void)eglBindAPI(EGL_OPENGL_API);
+    EGLContext context = eglCreateContext(display, config, EGL_NO_CONTEXT, nullptr);
+    if (context == EGL_NO_CONTEXT) {
+        (void)std::printf("anim-fail context 0x%x\n", eglGetError());
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    if (!eglMakeCurrent(display, surface, surface, context)) {
+        (void)std::printf("anim-fail make current 0x%x\n", eglGetError());
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    const char* glVersion = reinterpret_cast<const char*>(glGetString(GL_VERSION));
+    (void)std::printf("anim-gl %s\n", glVersion ? glVersion : "(null)");
+    std::string gameDir = ResolveGameDir(argc, argv);
+    WorldShotScene scene{};
+    IfpAnimStats ast{};
+    char animErr[512] = {};
+    if (!IfpAnim_Init(gameDir.c_str(), model, anim, timeFrac, scene, ast, animErr, sizeof(animErr))) {
+        (void)std::printf("anim-fail load %s (game=%s model=%s anim=%s time=%s)\n", animErr,
+                           gameDir.c_str(), model, anim, timeArg);
+        IfpAnim_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    (void)std::printf(
+        "anim-load model=%s src=%s txd=%s textures=%d geoms=%d frames=%d bank=%s bankSrc=%s "
+        "anim=%s seqs=%d bankAnims=%d total=%.4f time=%.4f timeAbs=%.4f\n",
+        ast.model, ast.src, ast.txd, ast.textures, ast.geoms, ast.frames, ast.bank, ast.bankSrc,
+        ast.anim, ast.seqs, ast.animsInBank, ast.animTotal, ast.time, ast.timeAbs
+    );
+    if (ast.tried > 0) {
+        (void)std::printf("anim-fallback requested=%s picked=%s tried=%d cap=128sec\n", ast.requested,
+                           ast.src, ast.tried);
+    }
+    (void)std::printf(
+        "anim-skin bones=%d mapped=%d unmapped=%d wsum=%.6f rootDelta=%.6f\n", ast.bones,
+        ast.mapped, ast.unmapped, ast.wsum, ast.rootDelta
+    );
+    (void)std::printf(
+        "anim-bone name=\"%s\" tag=%d q=(%.4f,%.4f,%.4f,%.4f) t=(%.4f,%.4f,%.4f) hasTrans=%d "
+        "frame=%d/%d\n",
+        ast.boneName, ast.boneTag, ast.boneQ[0], ast.boneQ[1], ast.boneQ[2], ast.boneQ[3],
+        ast.boneT[0], ast.boneT[1], ast.boneT[2], ast.boneHasTrans, ast.boneFrame, ast.boneFrames
+    );
+    (void)std::printf(
+        "anim-aabb aabbBind=[%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f] "
+        "aabbAnim=[%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f] abasis=bind:skin,anim:world\n",
+        ast.bindMin[0], ast.bindMin[1], ast.bindMin[2], ast.bindMax[0], ast.bindMax[1],
+        ast.bindMax[2], ast.animMin[0], ast.animMin[1], ast.animMin[2], ast.animMax[0],
+        ast.animMax[1], ast.animMax[2]
+    );
+    bool gateBones = ast.bones == 32;
+    bool gateMapped = ast.mapped >= 24;
+    bool gateVerts = ast.verts > 1000;
+    bool gateTris = ast.tris > 1000;
+    bool gateWsum = std::fabs(ast.wsum - 1.0) < 0.01;
+    float bindHeightZ = ast.bindMax[2] - ast.bindMin[2];
+    float animHeightZ = ast.animMax[2] - ast.animMin[2];
+    float bindSpanX = ast.bindMax[0] - ast.bindMin[0];
+    float animSpanX = ast.animMax[0] - ast.animMin[0];
+    bool gateStandZ = animHeightZ >= 1.5f;
+    bool gateStandX = animSpanX <= 1.2f;
+    bool gateRoot = ast.rootDelta > 1e-6f;
+    if (!(gateBones && gateMapped && gateVerts && gateTris && gateWsum && gateStandZ && gateStandX &&
+          gateRoot)) {
+        (void)std::printf(
+            "anim-fail gate bones=%d(==32) mapped=%d(>=24) verts=%d(>1000) tris=%d(>1000) "
+            "wsum=%.6f(~1.0) animHeightZ=%.2f(>=1.50, bind=%.2f) animSpanX=%.2f(<=1.20, "
+            "bind=%.2f) rootDelta=%.6f(>0)\n",
+            ast.bones, ast.mapped, ast.verts, ast.tris, ast.wsum, animHeightZ, bindHeightZ,
+            animSpanX, bindSpanX, ast.rootDelta
+        );
+        IfpAnim_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    std::vector<uint8> pixels;
+    TexFrameStats texStats{};
+    DrawWorldFrame(scene, width, height, 60.0f, nullptr, pixels, texStats);
+    uint64_t sumR = 0;
+    uint64_t sumG = 0;
+    uint64_t sumB = 0;
+    uint64_t nonBlack = 0;
+    uint64_t checksum = PixelsChecksum(pixels, sumR, sumG, sumB, nonBlack);
+    uint64_t total = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
+    if (nonBlack == 0) {
+        (void)std::printf("anim-fail black frame\n");
+        IfpAnim_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    if (checksum == 8661044579928738921ULL) {
+        (void)std::printf("anim-fail checksum equals bind pose (no movement)\n");
+        IfpAnim_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    if (!WriteTga24(outPath, width, height, pixels)) {
+        (void)std::printf("anim-fail write '%s'\n", outPath);
+        IfpAnim_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    eglDestroyContext(display, context);
+    eglDestroySurface(display, surface);
+    eglTerminate(display);
+    OS_DebugOut("mad-sa-linux anim shot");
+    (void)std::printf(
+        "texanim-ok tris=%d sampledTri=%d texelFetch=%ld greyFallback=%d flatTri=%d texPixels=%ld "
+        "uv=[%.3f,%.3f]x[%.3f,%.3f] firstTex=%s texel=%d,%d,%d,%d pixel=%d,%d,%d render=cpu\n",
+        texStats.tris, texStats.sampledTri, texStats.texelFetch, texStats.fallbackTri, texStats.flatTri,
+        texStats.texPixels, texStats.haveUV ? texStats.uvMin[0] : 0.0f,
+        texStats.haveUV ? texStats.uvMax[0] : 0.0f, texStats.haveUV ? texStats.uvMin[1] : 0.0f,
+        texStats.haveUV ? texStats.uvMax[1] : 0.0f, texStats.haveFirst ? texStats.firstTex : "-",
+        texStats.firstTexel[0], texStats.firstTexel[1], texStats.firstTexel[2],
+        texStats.firstTexel[3], texStats.firstPixel[0], texStats.firstPixel[1],
+        texStats.firstPixel[2]
+    );
+    (void)std::printf(
+        "anim-ok model=%s anim=%s time=%.4f bones=%d mapped=%d unmapped=%d posedVerts=%d "
+        "tris=%d checksum=%llu rootDelta=%.6f wsum=%.6f "
+        "aabbBind=[%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f] "
+        "aabbAnim=[%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f] bank=%s src=%s\n",
+        ast.model, ast.anim, ast.time, ast.bones, ast.mapped, ast.unmapped, ast.verts, ast.tris,
+        static_cast<unsigned long long>(checksum), ast.rootDelta, ast.wsum, ast.bindMin[0],
+        ast.bindMin[1], ast.bindMin[2], ast.bindMax[0], ast.bindMax[1], ast.bindMax[2],
+        ast.animMin[0], ast.animMin[1], ast.animMin[2], ast.animMax[0], ast.animMax[1],
+        ast.animMax[2], ast.bankSrc, ast.src
+    );
+    (void)std::printf(
+        "animshot-ok out=%s nonblack=%llu/%llu avg=%llu,%llu,%llu checksum=%llu\n", outPath,
+        static_cast<unsigned long long>(nonBlack), static_cast<unsigned long long>(total),
+        static_cast<unsigned long long>(sumR / total),
+        static_cast<unsigned long long>(sumG / total),
+        static_cast<unsigned long long>(sumB / total), static_cast<unsigned long long>(checksum)
+    );
+    IfpAnim_Shutdown();
+    return 0;
+}
+
+// Round 12 helper: enumerate the ped IFP bank (names as stored).
+int RunListAnims(int argc, char** argv) {
+    std::string gameDir = ResolveGameDir(argc, argv);
+    std::vector<std::string> names;
+    char bankSrc[160] = {};
+    char listErr[512] = {};
+    if (!IfpAnim_List(gameDir.c_str(), names, bankSrc, sizeof(bankSrc), listErr, sizeof(listErr))) {
+        (void)std::printf("animlist-fail %s (game=%s)\n", listErr, gameDir.c_str());
+        return 1;
+    }
+    (void)std::printf("anim-list bank=ped src=%s count=%d\n", bankSrc, static_cast<int>(names.size()));
+    for (const auto& n : names) {
+        (void)std::printf("anim-name %s\n", n.c_str());
+    }
+    (void)std::printf("animlist-ok count=%d\n", static_cast<int>(names.size()));
+    return 0;
+}
+
 // Round 10 (R6h): real radio sound. Decodes the first S seconds (default 5)
 // of the station's first track (StrmPaks.dat + TrakLkup.dat cut table,
 // XOR de-obfuscation, Vorbis decode — see RadioDecode) to stereo PCM16,
@@ -1696,6 +1936,12 @@ int main(int argc, char** argv) {
     }
     if (HasArg(argc, argv, "--shot-ped")) {
         return RunShotPed(argc, argv);
+    }
+    if (HasArg(argc, argv, "--shot-anim")) {
+        return RunShotAnim(argc, argv);
+    }
+    if (HasArg(argc, argv, "--list-anims")) {
+        return RunListAnims(argc, argv);
     }
     if (HasArg(argc, argv, "--shot-scene")) {
         return RunShotScene(argc, argv);
