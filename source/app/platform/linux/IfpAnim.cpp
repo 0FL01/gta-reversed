@@ -1,0 +1,1578 @@
+// IfpAnim implementation (R6j). See IfpAnim.h for the contract.
+// Own librw engine handle (same NULL-platform parse-only set as SkinPed;
+// one shot path per process, no double init). IMG helpers duplicated per
+// native-track precedent (no refactors of verified slices in-round).
+
+#include "app/platform/linux/IfpAnim.h"
+
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <cmath>
+#include <string>
+#include <vector>
+#include <map>
+
+#include "app/platform/linux/TexSample.h"
+
+using int8 = int8_t;
+using int16 = int16_t;
+using int32 = int32_t;
+using int64 = int64_t;
+using uint8 = uint8_t;
+using uint16 = uint16_t;
+using uint32 = uint32_t;
+using uint64 = uint64_t;
+
+#ifndef __stdcall
+#define __stdcall
+#endif
+
+#include "oswrapper/oswrapper.h"
+
+#include <rw.h>
+
+namespace {
+
+void SetErr(char* err, std::size_t errSize, const char* msg) {
+    if (!err || errSize == 0) {
+        return;
+    }
+    (void)std::snprintf(err, errSize, "%s", msg ? msg : "unknown");
+}
+
+void ToLowerInPlace(std::string& s) {
+    for (char& c : s) {
+        if (c >= 'A' && c <= 'Z') {
+            c = static_cast<char>(c + 32);
+        }
+    }
+}
+
+std::string ToLowerCopy(const char* s) {
+    std::string o = s ? s : "";
+    ToLowerInPlace(o);
+    return o;
+}
+
+// Trim ASCII spaces/tabs/CR/LF/NUL on both ends; IFP seq names carry a
+// leading space (" Pelvis") while DFF canonical names do not.
+std::string TrimCopy(const char* s, std::size_t n) {
+    std::string t;
+    t.reserve(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        char c = s[i];
+        if (c == '\0') {
+            break;
+        }
+        t.push_back(c);
+    }
+    std::size_t b = 0;
+    while (b < t.size() && (t[b] == ' ' || t[b] == '\t' || t[b] == '\r' || t[b] == '\n')) {
+        ++b;
+    }
+    std::size_t e = t.size();
+    while (e > b && (t[e - 1] == ' ' || t[e - 1] == '\t' || t[e - 1] == '\r' || t[e - 1] == '\n')) {
+        --e;
+    }
+    return t.substr(b, e - b);
+}
+
+bool ReadWholeFileOS(const char* path, std::vector<uint8>& out) {
+    void* file = nullptr;
+    if (OS_FileOpen(FILE_DATA_AREA_DEFAULT, &file, path, FILE_ACCESS_READ) != 0 || !file) {
+        return false;
+    }
+    int32 size = OS_FileSize(file);
+    if (size < 0) {
+        OS_FileClose(file);
+        return false;
+    }
+    out.resize(static_cast<size_t>(size));
+    bool ok = true;
+    if (size > 0) {
+        ok = OS_FileRead(file, out.data(), size) == 0;
+    }
+    OS_FileClose(file);
+    return ok;
+}
+
+struct ImgEntry {
+    std::string name;
+    std::string nameLower;
+    uint32 off = 0;
+    uint32 size = 0;
+};
+
+struct ImgIndex {
+    std::string rel;
+    std::string label;
+    std::vector<ImgEntry> entries;
+};
+
+bool BuildImgIndex(const char* imgRel, ImgIndex& idx) {
+    std::vector<uint8> head;
+    if (!ReadWholeFileOS(imgRel, head) || head.size() < 8) {
+        return false;
+    }
+    if (std::memcmp(head.data(), "VER2", 4) != 0) {
+        return false;
+    }
+    uint32 count = 0;
+    std::memcpy(&count, head.data() + 4, 4);
+    if (count == 0 || count > 300000 || head.size() < 8 + static_cast<size_t>(count) * 32) {
+        return false;
+    }
+    idx.rel = imgRel;
+    idx.label = imgRel;
+    {
+        size_t slash = idx.label.rfind('/');
+        if (slash != std::string::npos) {
+            idx.label = idx.label.substr(slash + 1);
+        }
+    }
+    idx.entries.reserve(count);
+    for (uint32 i = 0; i < count; ++i) {
+        const uint8* e = head.data() + 8 + static_cast<size_t>(i) * 32;
+        ImgEntry en;
+        std::memcpy(&en.off, e, 4);
+        std::memcpy(&en.size, e + 4, 4);
+        char nm[24] = {};
+        std::memcpy(nm, e + 8, 24);
+        nm[23] = '\0';
+        en.name = nm;
+        en.nameLower = nm;
+        ToLowerInPlace(en.nameLower);
+        en.size &= 0x7FFFu;
+        idx.entries.push_back(en);
+    }
+    return true;
+}
+
+std::string s_gameAbs;
+
+bool ImgReadBytesStd(const ImgIndex& idx, const std::string& wantLower, std::vector<uint8>& out) {
+    for (const ImgEntry& e : idx.entries) {
+        if (e.nameLower != wantLower || e.size == 0) {
+            continue;
+        }
+        std::string abs = s_gameAbs + "/" + idx.rel;
+        FILE* f = std::fopen(abs.c_str(), "rb");
+        if (!f) {
+            return false;
+        }
+        bool ok = fseeko(f, static_cast<off_t>(e.off) * 2048, SEEK_SET) == 0;
+        out.resize(static_cast<size_t>(e.size) * 2048u);
+        if (ok && !out.empty()) {
+            ok = std::fread(out.data(), 1, out.size(), f) == out.size();
+        }
+        (void)std::fclose(f);
+        return ok && !out.empty();
+    }
+    return false;
+}
+
+bool s_rwInit = false;
+
+bool RwInitEngine() {
+    if (s_rwInit) {
+        return true;
+    }
+    if (!rw::Engine::init(nil)) {
+        return false;
+    }
+    rw::ps2::registerPDSPlugin(40);
+    rw::ps2::registerPluginPDSPipes();
+    rw::registerMeshPlugin();
+    rw::registerNativeDataPlugin();
+    rw::registerAtomicRightsPlugin();
+    rw::registerMaterialRightsPlugin();
+    rw::xbox::registerVertexFormatPlugin();
+    rw::registerSkinPlugin();
+    rw::registerUserDataPlugin();
+    rw::registerHAnimPlugin();
+    rw::registerMatFXPlugin();
+    rw::registerUVAnimPlugin();
+    rw::ps2::registerADCPlugin();
+    if (!rw::Engine::open(nil) || !rw::Engine::start()) {
+        return false;
+    }
+    rw::Texture::setLoadTextures(false);
+    s_rwInit = true;
+    return true;
+}
+
+rw::TexDictionary* ParseTxd(const std::vector<uint8>& bytes) {
+    if (bytes.size() < 12) {
+        return nil;
+    }
+    rw::StreamMemory stream;
+    stream.open(const_cast<uint8*>(bytes.data()), static_cast<uint32>(bytes.size()));
+    if (!rw::findChunk(&stream, rw::ID_TEXDICTIONARY, nil, nil)) {
+        stream.close();
+        return nil;
+    }
+    rw::TexDictionary* txd = rw::TexDictionary::streamRead(&stream);
+    stream.close();
+    return txd;
+}
+
+void CrossSub(const float* a, const float* b, const float* c, float* n) {
+    float ux = b[0] - a[0];
+    float uy = b[1] - a[1];
+    float uz = b[2] - a[2];
+    float vx = c[0] - a[0];
+    float vy = c[1] - a[1];
+    float vz = c[2] - a[2];
+    n[0] = uy * vz - uz * vy;
+    n[1] = uz * vx - ux * vz;
+    n[2] = ux * vy - uy * vx;
+    float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+    if (len > 1e-9f) {
+        n[0] /= len;
+        n[1] /= len;
+        n[2] /= len;
+    } else {
+        n[0] = 0.0f;
+        n[1] = 0.0f;
+        n[2] = 1.0f;
+    }
+}
+
+void MeshColor(int index, float* rgb) {
+    static const float kPalette[][3] = {
+        { 0.78f, 0.74f, 0.68f }, { 0.85f, 0.70f, 0.48f }, { 0.55f, 0.60f, 0.62f },
+        { 0.72f, 0.30f, 0.24f }, { 0.35f, 0.52f, 0.70f }, { 0.45f, 0.62f, 0.38f },
+        { 0.88f, 0.86f, 0.80f }, { 0.60f, 0.45f, 0.62f },
+    };
+    const int count = 8;
+    int pick = index % count;
+    if (pick < 0) {
+        pick = 0;
+    }
+    rgb[0] = kPalette[pick][0];
+    rgb[1] = kPalette[pick][1];
+    rgb[2] = kPalette[pick][2];
+}
+
+// Canonical bone names: verbatim copy of the retail table
+// (ConvertBoneTag2BoneName, RpAnimBlend.cpp) for the name-domain mapping.
+// Tags are the shared key; names are logged as proof.
+const char* BoneTagToName(int32 tag) {
+    switch (tag) {
+    case 301: return "R Breast";
+    case 302: return "L Breast";
+    case 201: return "Belly";
+    case 0: return "Root";
+    case 1: return "Pelvis";
+    case 2: return "Spine";
+    case 3: return "Spine1";
+    case 4: return "Neck";
+    case 5: return "Head";
+    case 6: return "L Brow";
+    case 7: return "R Brow";
+    case 8: return "Jaw";
+    case 21: return "Bip01 R Clavicle";
+    case 22: return "R UpperArm";
+    case 23: return "R Forearm";
+    case 24: return "R Hand";
+    case 25: return "R Fingers";
+    case 26: return "R Finger01";
+    case 31: return "Bip01 L Clavicle";
+    case 32: return "L UpperArm";
+    case 33: return "L Forearm";
+    case 34: return "L Hand";
+    case 35: return "L Fingers";
+    case 36: return "L Finger01";
+    case 41: return "L Thigh";
+    case 42: return "L Calf";
+    case 43: return "L Foot";
+    case 44: return "L Toe";
+    case 51: return "R Thigh";
+    case 52: return "R Calf";
+    case 53: return "R Foot";
+    case 54: return "R Toe";
+    default: return nullptr;
+    }
+}
+
+// Reverse lookup for tag==-1 sequences (CAR-style, name-only): trimmed
+// case-insensitive match against the canonical table plus the known IFP
+// spelling variants ("L Finger" vs "L Fingers", "L Toe0" vs "L Toe",
+// "Normal" vs "Root").
+int32 BoneNameToTag(const std::string& trimmed) {
+    std::string l = trimmed;
+    ToLowerInPlace(l);
+    if (l == "normal" || l == "root") {
+        return 0;
+    }
+    // Direct canonical hit.
+    for (int32 tag : {0, 1, 2, 3, 4, 5, 6, 7, 8, 21, 22, 23, 24, 25, 26, 31, 32, 33, 34, 35, 36,
+                      41, 42, 43, 44, 51, 52, 53, 54, 201, 301, 302}) {
+        const char* cn = BoneTagToName(tag);
+        if (!cn) {
+            continue;
+        }
+        std::string cl = cn;
+        ToLowerInPlace(cl);
+        if (l == cl) {
+            return tag;
+        }
+    }
+    // Known variants.
+    if (l == "l finger") {
+        return 35;
+    }
+    if (l == "r finger") {
+        return 25;
+    }
+    if (l == "l fingers") {
+        return 35;
+    }
+    if (l == "r fingers") {
+        return 25;
+    }
+    if (l == "l toe0" || l == "l toe") {
+        return 44;
+    }
+    if (l == "r toe0" || l == "r toe") {
+        return 54;
+    }
+    if (l == "spine 1" || l == "spine1") {
+        return 3;
+    }
+    if (l == "spine 2") {
+        return 3;
+    }
+    if (l == "bip01 l clavicle") {
+        return 31;
+    }
+    if (l == "bip01 r clavicle") {
+        return 21;
+    }
+    return -1;
+}
+
+// --- IFP bank model (decoded floats, absolute times as stored) ---
+
+struct IfpFrame {
+    float q[4]; // x,y,z,w
+    float t[3]; // valid iff hasT
+    bool hasT = false;
+    float absTime = 0.0f;
+};
+
+struct IfpSeq {
+    char name[32] = {}; // trimmed stored-case ("Pelvis", "Normal")
+    int32 tag = -1;
+    int ftype = 0;
+    std::vector<IfpFrame> frames;
+};
+
+struct IfpAnimData {
+    char name[32] = {}; // as stored ("IDLE_stance")
+    std::vector<IfpSeq> seqs;
+    float total = 0.0f; // max last absTime
+};
+
+static uint16 ReadU16LE(const uint8* p) {
+    return static_cast<uint16>(p[0] | (static_cast<uint16>(p[1]) << 8));
+}
+static int16 ReadI16LE(const uint8* p) {
+    return static_cast<int16>(p[0] | (static_cast<uint16>(p[1]) << 8));
+}
+static int32 ReadI32LE(const uint8* p) {
+    int32 v = 0;
+    std::memcpy(&v, p, 4);
+    return v;
+}
+static uint32 ReadU32LE(const uint8* p) {
+    uint32 v = 0;
+    std::memcpy(&v, p, 4);
+    return v;
+}
+static float ReadF32LE(const uint8* p) {
+    float v = 0.0f;
+    std::memcpy(&v, p, 4);
+    return v;
+}
+
+// Parses ANP3 (and ANP2 as uncompressed-only). Returns false on layout
+// mismatch; never invents frames.
+bool ParseIfpBank(const std::vector<uint8>& bytes, std::string& bankNameOut,
+                  std::vector<IfpAnimData>& animsOut, char* err, std::size_t errSize) {
+    animsOut.clear();
+    bankNameOut.clear();
+    if (bytes.size() < 8) {
+        SetErr(err, errSize, "IFP too small for header");
+        return false;
+    }
+    char fourcc[5] = {};
+    std::memcpy(fourcc, bytes.data(), 4);
+    bool isAnp3 = std::memcmp(bytes.data(), "ANP3", 4) == 0;
+    bool isAnp2 = std::memcmp(bytes.data(), "ANP2", 4) == 0;
+    if (!isAnp3 && !isAnp2) {
+        SetErr(err, errSize, "IFP header is not ANP3/ANP2");
+        return false;
+    }
+    std::size_t pos = 8; // skip FourCC + size/unknown dword
+    if (pos + 24 + 4 > bytes.size()) {
+        SetErr(err, errSize, "IFP truncated at block header");
+        return false;
+    }
+    {
+        char blk[25] = {};
+        std::memcpy(blk, bytes.data() + pos, 24);
+        blk[24] = '\0';
+        bankNameOut = TrimCopy(blk, 24);
+    }
+    pos += 24;
+    uint32 numAnims = ReadU32LE(bytes.data() + pos);
+    pos += 4;
+    if (numAnims == 0 || numAnims > 10000) {
+        SetErr(err, errSize, "IFP animation count out of range");
+        return false;
+    }
+    for (uint32 a = 0; a < numAnims; ++a) {
+        if (pos + 24 + 4 > bytes.size()) {
+            SetErr(err, errSize, "IFP truncated at anim header");
+            return false;
+        }
+        IfpAnimData anim;
+        {
+            char nm[25] = {};
+            std::memcpy(nm, bytes.data() + pos, 24);
+            nm[24] = '\0';
+            std::string t = TrimCopy(nm, 24);
+            (void)std::snprintf(anim.name, sizeof(anim.name), "%s", t.c_str());
+        }
+        pos += 24;
+        uint32 numSeq = ReadU32LE(bytes.data() + pos);
+        pos += 4;
+        if (numSeq == 0 || numSeq > 128) {
+            SetErr(err, errSize, "IFP sequence count out of range");
+            return false;
+        }
+        if (isAnp3) {
+            if (pos + 8 > bytes.size()) {
+                SetErr(err, errSize, "IFP truncated at ANP3 size/flags");
+                return false;
+            }
+            // size + flags (flags&1 = compressed); frameType still decides
+            // the per-sequence decoder below so mixed banks stay honest.
+            pos += 8;
+        }
+        anim.seqs.reserve(numSeq);
+        float animTotal = 0.0f;
+        for (uint32 s = 0; s < numSeq; ++s) {
+            if (pos + 24 + 4 + 4 + 4 > bytes.size()) {
+                SetErr(err, errSize, "IFP truncated at seq header");
+                return false;
+            }
+            IfpSeq seq;
+            {
+                char sn[25] = {};
+                std::memcpy(sn, bytes.data() + pos, 24);
+                sn[24] = '\0';
+                std::string t = TrimCopy(sn, 24);
+                (void)std::snprintf(seq.name, sizeof(seq.name), "%s", t.c_str());
+            }
+            pos += 24;
+            uint32 ftype = ReadU32LE(bytes.data() + pos);
+            pos += 4;
+            uint32 nframes = ReadU32LE(bytes.data() + pos);
+            pos += 4;
+            int32 btag = ReadI32LE(bytes.data() + pos);
+            pos += 4;
+            seq.tag = btag;
+            seq.ftype = static_cast<int>(ftype);
+            if (nframes > 100000) {
+                SetErr(err, errSize, "IFP frame count out of range");
+                return false;
+            }
+            std::size_t kfSize = 0;
+            if (ftype == 1) {
+                kfSize = 20;
+            } else if (ftype == 2) {
+                kfSize = 32;
+            } else if (ftype == 3) {
+                kfSize = 10;
+            } else if (ftype == 4) {
+                kfSize = 16;
+            } else {
+                SetErr(err, errSize, "IFP unknown frame type (not 1..4)");
+                return false;
+            }
+            if (pos + kfSize * nframes > bytes.size()) {
+                SetErr(err, errSize, "IFP truncated in keyframes");
+                return false;
+            }
+            seq.frames.reserve(nframes);
+            for (uint32 k = 0; k < nframes; ++k) {
+                const uint8* p = bytes.data() + pos + static_cast<size_t>(k) * kfSize;
+                IfpFrame fr;
+                if (ftype == 3) {
+                    int16 x = ReadI16LE(p + 0);
+                    int16 y = ReadI16LE(p + 2);
+                    int16 z = ReadI16LE(p + 4);
+                    int16 w = ReadI16LE(p + 6);
+                    int16 dt = ReadI16LE(p + 8);
+                    fr.q[0] = static_cast<float>(x) / 4096.0f;
+                    fr.q[1] = static_cast<float>(y) / 4096.0f;
+                    fr.q[2] = static_cast<float>(z) / 4096.0f;
+                    fr.q[3] = static_cast<float>(w) / 4096.0f;
+                    fr.hasT = false;
+                    fr.t[0] = fr.t[1] = fr.t[2] = 0.0f;
+                    fr.absTime = static_cast<float>(dt) / 60.0f;
+                } else if (ftype == 4) {
+                    int16 x = ReadI16LE(p + 0);
+                    int16 y = ReadI16LE(p + 2);
+                    int16 z = ReadI16LE(p + 4);
+                    int16 w = ReadI16LE(p + 6);
+                    int16 dt = ReadI16LE(p + 8);
+                    int16 tx = ReadI16LE(p + 10);
+                    int16 ty = ReadI16LE(p + 12);
+                    int16 tz = ReadI16LE(p + 14);
+                    fr.q[0] = static_cast<float>(x) / 4096.0f;
+                    fr.q[1] = static_cast<float>(y) / 4096.0f;
+                    fr.q[2] = static_cast<float>(z) / 4096.0f;
+                    fr.q[3] = static_cast<float>(w) / 4096.0f;
+                    fr.hasT = true;
+                    fr.t[0] = static_cast<float>(tx) / 1024.0f;
+                    fr.t[1] = static_cast<float>(ty) / 1024.0f;
+                    fr.t[2] = static_cast<float>(tz) / 1024.0f;
+                    fr.absTime = static_cast<float>(dt) / 60.0f;
+                } else if (ftype == 1) {
+                    fr.q[0] = ReadF32LE(p + 0);
+                    fr.q[1] = ReadF32LE(p + 4);
+                    fr.q[2] = ReadF32LE(p + 8);
+                    fr.q[3] = ReadF32LE(p + 12);
+                    fr.absTime = ReadF32LE(p + 16);
+                    fr.hasT = false;
+                    fr.t[0] = fr.t[1] = fr.t[2] = 0.0f;
+                } else { // ftype 2
+                    fr.q[0] = ReadF32LE(p + 0);
+                    fr.q[1] = ReadF32LE(p + 4);
+                    fr.q[2] = ReadF32LE(p + 8);
+                    fr.q[3] = ReadF32LE(p + 12);
+                    fr.absTime = ReadF32LE(p + 16);
+                    fr.hasT = true;
+                    fr.t[0] = ReadF32LE(p + 20);
+                    fr.t[1] = ReadF32LE(p + 24);
+                    fr.t[2] = ReadF32LE(p + 28);
+                }
+                seq.frames.push_back(fr);
+            }
+            pos += kfSize * nframes;
+            if (!seq.frames.empty()) {
+                float last = seq.frames.back().absTime;
+                if (last > animTotal) {
+                    animTotal = last;
+                }
+            }
+            anim.seqs.push_back(std::move(seq));
+        }
+        anim.total = animTotal;
+        animsOut.push_back(std::move(anim));
+    }
+    return true;
+}
+
+// Effective tag for mapping: disk tag, else canonical-name lookup.
+int32 EffectiveTag(const IfpSeq& seq) {
+    if (seq.tag != -1) {
+        return seq.tag;
+    }
+    return BoneNameToTag(seq.name);
+}
+
+// Loads raw bank bytes: loose `anim/ped.ifp` first (retail path
+// CAnimManager::LoadAnimFiles opens ANIM\PED.IFP), then the IMG-packed
+// `anim/anim.img:ped.ifp` through the VER2 reader. srcLabel always names
+// the winning source; no bytes are invented.
+bool LoadBankBytes(const char* gameDir, const char* bank, std::vector<uint8>& out, std::string& srcLabel,
+                   char* err, std::size_t errSize) {
+    std::string b = bank && bank[0] ? bank : "ped";
+    std::string looseRel = std::string("anim/") + b + ".ifp";
+    std::vector<uint8> loose;
+    if (ReadWholeFileOS(looseRel.c_str(), loose) && loose.size() >= 8) {
+        out = std::move(loose);
+        srcLabel = looseRel;
+        return true;
+    }
+    ImgIndex idx;
+    if (!BuildImgIndex("anim/anim.img", idx)) {
+        SetErr(err, errSize, "no loose anim/ped.ifp and anim/anim.img not indexed");
+        return false;
+    }
+    std::string want = b + ".ifp";
+    ToLowerInPlace(want);
+    std::vector<uint8> packed;
+    if (!ImgReadBytesStd(idx, want, packed) || packed.empty()) {
+        char msg[192];
+        (void)std::snprintf(msg, sizeof(msg), "IFP bank '%s.ifp' in neither anim/%s.ifp nor anim/anim.img",
+                             b.c_str(), b.c_str());
+        SetErr(err, errSize, msg);
+        return false;
+    }
+    out = std::move(packed);
+    srcLabel = std::string("anim.img:") + b + ".ifp";
+    (void)gameDir;
+    return true;
+}
+
+// quat (x,y,z,w) -> librw local matrix with pos; formula is retail
+// CQuaternion::Get (imag-doubled products), same convention as the game.
+void QuatPosToMatrix(const float q[4], const float pos[3], rw::Matrix& out) {
+    float x = q[0];
+    float y = q[1];
+    float z = q[2];
+    float w = q[3];
+    float len = std::sqrt(x * x + y * y + z * z + w * w);
+    if (len > 1e-9f) {
+        x /= len;
+        y /= len;
+        z /= len;
+        w /= len;
+    } else {
+        x = y = z = 0.0f;
+        w = 1.0f;
+    }
+    float x2 = x + x;
+    float y2 = y + y;
+    float z2 = z + z;
+    float x2x = x2 * x;
+    float y2x = y2 * x;
+    float z2x = z2 * x;
+    float y2y = y2 * y;
+    float z2y = z2 * y;
+    float z2z = z2 * z;
+    float x2r = x2 * w;
+    float y2r = y2 * w;
+    float z2r = z2 * w;
+    out.right.x = 1.0f - (z2z + y2y);
+    out.right.y = z2r + y2x;
+    out.right.z = z2x - y2r;
+    out.up.x = y2x - z2r;
+    out.up.y = 1.0f - (z2z + x2x);
+    out.up.z = x2r + z2y;
+    out.at.x = y2r + z2x;
+    out.at.y = z2y - x2r;
+    out.at.z = 1.0f - (y2y + x2x);
+    out.pos.x = pos[0];
+    out.pos.y = pos[1];
+    out.pos.z = pos[2];
+    out.flags = 0;
+    out.pad1 = out.pad2 = out.pad3 = 0;
+}
+
+bool ClumpHasSkin(rw::Clump* clump) {
+    if (!clump) {
+        return false;
+    }
+    FORLIST(link, clump->atomics) {
+        rw::Atomic* atomic = rw::Atomic::fromClump(link);
+        rw::Geometry* geo = atomic ? atomic->geometry : nil;
+        if (geo && rw::Skin::get(geo)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<rw::TexDictionary*> s_txds;
+
+} // namespace
+
+bool IfpAnim_List(const char* gameDir, std::vector<std::string>& names, char* bankSrcOut,
+                  std::size_t bankSrcSize, char* err, std::size_t errSize) {
+    names.clear();
+    if (!gameDir || !gameDir[0]) {
+        SetErr(err, errSize, "no game dir");
+        return false;
+    }
+    std::string game(gameDir);
+    OS_SetFilePathOffset(game.c_str());
+    s_gameAbs = game;
+    std::vector<uint8> bankBytes;
+    std::string srcLabel;
+    char lerr[256] = {};
+    if (!LoadBankBytes(gameDir, "ped", bankBytes, srcLabel, lerr, sizeof(lerr))) {
+        SetErr(err, errSize, lerr);
+        return false;
+    }
+    std::string bankName;
+    std::vector<IfpAnimData> anims;
+    if (!ParseIfpBank(bankBytes, bankName, anims, err, errSize)) {
+        return false;
+    }
+    for (const auto& a : anims) {
+        names.push_back(a.name);
+    }
+    if (bankSrcOut && bankSrcSize > 0) {
+        (void)std::snprintf(bankSrcOut, bankSrcSize, "%s", srcLabel.c_str());
+    }
+    return true;
+}
+
+bool IfpAnim_Init(const char* gameDir, const char* model, const char* animName, double timeFrac,
+                  WorldShotScene& scene, IfpAnimStats& stats, char* err, std::size_t errSize) {
+    stats = IfpAnimStats{};
+    scene.meshes.clear();
+    scene.images.clear();
+    if (!gameDir || !gameDir[0]) {
+        SetErr(err, errSize, "no game dir");
+        return false;
+    }
+    if (!(timeFrac >= 0.0 && timeFrac <= 1.0)) {
+        SetErr(err, errSize, "bad --time (want 0..1 fraction)");
+        return false;
+    }
+    std::string want = model && model[0] ? model : "andre";
+    (void)std::snprintf(stats.requested, sizeof(stats.requested), "%s", want.c_str());
+    std::string wantLower = want;
+    ToLowerInPlace(wantLower);
+    std::string animWant = animName && animName[0] ? animName : "IDLE_stance";
+    std::string animWantLower = ToLowerCopy(animWant.c_str());
+    stats.time = timeFrac;
+    std::string game(gameDir);
+    OS_SetFilePathOffset(game.c_str());
+    s_gameAbs = game;
+
+    static const char* kImgs[] = { "models/player.img", "models/gta3.img", "models/gta_int.img" };
+    std::vector<ImgIndex> imgs;
+    for (const char* rel : kImgs) {
+        ImgIndex idx;
+        if (BuildImgIndex(rel, idx)) {
+            imgs.push_back(std::move(idx));
+        }
+    }
+    if (imgs.empty()) {
+        SetErr(err, errSize, "no IMG archive indexed (models/*.img)");
+        return false;
+    }
+    if (!RwInitEngine()) {
+        SetErr(err, errSize, "librw Engine::init failed");
+        return false;
+    }
+    for (rw::TexDictionary* t : s_txds) {
+        if (t) {
+            t->destroy();
+        }
+    }
+    s_txds.clear();
+
+    // --- 1. DFF bytes (direct, then SkinPed-identical gta3 fallback) ---
+    std::vector<uint8> dffBytes;
+    std::string resolved = wantLower;
+    std::string dffFile = wantLower + ".dff";
+    const ImgIndex* hitImg = nil;
+    for (const ImgIndex& idx : imgs) {
+        if (ImgReadBytesStd(idx, dffFile, dffBytes)) {
+            hitImg = &idx;
+            break;
+        }
+    }
+    if (dffBytes.empty()) {
+        const ImgIndex* gta3 = nil;
+        for (const ImgIndex& idx : imgs) {
+            if (idx.rel == "models/gta3.img") {
+                gta3 = &idx;
+                break;
+            }
+        }
+        if (!gta3) {
+            SetErr(err, errSize, "gta3.img not indexed for ped fallback scan");
+            return false;
+        }
+        int tried = 0;
+        std::string pickLocal;
+        for (const ImgEntry& e : gta3->entries) {
+            if (e.nameLower.size() < 5 ||
+                e.nameLower.compare(e.nameLower.size() - 4, 4, ".dff") != 0) {
+                continue;
+            }
+            if (e.size == 0 || e.size > 128) {
+                continue;
+            }
+            std::vector<uint8> cand;
+            if (!ImgReadBytesStd(*gta3, e.nameLower, cand)) {
+                continue;
+            }
+            ++tried;
+            LinkedClump lc = TexSample_LinkedParse(cand.data(), cand.size(), nil, nil, 0);
+            bool skinned = ClumpHasSkin(lc.clump);
+            TexSample_FreeLinked(lc);
+            if (skinned) {
+                dffBytes = std::move(cand);
+                hitImg = gta3;
+                resolved = e.nameLower.substr(0, e.nameLower.size() - 4);
+                dffFile = e.nameLower;
+                pickLocal = e.name;
+                break;
+            }
+        }
+        stats.tried = tried;
+        if (dffBytes.empty()) {
+            char msg[256];
+            (void)std::snprintf(msg, sizeof(msg),
+                                 "ped fallback scan found no skinned DFF in gta3.img (tried=%d)", tried);
+            SetErr(err, errSize, msg);
+            return false;
+        }
+        (void)std::snprintf(stats.src, sizeof(stats.src), "%s:%s", hitImg->label.c_str(),
+                             pickLocal.c_str());
+    } else {
+        for (const ImgEntry& e : hitImg->entries) {
+            if (e.nameLower == dffFile) {
+                (void)std::snprintf(stats.src, sizeof(stats.src), "%s:%s", hitImg->label.c_str(),
+                                     e.name.c_str());
+                break;
+            }
+        }
+    }
+    (void)std::snprintf(stats.model, sizeof(stats.model), "%s", resolved.c_str());
+
+    // --- 2. Per-model TXD ---
+    std::string txdFile = resolved + ".txd";
+    std::vector<rw::TexDictionary*> dicts;
+    {
+        std::vector<uint8> txdBytes;
+        if (hitImg && ImgReadBytesStd(*hitImg, txdFile, txdBytes)) {
+            rw::TexDictionary* txd = ParseTxd(txdBytes);
+            if (txd && txd->count() > 0) {
+                dicts.push_back(txd);
+                s_txds.push_back(txd);
+                stats.textures = txd->count();
+                (void)std::snprintf(stats.txd, sizeof(stats.txd), "%s:%s", hitImg->label.c_str(),
+                                     txdFile.c_str());
+            } else {
+                if (txd) {
+                    txd->destroy();
+                }
+            }
+        }
+        if (dicts.empty()) {
+            (void)std::snprintf(stats.txd, sizeof(stats.txd), "%s", "none");
+        }
+    }
+
+    // --- 3. Parse clump + hierarchy (bind pose as streamed) ---
+    rw::TexDictionary* primary = dicts.empty() ? nil : dicts[0];
+    LinkedClump lc = TexSample_LinkedParse(dffBytes.data(), dffBytes.size(), primary, nil, 0);
+    if (!lc.clump) {
+        TexSample_FreeLinked(lc);
+        SetErr(err, errSize, "DFF parse produced no clump (not a RenderWare clump?)");
+        return false;
+    }
+    if (!ClumpHasSkin(lc.clump)) {
+        TexSample_FreeLinked(lc);
+        char msg[192];
+        (void)std::snprintf(msg, sizeof(msg), "DFF '%s' has no skinned geometry", stats.src);
+        SetErr(err, errSize, msg);
+        return false;
+    }
+    rw::Frame* root = lc.clump->getFrame();
+    stats.frames = root ? root->count() : 0;
+    rw::HAnimHierarchy* hh = nil;
+    {
+        // Atomic hierarchy first (SA peds), else clump-wide.
+        FORLIST(link, lc.clump->atomics) {
+            rw::Atomic* at = rw::Atomic::fromClump(link);
+            rw::HAnimHierarchy* h = rw::Skin::getHierarchy(at);
+            if (h) {
+                hh = h;
+                break;
+            }
+        }
+        if (!hh && root) {
+            hh = rw::HAnimHierarchy::find(root);
+        }
+    }
+    if (!hh || hh->numNodes <= 0 || !hh->nodeInfo) {
+        TexSample_FreeLinked(lc);
+        SetErr(err, errSize, "no HAnim hierarchy for skinned ped");
+        return false;
+    }
+    const int numBones = hh->numNodes;
+    hh->attach();
+    int attached = 0;
+    for (int i = 0; i < numBones; ++i) {
+        if (hh->nodeInfo[i].frame) {
+            ++attached;
+        }
+    }
+    if (attached == 0) {
+        TexSample_FreeLinked(lc);
+        SetErr(err, errSize, "HAnim hierarchy attached to no frames");
+        return false;
+    }
+    stats.bones = numBones;
+
+    // Snapshots: tags, frames, bind locals + bind world LTMs.
+    std::vector<int32> boneTags(static_cast<size_t>(numBones), -1);
+    std::vector<rw::Frame*> boneFrames(static_cast<size_t>(numBones), nil);
+    std::vector<rw::Matrix> bindLocals(static_cast<size_t>(numBones));
+    std::vector<rw::Matrix> bindWorld(static_cast<size_t>(numBones));
+    for (int i = 0; i < numBones; ++i) {
+        boneTags[static_cast<size_t>(i)] = hh->nodeInfo[i].id;
+        boneFrames[static_cast<size_t>(i)] = hh->nodeInfo[i].frame;
+        rw::Frame* f = hh->nodeInfo[i].frame;
+        if (f) {
+            bindLocals[static_cast<size_t>(i)] = f->matrix;
+            rw::Matrix* ltm = f->getLTM();
+            bindWorld[static_cast<size_t>(i)] = ltm ? *ltm : f->matrix;
+        } else {
+            bindLocals[static_cast<size_t>(i)].setIdentity();
+            bindWorld[static_cast<size_t>(i)].setIdentity();
+        }
+    }
+
+    // Atomic frame for S_i = IB_i * (W_i * inv(A)).
+    rw::Atomic* firstAtomic = nil;
+    FORLIST(link, lc.clump->atomics) {
+        firstAtomic = rw::Atomic::fromClump(link);
+        break;
+    }
+    rw::Frame* atomicFrame = firstAtomic ? firstAtomic->getFrame() : nil;
+    rw::Matrix atomicMat;
+    if (atomicFrame && atomicFrame->getLTM()) {
+        atomicMat = *atomicFrame->getLTM();
+    } else {
+        atomicMat.setIdentity();
+    }
+    rw::Matrix invAtomic;
+    rw::Matrix::invert(&invAtomic, &atomicMat);
+
+    // --- 4. IFP bank + animation lookup (case-insensitive) ---
+    std::vector<uint8> bankBytes;
+    std::string bankSrc;
+    {
+        char lerr[256] = {};
+        if (!LoadBankBytes(gameDir, "ped", bankBytes, bankSrc, lerr, sizeof(lerr))) {
+            TexSample_FreeLinked(lc);
+            SetErr(err, errSize, lerr);
+            return false;
+        }
+    }
+    std::string bankName;
+    std::vector<IfpAnimData> bank;
+    if (!ParseIfpBank(bankBytes, bankName, bank, err, errSize)) {
+        TexSample_FreeLinked(lc);
+        return false;
+    }
+    (void)std::snprintf(stats.bank, sizeof(stats.bank), "%s", bankName.empty() ? "ped" : bankName.c_str());
+    (void)std::snprintf(stats.bankSrc, sizeof(stats.bankSrc), "%s", bankSrc.c_str());
+    stats.animsInBank = static_cast<int>(bank.size());
+    const IfpAnimData* anim = nil;
+    for (const auto& a : bank) {
+        if (ToLowerCopy(a.name) == animWantLower) {
+            anim = &a;
+            break;
+        }
+    }
+    if (!anim) {
+        TexSample_FreeLinked(lc);
+        char msg[192];
+        (void)std::snprintf(msg, sizeof(msg), "animation '%s' not in ped bank (%d anims)",
+                             animWant.c_str(), static_cast<int>(bank.size()));
+        SetErr(err, errSize, msg);
+        return false;
+    }
+    (void)std::snprintf(stats.anim, sizeof(stats.anim), "%s", anim->name);
+    stats.seqs = static_cast<int>(anim->seqs.size());
+    stats.animTotal = anim->total;
+    stats.timeAbs = timeFrac * anim->total;
+
+    // --- 5. Single-sample per sequence at T_abs (NO interpolation) ---
+    struct Sampled {
+        float q[4];
+        float t[3];
+        bool hasT = false;
+        int frame = 0;
+        int frames = 0;
+        bool valid = false;
+    };
+    std::vector<Sampled> sampled(anim->seqs.size());
+    for (std::size_t s = 0; s < anim->seqs.size(); ++s) {
+        const IfpSeq& sq = anim->seqs[s];
+        Sampled sm;
+        sm.frames = static_cast<int>(sq.frames.size());
+        if (sq.frames.empty()) {
+            sampled[s] = sm;
+            continue;
+        }
+        std::size_t pick = 0;
+        if (sq.frames.size() == 1) {
+            pick = 0;
+        } else {
+            pick = sq.frames.size() - 1;
+            for (std::size_t k = 0; k < sq.frames.size(); ++k) {
+                if (sq.frames[k].absTime >= static_cast<float>(stats.timeAbs)) {
+                    pick = k;
+                    break;
+                }
+            }
+        }
+        const IfpFrame& fr = sq.frames[pick];
+        sm.q[0] = fr.q[0];
+        sm.q[1] = fr.q[1];
+        sm.q[2] = fr.q[2];
+        sm.q[3] = fr.q[3];
+        // Normalise the raw IFP quat (quantised i16/4096 path).
+        {
+            float l = std::sqrt(sm.q[0] * sm.q[0] + sm.q[1] * sm.q[1] + sm.q[2] * sm.q[2] +
+                                sm.q[3] * sm.q[3]);
+            if (l > 1e-9f) {
+                sm.q[0] /= l;
+                sm.q[1] /= l;
+                sm.q[2] /= l;
+                sm.q[3] /= l;
+            } else {
+                sm.q[0] = sm.q[1] = sm.q[2] = 0.0f;
+                sm.q[3] = 1.0f;
+            }
+        }
+        sm.hasT = fr.hasT;
+        sm.t[0] = fr.t[0];
+        sm.t[1] = fr.t[1];
+        sm.t[2] = fr.t[2];
+        sm.frame = static_cast<int>(pick);
+        sm.valid = true;
+        sampled[s] = sm;
+    }
+    // IFP tag -> sampled index (first wins; bank has unique tags).
+    std::map<int32, std::size_t> tagToSeq;
+    std::map<std::string, std::size_t> nameToSeq; // trimmed-lower fallback
+    for (std::size_t s = 0; s < anim->seqs.size(); ++s) {
+        int32 et = EffectiveTag(anim->seqs[s]);
+        if (et != -1 && tagToSeq.find(et) == tagToSeq.end()) {
+            tagToSeq[et] = s;
+        }
+        std::string nl = ToLowerCopy(anim->seqs[s].name);
+        if (nameToSeq.find(nl) == nameToSeq.end()) {
+            nameToSeq[nl] = s;
+        }
+    }
+
+    // --- 6. Retarget onto DFF bones (name-domain via canonical table) ---
+    std::vector<int> boneSeqIdx(static_cast<size_t>(numBones), -1);
+    int mapped = 0;
+    for (int i = 0; i < numBones; ++i) {
+        int32 tag = boneTags[static_cast<size_t>(i)];
+        auto it = tagToSeq.find(tag);
+        int pick = -1;
+        if (it != tagToSeq.end()) {
+            pick = static_cast<int>(it->second);
+        } else {
+            // Name fallback: DFF canonical name vs IFP trimmed names.
+            const char* cn = BoneTagToName(tag);
+            if (cn) {
+                std::string cl = ToLowerCopy(cn);
+                auto jt = nameToSeq.find(cl);
+                if (jt != nameToSeq.end()) {
+                    pick = static_cast<int>(jt->second);
+                }
+            }
+        }
+        boneSeqIdx[static_cast<size_t>(i)] = pick;
+        if (pick >= 0 && sampled[static_cast<size_t>(pick)].valid) {
+            ++mapped;
+        }
+    }
+    stats.mapped = mapped;
+    stats.unmapped = numBones - mapped;
+
+    // --- 7. Bind skinning (bbox only) + anim locals -> anim world ---
+    // Collect skinned geometries first (same selection as SkinPed).
+    struct SkinnedGeom {
+        rw::Geometry* geo = nil;
+        rw::Atomic* atomic = nil;
+    };
+    std::vector<SkinnedGeom> geoms;
+    FORLIST(link, lc.clump->atomics) {
+        rw::Atomic* at = rw::Atomic::fromClump(link);
+        rw::Geometry* geo = at ? at->geometry : nil;
+        if (!geo || geo->numTriangles <= 0 || geo->numVertices <= 0) {
+            continue;
+        }
+        if (!geo->triangles || !geo->morphTargets || !geo->morphTargets[0].vertices) {
+            continue;
+        }
+        rw::Skin* skin = rw::Skin::get(geo);
+        if (!skin || skin->numBones <= 0 || !skin->indices || !skin->weights ||
+            !skin->inverseMatrices) {
+            continue;
+        }
+        // Require the skin bone count to match the hierarchy (andre: 32).
+        if (skin->numBones != numBones) {
+            continue;
+        }
+        geoms.push_back({ geo, at });
+    }
+    if (geoms.empty()) {
+        TexSample_FreeLinked(lc);
+        SetErr(err, errSize, "no skinned geometry matching the hierarchy");
+        return false;
+    }
+    stats.geoms = static_cast<int>(geoms.size());
+
+    // Retail bind positions (SkinGetBonePositionsToTable, RpAnimBlend.cpp):
+    // BonePos[i] is the HAnim-local bind translation derived from the
+    // skin-to-bone matrices (NOT the frame local pos). For non-translated
+    // IFP bones the animated local translation must be BonePos (retail
+    // FrameUpdateCallBackSkinned: t = lerp(BonePos, nextT, 0) = BonePos),
+    // with IFP translation only where the sequence carries it.
+    std::vector<rw::V3d> bonePos(static_cast<size_t>(numBones), { 0.0f, 0.0f, 0.0f });
+    {
+        rw::Skin* skin0 = rw::Skin::get(geoms[0].geo);
+        std::vector<rw::Matrix> ib(static_cast<size_t>(numBones));
+        for (int i = 0; i < numBones; ++i) {
+            std::memcpy(&ib[static_cast<size_t>(i)],
+                        skin0->inverseMatrices + static_cast<size_t>(i) * 16, 64);
+            ib[static_cast<size_t>(i)].flags = 0;
+        }
+        bonePos[0].x = bonePos[0].y = bonePos[0].z = 0.0f;
+        uint32 stk[64] = {};
+        uint32* stkPtr = stk;
+        uint32 curr = 0;
+        for (int i = 1; i < numBones; ++i) {
+            rw::Matrix invB;
+            rw::Matrix::invert(&invB, &ib[static_cast<size_t>(i)]);
+            rw::V3d out;
+            rw::V3d::transformPoints(&out, &invB.pos, 1, &ib[curr]);
+            bonePos[static_cast<size_t>(i)] = out;
+            int fl = hh->nodeInfo[i].flags;
+            if (fl & 2) { // PUSH (rpHANIMPUSHPARENTMATRIX = 0x02)
+                *++stkPtr = curr;
+            }
+            curr = (fl & 1) ? *stkPtr-- : static_cast<uint32>(i); // POP = 0x01
+        }
+    }
+
+    // Worked-example bone for the report: prefer Pelvis (tag 1), else first
+    // mapped. The logged t is the exact translation put into the animated
+    // local matrix (IFP bytes when the sequence carries translation, else
+    // the retail BonePos from the skin matrices).
+    {
+        int ex = -1;
+        for (int i = 0; i < numBones; ++i) {
+            if (boneTags[static_cast<size_t>(i)] == 1 && boneSeqIdx[static_cast<size_t>(i)] >= 0) {
+                ex = i;
+                break;
+            }
+        }
+        if (ex < 0) {
+            for (int i = 0; i < numBones; ++i) {
+                if (boneSeqIdx[static_cast<size_t>(i)] >= 0) {
+                    ex = i;
+                    break;
+                }
+            }
+        }
+        if (ex >= 0) {
+            int s = boneSeqIdx[static_cast<size_t>(ex)];
+            const Sampled& sm = sampled[static_cast<size_t>(s)];
+            const char* cn = BoneTagToName(boneTags[static_cast<size_t>(ex)]);
+            (void)std::snprintf(stats.boneName, sizeof(stats.boneName), "%s",
+                                 cn ? cn : anim->seqs[static_cast<size_t>(s)].name);
+            stats.boneTag = boneTags[static_cast<size_t>(ex)];
+            stats.boneQ[0] = sm.q[0];
+            stats.boneQ[1] = sm.q[1];
+            stats.boneQ[2] = sm.q[2];
+            stats.boneQ[3] = sm.q[3];
+            if (sm.hasT) {
+                stats.boneT[0] = sm.t[0];
+                stats.boneT[1] = sm.t[1];
+                stats.boneT[2] = sm.t[2];
+            } else {
+                stats.boneT[0] = bonePos[static_cast<size_t>(ex)].x;
+                stats.boneT[1] = bonePos[static_cast<size_t>(ex)].y;
+                stats.boneT[2] = bonePos[static_cast<size_t>(ex)].z;
+            }
+            stats.boneHasTrans = sm.hasT ? 1 : 0;
+            stats.boneFrame = sm.frame;
+            stats.boneFrames = sm.frames;
+        }
+    }
+
+    // Bind skin matrices S_i = IB_i * (Wbind_i * invA).
+    std::vector<rw::Matrix> bindSkinMats(static_cast<size_t>(numBones));
+    {
+        rw::Skin* skin0 = rw::Skin::get(geoms[0].geo);
+        for (int i = 0; i < numBones; ++i) {
+            rw::Matrix ib;
+            std::memcpy(&ib, skin0->inverseMatrices + static_cast<size_t>(i) * 16, 64);
+            ib.flags = 0;
+            rw::Matrix tmp;
+            rw::Matrix::mult(&tmp, &bindWorld[static_cast<size_t>(i)], &invAtomic);
+            rw::Matrix::mult(&bindSkinMats[static_cast<size_t>(i)], &ib, &tmp);
+        }
+    }
+    // Bind AABB from skinned positions (same vertex loop, no scene fill).
+    bool haveBind = false;
+    {
+        for (const auto& g : geoms) {
+            rw::Skin* skin = rw::Skin::get(g.geo);
+            const int nv = g.geo->numVertices;
+            rw::V3d* verts = g.geo->morphTargets[0].vertices;
+            for (int v = 0; v < nv; ++v) {
+                const uint8* idx = skin->indices + static_cast<size_t>(v) * 4;
+                const float* wgt = skin->weights + static_cast<size_t>(v) * 4;
+                rw::V3d p = { 0.0f, 0.0f, 0.0f };
+                for (int k = 0; k < 4; ++k) {
+                    int b = idx[k];
+                    float w = wgt[k];
+                    if (w == 0.0f || b < 0 || b >= numBones) {
+                        continue;
+                    }
+                    rw::V3d tp;
+                    rw::V3d::transformPoints(&tp, &verts[v], 1,
+                                             &bindSkinMats[static_cast<size_t>(b)]);
+                    p.x += w * tp.x;
+                    p.y += w * tp.y;
+                    p.z += w * tp.z;
+                }
+                if (!haveBind) {
+                    stats.bindMin[0] = stats.bindMax[0] = p.x;
+                    stats.bindMin[1] = stats.bindMax[1] = p.y;
+                    stats.bindMin[2] = stats.bindMax[2] = p.z;
+                    haveBind = true;
+                } else {
+                    if (p.x < stats.bindMin[0]) {
+                        stats.bindMin[0] = p.x;
+                    }
+                    if (p.y < stats.bindMin[1]) {
+                        stats.bindMin[1] = p.y;
+                    }
+                    if (p.z < stats.bindMin[2]) {
+                        stats.bindMin[2] = p.z;
+                    }
+                    if (p.x > stats.bindMax[0]) {
+                        stats.bindMax[0] = p.x;
+                    }
+                    if (p.y > stats.bindMax[1]) {
+                        stats.bindMax[1] = p.y;
+                    }
+                    if (p.z > stats.bindMax[2]) {
+                        stats.bindMax[2] = p.z;
+                    }
+                }
+            }
+        }
+    }
+
+    // Animated locals: mapped bones get (IFP quat, IFP-or-BonePos pos),
+    // unmapped keep the bind local matrix bit-for-bit.
+    for (int i = 0; i < numBones; ++i) {
+        rw::Frame* f = boneFrames[static_cast<size_t>(i)];
+        if (!f) {
+            continue;
+        }
+        int s = boneSeqIdx[static_cast<size_t>(i)];
+        if (s < 0 || !sampled[static_cast<size_t>(s)].valid) {
+            continue; // identity: keep bind local
+        }
+        const Sampled& sm = sampled[static_cast<size_t>(s)];
+        float pos[3];
+        if (sm.hasT) {
+            pos[0] = sm.t[0];
+            pos[1] = sm.t[1];
+            pos[2] = sm.t[2];
+        } else {
+            pos[0] = bonePos[static_cast<size_t>(i)].x;
+            pos[1] = bonePos[static_cast<size_t>(i)].y;
+            pos[2] = bonePos[static_cast<size_t>(i)].z;
+        }
+        rw::Matrix lm;
+        QuatPosToMatrix(sm.q, pos, lm);
+        f->matrix = lm;
+        f->updateObjects();
+    }
+    std::vector<rw::Matrix> animWorld(static_cast<size_t>(numBones));
+    for (int i = 0; i < numBones; ++i) {
+        rw::Frame* f = boneFrames[static_cast<size_t>(i)];
+        if (!f) {
+            animWorld[static_cast<size_t>(i)].setIdentity();
+            continue;
+        }
+        rw::Matrix* ltm = f->getLTM();
+        animWorld[static_cast<size_t>(i)] = ltm ? *ltm : f->matrix;
+    }
+    // Root delta: world pos of tag-0 bone (else hier index 0).
+    {
+        int ridx = 0;
+        for (int i = 0; i < numBones; ++i) {
+            if (boneTags[static_cast<size_t>(i)] == 0) {
+                ridx = i;
+                break;
+            }
+        }
+        float dx = animWorld[static_cast<size_t>(ridx)].pos.x - bindWorld[static_cast<size_t>(ridx)].pos.x;
+        float dy = animWorld[static_cast<size_t>(ridx)].pos.y - bindWorld[static_cast<size_t>(ridx)].pos.y;
+        float dz = animWorld[static_cast<size_t>(ridx)].pos.z - bindWorld[static_cast<size_t>(ridx)].pos.z;
+        stats.rootDelta = std::sqrt(dx * dx + dy * dy + dz * dz);
+    }
+
+    // Model placement A (current atomic-frame LTM, DFF file bytes): the
+    // atomic is attached to the Pelvis frame, which the pose above moved,
+    // so A is re-read post-sync (retail RW evaluates both the skin upload
+    // and the world matrix from the live frames at render time).
+    // Final render verts = A * S * stored, exactly like librw's
+    // skinRenderCB (setWorldMatrix(atomic->getFrame()->getLTM())).
+    // A is file data (andre: cyclic X->Y, Y->Z, Z->X placement); zero
+    // manual constants. The bind AABB stays in skin space on purpose so it
+    // remains bit-comparable with round-11's ped-load bbox; the anim AABB
+    // is in render/world space (what the TGA shows and the gates check).
+    rw::Matrix atomicCur;
+    if (atomicFrame && atomicFrame->getLTM()) {
+        atomicCur = *atomicFrame->getLTM();
+    } else {
+        atomicCur.setIdentity();
+    }
+    rw::Matrix invAtomicCur;
+    rw::Matrix::invert(&invAtomicCur, &atomicCur);
+
+    // Animated skin matrices S_i = IB_i * (Wanim_i * invAcur), composed
+    // with the model matrix: MW_i = Acur * S_i (one rigid per bone).
+    std::vector<rw::Matrix> animSkinMats(static_cast<size_t>(numBones));
+    {
+        rw::Skin* skin0 = rw::Skin::get(geoms[0].geo);
+        for (int i = 0; i < numBones; ++i) {
+            rw::Matrix ib;
+            std::memcpy(&ib, skin0->inverseMatrices + static_cast<size_t>(i) * 16, 64);
+            ib.flags = 0;
+            rw::Matrix t1, t2;
+            rw::Matrix::mult(&t1, &animWorld[static_cast<size_t>(i)], &invAtomicCur);
+            rw::Matrix::mult(&t2, &ib, &t1);
+            rw::Matrix::mult(&animSkinMats[static_cast<size_t>(i)], &atomicCur, &t2);
+        }
+    }
+
+    // --- 8. Flatten with ANIMATED matrices into the scene (rendered) ---
+    int meshIndex = 0;
+    bool first = true;
+    int totalTris = 0;
+    double wsumAcc = 0.0;
+    long wsumVerts = 0;
+    int serial = 0;
+    (void)serial;
+    for (const auto& g : geoms) {
+        rw::Geometry* geo = g.geo;
+        const int numVerts = geo->numVertices;
+        rw::Skin* skin = rw::Skin::get(geo);
+        rw::V3d* verts = geo->morphTargets[0].vertices;
+        rw::V3d* norms = (geo->flags & rw::Geometry::NORMALS) ? geo->morphTargets[0].normals : nil;
+        rw::TexCoords* uvs = geo->texCoords[0];
+        std::vector<rw::V3d> skinnedPos(static_cast<size_t>(numVerts));
+        std::vector<rw::V3d> skinnedNrm(norms ? static_cast<size_t>(numVerts) : 0);
+        for (int v = 0; v < numVerts; ++v) {
+            const uint8* idx = skin->indices + static_cast<size_t>(v) * 4;
+            const float* wgt = skin->weights + static_cast<size_t>(v) * 4;
+            double wsum = 0.0;
+            rw::V3d p = { 0.0f, 0.0f, 0.0f };
+            rw::V3d n = { 0.0f, 0.0f, 1.0f };
+            for (int k = 0; k < 4; ++k) {
+                int b = idx[k];
+                float w = wgt[k];
+                wsum += w;
+                if (w == 0.0f || b < 0 || b >= numBones) {
+                    continue;
+                }
+                rw::V3d tp;
+                rw::V3d::transformPoints(&tp, &verts[v], 1, &animSkinMats[static_cast<size_t>(b)]);
+                p.x += w * tp.x;
+                p.y += w * tp.y;
+                p.z += w * tp.z;
+                if (norms) {
+                    rw::V3d tn;
+                    rw::V3d::transformVectors(&tn, &norms[v], 1, &animSkinMats[static_cast<size_t>(b)]);
+                    n.x += w * tn.x;
+                    n.y += w * tn.y;
+                    n.z += w * tn.z;
+                }
+            }
+            wsumAcc += wsum;
+            ++wsumVerts;
+            skinnedPos[static_cast<size_t>(v)] = p;
+            if (norms) {
+                float len = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+                if (len > 1e-9f) {
+                    n.x /= len;
+                    n.y /= len;
+                    n.z /= len;
+                } else {
+                    n.x = 0.0f;
+                    n.y = 0.0f;
+                    n.z = 1.0f;
+                }
+                skinnedNrm[static_cast<size_t>(v)] = n;
+            }
+        }
+        std::map<const rw::Texture*, int> imgCache;
+        WorldShotMesh mesh;
+        MeshColor(meshIndex, mesh.color);
+        mesh.tris = 0;
+        mesh.pos.reserve(static_cast<size_t>(geo->numTriangles) * 9);
+        mesh.nrm.reserve(static_cast<size_t>(geo->numTriangles) * 9);
+        mesh.uv.reserve(static_cast<size_t>(geo->numTriangles) * 6);
+        mesh.triImg.reserve(static_cast<size_t>(geo->numTriangles));
+        mesh.triCol.reserve(static_cast<size_t>(geo->numTriangles) * 3);
+        for (int t = 0; t < geo->numTriangles; ++t) {
+            const rw::Triangle& tri = geo->triangles[t];
+            if (tri.v[0] >= numVerts || tri.v[1] >= numVerts || tri.v[2] >= numVerts) {
+                continue;
+            }
+            int imgIdx = -1;
+            float matCol[3] = { 1.0f, 1.0f, 1.0f };
+            rw::Material* mat =
+                (tri.matId < geo->matList.numMaterials) ? geo->matList.materials[tri.matId] : nil;
+            if (mat) {
+                matCol[0] = mat->color.red / 255.0f;
+                matCol[1] = mat->color.green / 255.0f;
+                matCol[2] = mat->color.blue / 255.0f;
+                if (mat->texture) {
+                    auto rit = lc.resolved.find(mat->texture);
+                    if (rit != lc.resolved.end() && rit->second.real) {
+                        const rw::Texture* real = rit->second.real;
+                        auto cit = imgCache.find(real);
+                        if (cit != imgCache.end()) {
+                            imgIdx = cit->second;
+                        } else {
+                            TexImage decoded;
+                            if (TexSample_Decode(real, decoded)) {
+                                decoded.filter = rit->second.filter;
+                                imgIdx = static_cast<int>(scene.images.size());
+                                scene.images.push_back(std::move(decoded));
+                                imgCache[real] = imgIdx;
+                            } else {
+                                imgIdx = -2;
+                            }
+                        }
+                    } else {
+                        imgIdx = -2;
+                    }
+                }
+            }
+            const rw::V3d* p[3] = {
+                &skinnedPos[tri.v[0]],
+                &skinnedPos[tri.v[1]],
+                &skinnedPos[tri.v[2]],
+            };
+            float face[3];
+            {
+                float a[3] = { p[0]->x, p[0]->y, p[0]->z };
+                float b[3] = { p[1]->x, p[1]->y, p[1]->z };
+                float c[3] = { p[2]->x, p[2]->y, p[2]->z };
+                CrossSub(a, b, c, face);
+            }
+            for (int k = 0; k < 3; ++k) {
+                mesh.pos.push_back(p[k]->x);
+                mesh.pos.push_back(p[k]->y);
+                mesh.pos.push_back(p[k]->z);
+                if (norms) {
+                    const rw::V3d& n = skinnedNrm[tri.v[k]];
+                    float len = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+                    if (len > 1e-9f) {
+                        mesh.nrm.push_back(n.x / len);
+                        mesh.nrm.push_back(n.y / len);
+                        mesh.nrm.push_back(n.z / len);
+                    } else {
+                        mesh.nrm.push_back(face[0]);
+                        mesh.nrm.push_back(face[1]);
+                        mesh.nrm.push_back(face[2]);
+                    }
+                } else {
+                    mesh.nrm.push_back(face[0]);
+                    mesh.nrm.push_back(face[1]);
+                    mesh.nrm.push_back(face[2]);
+                }
+                if (uvs) {
+                    mesh.uv.push_back(uvs[tri.v[k]].u);
+                    mesh.uv.push_back(uvs[tri.v[k]].v);
+                } else {
+                    mesh.uv.push_back(0.0f);
+                    mesh.uv.push_back(0.0f);
+                }
+                if (first) {
+                    scene.bboxMin[0] = scene.bboxMax[0] = p[k]->x;
+                    scene.bboxMin[1] = scene.bboxMax[1] = p[k]->y;
+                    scene.bboxMin[2] = scene.bboxMax[2] = p[k]->z;
+                    first = false;
+                } else {
+                    if (p[k]->x < scene.bboxMin[0]) {
+                        scene.bboxMin[0] = p[k]->x;
+                    }
+                    if (p[k]->y < scene.bboxMin[1]) {
+                        scene.bboxMin[1] = p[k]->y;
+                    }
+                    if (p[k]->z < scene.bboxMin[2]) {
+                        scene.bboxMin[2] = p[k]->z;
+                    }
+                    if (p[k]->x > scene.bboxMax[0]) {
+                        scene.bboxMax[0] = p[k]->x;
+                    }
+                    if (p[k]->y > scene.bboxMax[1]) {
+                        scene.bboxMax[1] = p[k]->y;
+                    }
+                    if (p[k]->z > scene.bboxMax[2]) {
+                        scene.bboxMax[2] = p[k]->z;
+                    }
+                }
+            }
+            mesh.triImg.push_back(imgIdx);
+            mesh.triCol.push_back(matCol[0]);
+            mesh.triCol.push_back(matCol[1]);
+            mesh.triCol.push_back(matCol[2]);
+            ++mesh.tris;
+        }
+        if (mesh.tris <= 0) {
+            continue;
+        }
+        totalTris += mesh.tris;
+        scene.meshes.push_back(std::move(mesh));
+        ++meshIndex;
+    }
+    TexSample_FreeLinked(lc);
+    if (totalTris <= 0) {
+        char msg[192];
+        (void)std::snprintf(msg, sizeof(msg), "no animated triangles flattened from '%.127s'",
+                             stats.src);
+        SetErr(err, errSize, msg);
+        return false;
+    }
+    stats.tris = totalTris;
+    stats.verts = totalTris * 3;
+    stats.wsum = wsumVerts > 0 ? wsumAcc / wsumVerts : 0.0;
+    stats.animMin[0] = scene.bboxMin[0];
+    stats.animMin[1] = scene.bboxMin[1];
+    stats.animMin[2] = scene.bboxMin[2];
+    stats.animMax[0] = scene.bboxMax[0];
+    stats.animMax[1] = scene.bboxMax[1];
+    stats.animMax[2] = scene.bboxMax[2];
+    (void)std::snprintf(scene.stats.dffName, sizeof(scene.stats.dffName), "%.127s", stats.src);
+    (void)std::snprintf(scene.stats.txdName, sizeof(scene.stats.txdName), "%.127s", stats.txd);
+    scene.stats.atomics = meshIndex;
+    scene.stats.triangles = totalTris;
+    scene.stats.vertices = totalTris * 3;
+    scene.stats.textures = stats.textures;
+    scene.stats.firstTexture[0] = '\0';
+    scene.stats.firstTexW = 0;
+    scene.stats.firstTexH = 0;
+    if (!scene.images.empty()) {
+        (void)std::snprintf(scene.stats.firstTexture, sizeof(scene.stats.firstTexture), "%s",
+                             scene.images[0].name);
+        scene.stats.firstTexW = scene.images[0].w;
+        scene.stats.firstTexH = scene.images[0].h;
+    }
+    return true;
+}
+
+void IfpAnim_Shutdown() {
+    for (rw::TexDictionary* t : s_txds) {
+        if (t) {
+            t->destroy();
+        }
+    }
+    s_txds.clear();
+}
