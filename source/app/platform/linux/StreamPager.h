@@ -12,11 +12,20 @@
 #include "app/platform/linux/WorldShot.h"
 
 struct E2ELoadInfo {
+    int binaryIplFiles = 0;
+    int binaryInstances = 0;
     int iplTotal = 0; // all parsed inst records (unfiltered)
     int iplKept = 0; // static outdoor instances entering the grid
     int ideModels = 0;
     int ideFiles = 0;
     int iplFiles = 0;
+};
+
+struct StreamPagerOptions {
+    // Offline fixtures deliberately retain their original small text-IPL slice.
+    bool includeStreamed = false;
+    float radius = 300.0f;
+    int maxInstances = 80;
 };
 
 struct E2EPagerFrame {
@@ -37,7 +46,8 @@ struct E2EPagerFrame {
 };
 
 // Loads and indexes the world relative to gameDir. False => err message.
-bool StreamPager_Init(const char* gameDir, E2ELoadInfo& info, char* err, std::size_t errSize);
+bool StreamPager_Init(const char* gameDir, E2ELoadInfo& info, char* err, std::size_t errSize,
+                      const StreamPagerOptions& options = {});
 // Rebuilds `scene` (world-space soup, deterministic order) around the
 // camera ground position. False => err message (never silent world-ok).
 bool StreamPager_Update(float camX, float camY, float camZ, WorldShotScene& scene, E2EPagerFrame& frame,

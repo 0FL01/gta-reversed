@@ -15,6 +15,7 @@
 #include <set>
 #include <algorithm>
 #include <utility>
+#include <cassert>
 
 #include "app/platform/linux/TexSample.h"
 
@@ -43,9 +44,8 @@ namespace {
 // Pager tuning: grid cell ~ SA streaming block, window radius R with
 // hysteresis H (evict past R+H so border cells don't thrash).
 constexpr float kCellSize = 300.0f;
-constexpr float kRadius = 300.0f;
 constexpr float kHysteresis = 100.0f;
-constexpr int kMaxInstances = 80; // nearest-K cap per waypoint (bounds tris)
+StreamPagerOptions s_options;
 
 void SetErr(char* err, std::size_t errSize, const char* msg) {
     if (!err || errSize == 0) {
@@ -237,7 +237,7 @@ struct IdeEntry {
 };
 
 void ParseIdeText(const std::string& text, std::map<std::string, IdeEntry>& out,
-                  std::set<std::string>& animModels) {
+                  std::set<std::string>& animModels, std::map<int, std::string>& modelIds) {
     int mode = 0; // 0 none, 1 static, 2 anim
     size_t pos = 0;
     while (pos <= text.size()) {
@@ -275,6 +275,7 @@ void ParseIdeText(const std::string& text, std::map<std::string, IdeEntry>& out,
         }
         std::string key = model;
         ToLowerInPlace(key);
+        modelIds[id] = model;
         if (mode == 2) {
             animModels.insert(key);
             continue;
@@ -292,6 +293,55 @@ struct IplInst {
     float quat[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
     int lod = -1;
 };
+
+// Layout from tBinaryIplFile (0x4c header) and CFileObjectInstance
+// (0x28 record). Decode explicitly, never cast unaligned asset bytes.
+static uint32 ReadU32(const uint8* p) {
+    return uint32(p[0]) | (uint32(p[1]) << 8) | (uint32(p[2]) << 16) | (uint32(p[3]) << 24);
+}
+
+static bool ParseBinaryIpl(const std::vector<uint8>& bytes, const std::map<int, std::string>& modelIds,
+                           std::vector<IplInst>& out, char* err, size_t errSize) {
+    if (bytes.size() < 0x4c || std::memcmp(bytes.data(), "bnry", 4) != 0) {
+        SetErr(err, errSize, "invalid binary IPL header");
+        return false;
+    }
+    const uint32 count = ReadU32(bytes.data() + 4);
+    const uint32 offset = ReadU32(bytes.data() + 28);
+    if (count && (offset < 0x4c || offset > bytes.size() || count > (bytes.size() - offset) / 40)) {
+        SetErr(err, errSize, "binary IPL instances out of bounds");
+        return false;
+    }
+    for (uint32 i = 0; i < count; ++i) {
+        const uint8* p = bytes.data() + offset + static_cast<size_t>(i) * 40;
+        auto model = modelIds.find(static_cast<int32>(ReadU32(p + 28)));
+        if (model == modelIds.end()) {
+            SetErr(err, errSize, "binary IPL references unknown IDE model ID");
+            return false;
+        }
+        IplInst inst;
+        inst.model = model->second;
+        // Upper instance-type bits are streaming/tunnel flags, NOT interior.
+        inst.interior = static_cast<int>(ReadU32(p + 32) & 0xff);
+        inst.lod = static_cast<int32>(ReadU32(p + 36));
+        for (int j = 0; j < 7; ++j) {
+            const uint32 bits = ReadU32(p + j * 4);
+            float value;
+            std::memcpy(&value, &bits, sizeof(value));
+            if (!std::isfinite(value)) {
+                SetErr(err, errSize, "nonfinite binary IPL transform");
+                return false;
+            }
+            if (j < 3) {
+                inst.pos[j] = value;
+            } else {
+                inst.quat[j - 3] = value;
+            }
+        }
+        out.push_back(std::move(inst));
+    }
+    return true;
+}
 
 void ParseIplText(const std::string& text, std::vector<IplInst>& out) {
     bool inInst = false;
@@ -760,7 +810,10 @@ bool FindInImgs(const std::string& wantLower, std::vector<uint8>& out) {
 
 } // namespace
 
-bool StreamPager_Init(const char* gameDir, E2ELoadInfo& info, char* err, std::size_t errSize) {
+bool StreamPager_Init(const char* gameDir, E2ELoadInfo& info, char* err, std::size_t errSize,
+                      const StreamPagerOptions& options) {
+    assert(std::isfinite(options.radius) && options.radius > 0 && options.maxInstances > 0);
+    s_options = options;
     info = E2ELoadInfo{};
     if (!gameDir || !gameDir[0]) {
         SetErr(err, errSize, "no game dir");
@@ -796,13 +849,14 @@ bool StreamPager_Init(const char* gameDir, E2ELoadInfo& info, char* err, std::si
 
     s_ide.clear();
     std::set<std::string> animModels;
+    std::map<int, std::string> modelIds;
     int ideFiles = 0;
     for (const std::string& rel : idePaths) {
         std::string text;
         if (!ReadGameText(game, rel, text)) {
             continue;
         }
-        ParseIdeText(text, s_ide, animModels);
+        ParseIdeText(text, s_ide, animModels, modelIds);
         ++ideFiles;
     }
     if (s_ide.empty()) {
@@ -843,6 +897,26 @@ bool StreamPager_Init(const char* gameDir, E2ELoadInfo& info, char* err, std::si
     if (s_imgs.empty()) {
         SetErr(err, errSize, "no IMG archive indexed (models/*.img)");
         return false;
+    }
+
+    if (options.includeStreamed) {
+        const size_t textCount = all.size();
+        std::set<std::string> loaded;
+        for (const auto& img : s_imgs) {
+            for (const auto& entry : img.entries) {
+                if (!entry.nameLower.ends_with(".ipl") || !loaded.insert(entry.nameLower).second) {
+                    continue;
+                }
+                std::vector<uint8> bytes;
+                if (!ImgReadBytes(img, entry.nameLower, bytes) ||
+                    !ParseBinaryIpl(bytes, modelIds, all, err, errSize)) {
+                    std::printf("pager-binary-fail file=%s\n", entry.nameLower.c_str());
+                    return false;
+                }
+                ++info.binaryIplFiles;
+            }
+        }
+        info.binaryInstances = static_cast<int>(all.size() - textCount);
     }
 
     if (!RwInitEngine()) {
@@ -893,6 +967,14 @@ bool StreamPager_Init(const char* gameDir, E2ELoadInfo& info, char* err, std::si
         p.quat[1] = inst.quat[1];
         p.quat[2] = inst.quat[2];
         p.quat[3] = inst.quat[3];
+        if (options.includeStreamed) {
+            // IPL stores the inverse rotation. CFileLoader::LoadObjectInstance
+            // conjugates it before CMatrix::SetRotate (or negates Z heading).
+            // Keep historical offline fixture transforms unchanged.
+            p.quat[0] = -p.quat[0];
+            p.quat[1] = -p.quat[1];
+            p.quat[2] = -p.quat[2];
+        }
         p.order = order;
         int row = static_cast<int>(s_insts.size());
         s_insts.push_back(p);
@@ -914,6 +996,8 @@ bool StreamPager_Init(const char* gameDir, E2ELoadInfo& info, char* err, std::si
 
 bool StreamPager_Update(float camX, float camY, float camZ, WorldShotScene& scene, E2EPagerFrame& frame,
                         char* err, std::size_t errSize) {
+    const float kRadius = s_options.radius;
+    const int kMaxInstances = s_options.maxInstances;
     (void)camZ; // window is x/y based (verticality comes free with instances)
     frame = E2EPagerFrame{};
     scene.meshes.clear();

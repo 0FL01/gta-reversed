@@ -26,6 +26,7 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
     add_executable(mad-sa-linux
         oswrapper/oswrapper_linux.cpp
         app/platform/linux/MainLinux.cpp
+        app/platform/linux/Realtime.cpp
         app/platform/linux/WorldShot.cpp
         app/platform/linux/SceneShot.cpp
         app/platform/linux/StreamPager.cpp
@@ -113,6 +114,10 @@ file(
     "${CMAKE_CURRENT_SOURCE_DIR}/*.c*"
 )
 list(APPEND SOURCE_FILES_LIST StdInc.cpp)
+# Native standalone sources have their own main, POSIX IO and GL context.
+# Never compile them into the upstream Windows DLL.
+list(FILTER SOURCE_FILES_LIST EXCLUDE REGEX "^app/platform/linux/")
+list(REMOVE_ITEM SOURCE_FILES_LIST oswrapper/oswrapper_linux.cpp)
 
 #--------------------------------------------------------------------
 # Remove unused sources
