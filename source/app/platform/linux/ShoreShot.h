@@ -52,4 +52,13 @@ struct ShoreShotStats {
 bool ShoreShot_Init(const char* gameDir, int hour, WorldShotScene& scene, ShoreShotStats& stats,
                     E2ELoadInfo& loadInfo, E2EPagerFrame& pagerFrame, char* err,
                     std::size_t errSize);
+// Round 41 (R6am): weather-parameterized variant. Identical to
+// ShoreShot_Init except the water color comes from
+// TimeCycle_LoadWeatherHour(gameDir, weather, hour) (the same exact-token
+// section path as --shot-scene --weather W --hour H). weather must be a
+// valid section token (A-Z0-9_); "EXTRASUNNY_LA" is bit-identical to
+// ShoreShot_Init. Without this call ShoreShot_Init output is untouched.
+bool ShoreShot_InitWeather(const char* gameDir, const char* weather, int hour,
+                           WorldShotScene& scene, ShoreShotStats& stats, E2ELoadInfo& loadInfo,
+                           E2EPagerFrame& pagerFrame, char* err, std::size_t errSize);
 void ShoreShot_Shutdown();

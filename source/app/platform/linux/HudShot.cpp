@@ -206,6 +206,14 @@ bool HudShot_Render(const char* gameDir, int health, int armor, std::vector<uint
 bool HudShot_RenderHour(const char* gameDir, int health, int armor, int hour,
                         std::vector<uint8_t>& basePixels, std::vector<uint8_t>& hudPixels,
                         HudShotStats& stats, char* err, std::size_t errSize) {
+    return HudShot_RenderWeatherHour(gameDir, health, armor, "EXTRASUNNY_LA", hour, basePixels,
+                                     hudPixels, stats, err, errSize);
+}
+
+bool HudShot_RenderWeatherHour(const char* gameDir, int health, int armor, const char* weather,
+                               int hour, std::vector<uint8_t>& basePixels,
+                               std::vector<uint8_t>& hudPixels, HudShotStats& stats, char* err,
+                               std::size_t errSize) {
     stats = HudShotStats{};
     basePixels.clear();
     hudPixels.clear();
@@ -234,6 +242,8 @@ bool HudShot_RenderHour(const char* gameDir, int health, int armor, int hour,
 
     // 1. Base: the existing shore composition, same inputs as --shot-shore.
     // R6al: hour selects the timecyc row (same path as --shot-shore --hour).
+    // R6am: weather selects the timecyc section (same exact-token path as
+    // --shot-scene --weather W --hour H).
     if (hour < 0 || hour > 23) {
         SetErr(err, errSize, "bad hour (want 0-23)");
         return false;
@@ -241,8 +251,9 @@ bool HudShot_RenderHour(const char* gameDir, int health, int armor, int hour,
     WorldShotScene scene{};
     {
         char serr[640] = {};
-        if (!ShoreShot_Init(gameDir, hour, scene, stats.shore, stats.loadInfo, stats.pagerFrame,
-                             serr, sizeof(serr))) {
+        if (!ShoreShot_InitWeather(gameDir, weather ? weather : "EXTRASUNNY_LA", hour, scene,
+                                   stats.shore, stats.loadInfo, stats.pagerFrame, serr,
+                                   sizeof(serr))) {
             char msg[768];
             (void)std::snprintf(msg, sizeof(msg), "shore-init: %s", serr);
             SetErr(err, errSize, msg);

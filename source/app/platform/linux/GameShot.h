@@ -75,6 +75,18 @@ bool GameShot_RenderHour(const char* gameDir, int health, int armor, int hour,
                          std::vector<uint8_t>& basePixels, std::vector<uint8_t>& hudPixels,
                          std::vector<uint8_t>& radarFull, std::vector<uint8_t>& gamePixels,
                          GameShotStats& stats, char* err, std::size_t errSize);
+// Round 41 (R6am): weather-parameterized variant. Identical to
+// GameShot_RenderHour except the HudShot base uses
+// HudShot_RenderWeatherHour(gameDir,H,A,weather,hour) (the same
+// exact-token section path as --shot-scene --weather W --hour H).
+// weather must be a valid section token; "EXTRASUNNY_LA" is bit-identical
+// to GameShot_RenderHour. Without this call GameShot_Render output is
+// untouched.
+bool GameShot_RenderWeatherHour(const char* gameDir, int health, int armor, const char* weather,
+                                int hour, std::vector<uint8_t>& basePixels,
+                                std::vector<uint8_t>& hudPixels, std::vector<uint8_t>& radarFull,
+                                std::vector<uint8_t>& gamePixels, GameShotStats& stats, char* err,
+                                std::size_t errSize);
 void GameShot_Shutdown();
 
 // Round 36 (R6ah): zone label over the game frame (--show-zone).

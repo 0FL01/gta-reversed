@@ -38,6 +38,13 @@ void SetErr(char* err, std::size_t errSize, const char* msg) {
 bool ShoreShot_Init(const char* gameDir, int hour, WorldShotScene& scene, ShoreShotStats& stats,
                     E2ELoadInfo& loadInfo, E2EPagerFrame& pagerFrame, char* err,
                     std::size_t errSize) {
+    return ShoreShot_InitWeather(gameDir, "EXTRASUNNY_LA", hour, scene, stats, loadInfo,
+                                 pagerFrame, err, errSize);
+}
+
+bool ShoreShot_InitWeather(const char* gameDir, const char* weather, int hour,
+                           WorldShotScene& scene, ShoreShotStats& stats, E2ELoadInfo& loadInfo,
+                           E2EPagerFrame& pagerFrame, char* err, std::size_t errSize) {
     stats = ShoreShotStats{};
     loadInfo = E2ELoadInfo{};
     pagerFrame = E2EPagerFrame{};
@@ -83,11 +90,15 @@ bool ShoreShot_Init(const char* gameDir, int hour, WorldShotScene& scene, ShoreS
     stats.models = pagerFrame.instances;
     stats.mtris = pagerFrame.tris;
 
-    // 2. Water color: existing timecyc path (EXTRASUNNY_LA, --hour).
+    // 2. Water color: existing timecyc path (named section, --hour).
+    // R6am: the section row comes from TimeCycle_LoadWeatherHour (the same
+    // exact-token path as --shot-scene --weather W --hour H); every RGB
+    // below is still timecyc bytes only.
     TimeCycleParams tcp{};
     {
         char terr[256] = {};
-        if (!TimeCycle_LoadHour(gameDir, hour, tcp, terr, sizeof(terr))) {
+        if (!TimeCycle_LoadWeatherHour(gameDir, weather ? weather : "EXTRASUNNY_LA", hour,
+                                       tcp, terr, sizeof(terr))) {
             char msg[384];
             (void)std::snprintf(msg, sizeof(msg), "timecyc: %s", terr);
             SetErr(err, errSize, msg);

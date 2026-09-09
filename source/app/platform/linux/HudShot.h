@@ -84,4 +84,14 @@ bool HudShot_Render(const char* gameDir, int health, int armor, std::vector<uint
 bool HudShot_RenderHour(const char* gameDir, int health, int armor, int hour,
                         std::vector<uint8_t>& basePixels, std::vector<uint8_t>& hudPixels,
                         HudShotStats& stats, char* err, std::size_t errSize);
+// Round 41 (R6am): weather-parameterized variant. Identical to
+// HudShot_RenderHour except the shore base is
+// ShoreShot_InitWeather(gameDir, weather, hour) (the same exact-token
+// section path as --shot-scene --weather W --hour H). weather must be a
+// valid section token; "EXTRASUNNY_LA" is bit-identical to
+// HudShot_RenderHour. No hardcoded colors/digits on this path.
+bool HudShot_RenderWeatherHour(const char* gameDir, int health, int armor, const char* weather,
+                               int hour, std::vector<uint8_t>& basePixels,
+                               std::vector<uint8_t>& hudPixels, HudShotStats& stats, char* err,
+                               std::size_t errSize);
 void HudShot_Shutdown();
