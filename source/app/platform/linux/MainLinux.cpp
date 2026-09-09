@@ -56,7 +56,7 @@ using uint64 = uint64_t;
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -679,6 +679,13 @@ int RunShotScene(int argc, char** argv) {
         (void)std::printf("sceneshot-fail --weather needs --hour H (0-23)\n");
         return 1;
     }
+    // R6s: optional distance fog from the same timecyc row. Only with
+    // --hour/--weather; without --fog the TC path stays bit-for-bit.
+    const bool wantFog = HasArg(argc, argv, "--fog");
+    if (wantFog && hour < 0) {
+        (void)std::printf("sceneshot-fail --fog needs --hour\n");
+        return 1;
+    }
     const int width = 640;
     const int height = 480;
     auto getPlatformDisplay = reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(
@@ -784,6 +791,14 @@ int RunShotScene(int argc, char** argv) {
             timeEnv.skyTop[c] = tcp.skyTop[c];
             timeEnv.skyBot[c] = tcp.skyBot[c];
         }
+        if (wantFog) {
+            timeEnv.fog = true;
+            timeEnv.farClp = tcp.farClp;
+            timeEnv.fogSt = tcp.fogSt;
+            for (int c = 0; c < 3; ++c) {
+                timeEnv.fogColor[c] = tcp.skyBot[c];
+            }
+        }
         timeEnvPtr = &timeEnv;
         (void)std::printf(
             "timecyc-load weather=%s hour=%d amb=%d,%d,%d dir=%d,%d,%d "
@@ -792,6 +807,14 @@ int RunShotScene(int argc, char** argv) {
             tcp.skyTop[0], tcp.skyTop[1], tcp.skyTop[2], tcp.skyBot[0], tcp.skyBot[1],
             tcp.skyBot[2], tcp.sunCore[0], tcp.sunCore[1], tcp.sunCore[2], tcp.sampleName
         );
+        if (wantFog) {
+            (void)std::printf(
+                "fog-load farClp=%.2f fogSt=%.2f fogColor=%d,%d,%d\n",
+                static_cast<double>(tcp.farClp), static_cast<double>(tcp.fogSt),
+                tcp.skyBot[0], tcp.skyBot[1], tcp.skyBot[2]
+            );
+            (void)std::printf("fogFormula=clamp((dist-FogSt)/(FarClp-FogSt),0,1)\n");
+        }
     }
     std::vector<uint8> pixels;
     TexFrameStats texStats{};
@@ -863,6 +886,25 @@ int RunShotScene(int argc, char** argv) {
     if (hour >= 0) {
         (void)std::printf("timeshot-ok hour=%d checksum=%llu\n", hour,
                           static_cast<unsigned long long>(checksum));
+    }
+    if (wantFog) {
+        const long geomPixels =
+            texStats.texPixels + texStats.fallbackPixels + texStats.flatPixels;
+        // foggedPct = share of GEOMETRY pixels with factor>0 (background
+        // excluded from both numerator and denominator: the "not background"
+        // clause). framePct = the same numerator over the whole frame, logged
+        // for transparency (orbit fit-sphere coverage is ~4.6% of the frame).
+        const double foggedPct =
+            geomPixels == 0 ? 0.0 : 100.0 * static_cast<double>(texStats.foggedPixels) /
+                                          static_cast<double>(geomPixels);
+        const double framePct =
+            total == 0 ? 0.0 : 100.0 * static_cast<double>(texStats.foggedPixels) /
+                                    static_cast<double>(total);
+        (void)std::printf(
+            "fogshot-ok hour=%d weather=%s foggedPixels=%ld geomPixels=%ld foggedPct=%.2f "
+            "framePct=%.2f checksum=%llu\n",
+            hour, weather, texStats.foggedPixels, geomPixels, foggedPct, framePct,
+            static_cast<unsigned long long>(checksum));
     }
     SceneShot_Shutdown();
     return 0;
