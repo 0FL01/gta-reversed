@@ -105,3 +105,58 @@ constexpr int kZoneLabelCellH = 40;
 // any failure (zone/GXT/font); never modifies gamePixels on failure.
 bool GameShot_ApplyZoneLabel(const char* gameDir, std::vector<uint8_t>& gamePixels,
                              ZoneLabelStats& out, char* err, std::size_t errSize);
+
+// Round 37 (R6ai): wanted stars over the game frame (--wanted N).
+// There is NO star sprite in any shipped TXD: models/hud.txd holds 69
+// textures (radardisc/skipicon/siterocket/siteM16/radarRingPlane/fist/arrow +
+// 62 radar_* icons, enumerated by the HudShot path), and models/misc.txd,
+// models/particle.txd (only "coronastar", a corona effect, not HUD),
+// models/fonts.txd (font1/font2 only), models/fronten*.txd,
+// models/effectsPC.txd hold no star-named texture either (byte-level TXD
+// field scan, see round log). The game draws wanted stars as FONT GLYPHS:
+// re3 DrawWantedLevel (read-only spec, NOT linked) prints "]" per star with
+// the heading/gothic font, and SA's models/fonts.txd:texture "font2" cell for
+// byte 0x5D (col 13, row 3 of the 16x13 grid) is a 5-pointed star (direct
+// DXT3 decode + per-cell ASCII audit; font1's 0x5D cell is a "]" bracket, so
+// the star is font2-only). Confirmed by the modding community as well
+// ("Wanted stars - fonts.txd, they are actually text characters").
+// Hence this path blits N copies of the REAL font2 0x5D texels through the
+// EXISTING MenuShot right-aligned glyph path (fonts.dat advances, black
+// drop shadow + gold ink), right-justified to the bars' right edge above
+// the health bar (top-right corner, as in the retail HUD). No procedural
+// pixels: every star byte is a fonts.txd texel; an empty/missing glyph
+// fails honestly (drawn != wanted, no game-ok).
+struct WantedStats {
+    int wanted = 0;     // requested star count (0..6)
+    char starTex[32] = {}; // always "font2"
+    char starSrc[64] = {}; // always "models/fonts.txd"
+    int glyph = 0x5D;   // star glyph byte ("]" cell holds the star)
+    int posRight = 0;   // fixed row right edge, top-down (want 608)
+    int posTop = 0;     // fixed row top, top-down (want 0)
+    int cellH = 0;      // fixed glyph cell height px (want 24)
+    int drawn = 0;      // font2 ink glyphs drawn (want == wanted)
+    long starPixels = 0; // frame pixels changed by the overlay (want >300 at 3)
+};
+
+// Fixed game-layout wanted-star geometry at 640x480 (top-down): right edge
+// 608 (same STRETCH_FROM_RIGHT(32) edge as the health/armour bars and the
+// clock), top 0 (the strip above the health bar at y=22; the star ink sits
+// in the top ~2/3 of its cell, clear of the bar), cell height 24 (same
+// order as the HUD digits). Ink is the re3 wanted-lit gold (193,164,120),
+// shadow is black at (+1,+1) like the other HUD text passes.
+constexpr int kWantedRight = 608;
+constexpr int kWantedTop = 0;
+constexpr int kWantedCellH = 24;
+constexpr int kWantedInkR = 193;
+constexpr int kWantedInkG = 164;
+constexpr int kWantedInkB = 120;
+constexpr char kWantedStarTex[] = "font2";
+constexpr char kWantedStarSrc[] = "models/fonts.txd";
+constexpr int kWantedStarGlyph = 0x5D;
+
+// Overlays wanted stars onto gamePixels in place (must be a 640x480
+// bottom-up RGBA frame from GameShot_Render). wanted==0 leaves the frame
+// untouched (returns true with starPixels=0). Returns false with err set on
+// any failure; never modifies gamePixels on failure.
+bool GameShot_ApplyWanted(const char* gameDir, std::vector<uint8_t>& gamePixels, int wanted,
+                          WantedStats& out, char* err, std::size_t errSize);

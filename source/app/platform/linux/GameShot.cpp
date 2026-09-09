@@ -238,3 +238,73 @@ bool GameShot_ApplyZoneLabel(const char* gameDir, std::vector<uint8_t>& gamePixe
     }
     return true;
 }
+
+bool GameShot_ApplyWanted(const char* gameDir, std::vector<uint8_t>& gamePixels, int wanted,
+                          WantedStats& out, char* err, std::size_t errSize) {
+    out = WantedStats{};
+    out.wanted = wanted;
+    (void)std::snprintf(out.starTex, sizeof(out.starTex), "%s", kWantedStarTex);
+    (void)std::snprintf(out.starSrc, sizeof(out.starSrc), "%s", kWantedStarSrc);
+    out.glyph = kWantedStarGlyph;
+    out.posRight = kWantedRight;
+    out.posTop = kWantedTop;
+    out.cellH = kWantedCellH;
+    if (!gameDir || !gameDir[0]) {
+        SetErr(err, errSize, "no game dir");
+        return false;
+    }
+    if (gamePixels.size() != static_cast<std::size_t>(kFbW) * kFbH * 4) {
+        SetErr(err, errSize, "game frame has bad size");
+        return false;
+    }
+    if (wanted < 0 || wanted > 6) {
+        SetErr(err, errSize, "bad wanted (want 0-6)");
+        return false;
+    }
+    if (wanted == 0) {
+        out.starPixels = 0;
+        out.drawn = 0;
+        return true; // no overlay: frame stays bit-identical
+    }
+    // font2 glyphs (existing MenuShot HUD-font path: fonts.txd + fonts.dat).
+    MenuHudFont font;
+    {
+        char ferr[512] = {};
+        if (!MenuShot_LoadHudFont(gameDir, font, ferr, sizeof(ferr))) {
+            char msg[640];
+            (void)std::snprintf(msg, sizeof(msg), "wanted font: %s", ferr);
+            SetErr(err, errSize, msg);
+            return false;
+        }
+    }
+    char text[8] = {};
+    for (int i = 0; i < wanted; ++i) {
+        text[i] = static_cast<char>(kWantedStarGlyph);
+    }
+    const std::vector<uint8_t> before = gamePixels;
+    // Black drop shadow (+1,+1) first, then gold ink: same two-pass order as
+    // the HUD digits and the zone label. Integer math, fixed traversal order.
+    const int shadowDrawn = MenuShot_DrawTextRight(gamePixels, kFbW, kFbH, font, text,
+                                                   kWantedRight + 1, kWantedTop + 1,
+                                                   kWantedCellH, 0, 0, 0);
+    out.drawn = MenuShot_DrawTextRight(gamePixels, kFbW, kFbH, font, text, kWantedRight,
+                                       kWantedTop, kWantedCellH, kWantedInkR, kWantedInkG,
+                                       kWantedInkB);
+    if (shadowDrawn != wanted || out.drawn != wanted) {
+        gamePixels = before;
+        char msg[128];
+        (void)std::snprintf(msg, sizeof(msg), "wanted star glyph empty shadow=%d ink=%d want=%d",
+                            shadowDrawn, out.drawn, wanted);
+        SetErr(err, errSize, msg);
+        return false;
+    }
+    long changed = 0;
+    for (std::size_t i = 0; i < before.size(); i += 4) {
+        if (gamePixels[i] != before[i] || gamePixels[i + 1] != before[i + 1] ||
+            gamePixels[i + 2] != before[i + 2]) {
+            ++changed;
+        }
+    }
+    out.starPixels = changed;
+    return true;
+}
