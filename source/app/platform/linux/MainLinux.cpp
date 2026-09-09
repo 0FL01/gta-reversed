@@ -49,6 +49,7 @@ using uint64 = uint64_t;
 #include "app/platform/linux/CarPose.h"
 #include "app/platform/linux/DuoShot.h"
 #include "app/platform/linux/CrowdShot.h"
+#include "app/platform/linux/CsDuoShot.h"
 #include "app/platform/linux/TimeCycle.h"
 #include "app/platform/linux/DriveSim.h"
 #include "app/platform/linux/Handling.h"
@@ -59,7 +60,7 @@ using uint64 = uint64_t;
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --csanim-seq <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--frames 5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --shot-cs-duo <out.tga> | --csanim-seq <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--frames 5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -3696,6 +3697,191 @@ int RunShotCrowd(int argc, char** argv) {
     return 0;
 }
 
+// Round 28 (R6z): cutscene dialogue. Two hi-poly CS actors in their ANPK
+// dialogue poses (cssmokevest=csplay@0.5, the R6w pose; cssweet=cssweet@0.5,
+// the R6y pose) via CsAnim_Init, offset by csOffsets=(-1.5/0,0)/(+1.5,0,0)
+// on the flat z=0 plane (ground=flat, no raycast this round, as in R6t/R6u),
+// and rendered in ONE TexSample_RenderCrowd call with a common z-buffer.
+// The crowd path is generalised to CS meshes by composition (not stitching):
+// actor meshes first, then partner meshes with rebased image indices; the
+// third crowd range is passed empty (meshEnd1 == mesh count) so pix[2] == 0
+// and overlap12 is the two-actor overlap. pix[i] counts depth winners of
+// actor i; overlap12 counts pixels where BOTH actors projected (shared-z
+// proof). No stitched TGAs, no procedural meshes, no low-poly stand-ins.
+int RunShotCsDuo(int argc, char** argv) {
+    const char* outPath = ArgValue(argc, argv, "--shot-cs-duo", "csduo.tga");
+    if (!outPath || outPath[0] == '\0') {
+        (void)std::printf("csduo-fail bad args shot-cs-duo='%s'\n",
+                           outPath ? outPath : "(null)");
+        return 1;
+    }
+    const int width = 640;
+    const int height = 480;
+    auto getPlatformDisplay = reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(
+        eglGetProcAddress("eglGetPlatformDisplayEXT")
+    );
+    if (!getPlatformDisplay) {
+        (void)std::printf("csduo-fail no eglGetPlatformDisplayEXT\n");
+        return 1;
+    }
+#ifndef EGL_PLATFORM_SURFACELESS_MESA
+#define EGL_PLATFORM_SURFACELESS_MESA 0x31DD
+#endif
+    EGLDisplay display = getPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
+    if (display == EGL_NO_DISPLAY) {
+        (void)std::printf("csduo-fail no surfaceless display 0x%x\n", eglGetError());
+        return 1;
+    }
+    if (!eglInitialize(display, nullptr, nullptr)) {
+        (void)std::printf("csduo-fail egl init 0x%x\n", eglGetError());
+        return 1;
+    }
+    const EGLint configAttrs[] = {
+        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
+        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+        EGL_DEPTH_SIZE, 24,
+        EGL_NONE
+    };
+    EGLConfig config = nullptr;
+    EGLint configCount = 0;
+    if (!eglChooseConfig(display, configAttrs, &config, 1, &configCount) || configCount < 1) {
+        (void)std::printf("csduo-fail choose config 0x%x\n", eglGetError());
+        eglTerminate(display);
+        return 1;
+    }
+    const EGLint pbufferAttrs[] = { EGL_WIDTH, width, EGL_HEIGHT, height, EGL_NONE };
+    EGLSurface surface = eglCreatePbufferSurface(display, config, pbufferAttrs);
+    if (surface == EGL_NO_SURFACE) {
+        (void)std::printf("csduo-fail pbuffer 0x%x\n", eglGetError());
+        eglTerminate(display);
+        return 1;
+    }
+    (void)eglBindAPI(EGL_OPENGL_API);
+    EGLContext context = eglCreateContext(display, config, EGL_NO_CONTEXT, nullptr);
+    if (context == EGL_NO_CONTEXT) {
+        (void)std::printf("csduo-fail context 0x%x\n", eglGetError());
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    if (!eglMakeCurrent(display, surface, surface, context)) {
+        (void)std::printf("csduo-fail make current 0x%x\n", eglGetError());
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    const char* glVersion = reinterpret_cast<const char*>(glGetString(GL_VERSION));
+    (void)std::printf("csduo-gl %s\n", glVersion ? glVersion : "(null)");
+    std::string gameDir = ResolveGameDir(argc, argv);
+    WorldShotScene scene{};
+    CsDuoShotStats dst{};
+    CsAnimStats cst[2]{};
+    char duoErr[640] = {};
+    if (!CsDuoShot_Init(gameDir.c_str(), scene, dst, cst, duoErr, sizeof(duoErr))) {
+        (void)std::printf("csduo-fail load %s (game=%s)\n", duoErr, gameDir.c_str());
+        CsDuoShot_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    (void)std::printf(
+        "csduo-load models=%s,%s src=%s;%s poses=%s@%.1f,%s@%.1f "
+        "mapped=%d,%d unmapped=%d,%d bones=%d,%d tris=%d,%d end0=%d "
+        "bbox=[%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f]\n",
+        dst.models[0], dst.models[1], cst[0].src, cst[1].src,
+        dst.anims[0], dst.times[0], dst.anims[1], dst.times[1],
+        dst.mapped[0], dst.mapped[1], dst.unmapped[0], dst.unmapped[1],
+        dst.bones[0], dst.bones[1], dst.tris[0], dst.tris[1], dst.meshEnd0,
+        scene.bboxMin[0], scene.bboxMin[1], scene.bboxMin[2], scene.bboxMax[0], scene.bboxMax[1],
+        scene.bboxMax[2]);
+    (void)std::printf("csOffsets=%.1f,%.1f,%.1f/%.1f,%.1f,%.1f ground=flat\n",
+                       dst.offsets[0][0], dst.offsets[0][1], dst.offsets[0][2],
+                       dst.offsets[1][0], dst.offsets[1][1], dst.offsets[1][2]);
+    (void)std::printf("csduo-cam eye=%.1f,%.1f,%.1f target=%.1f,%.1f,%.1f fov=60\n", dst.eye[0],
+                       dst.eye[1], dst.eye[2], dst.target[0], dst.target[1], dst.target[2]);
+    for (int i = 0; i < 2; ++i) {
+        if (dst.bones[i] != 61 || dst.mapped[i] != 56) {
+            (void)std::printf("csduo-fail gate actor%d bones=%d(==61) mapped=%d(==56)\n",
+                               i, dst.bones[i], dst.mapped[i]);
+            CsDuoShot_Shutdown();
+            eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            eglDestroyContext(display, context);
+            eglDestroySurface(display, surface);
+            eglTerminate(display);
+            return 1;
+        }
+    }
+    std::vector<uint8> pixels;
+    TexFrameStats texStats{};
+    TexCrowdStats crowd{};
+    // Generalised crowd call: meshes [0,end0) = actor 0, [end0,end) =
+    // actor 1, third range empty (shared-z composition, not stitching).
+    const int meshEnd1 = static_cast<int>(scene.meshes.size());
+    TexSample_RenderCrowd(scene, dst.meshEnd0, meshEnd1, width, height, dst.eye, dst.target,
+                          pixels, texStats, crowd);
+    uint64_t sumR = 0;
+    uint64_t sumG = 0;
+    uint64_t sumB = 0;
+    uint64_t nonBlack = 0;
+    uint64_t checksum = PixelsChecksum(pixels, sumR, sumG, sumB, nonBlack);
+    uint64_t total = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
+    if (nonBlack == 0) {
+        (void)std::printf("csduo-fail black frame\n");
+        CsDuoShot_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    if (crowd.pix[0] <= 3000 || crowd.pix[1] <= 2000 || crowd.overlap12 <= 0) {
+        (void)std::printf("csduo-fail gate pixels=%ld,%ld(>3000,>2000) overlap=%ld(>0)\n",
+                           crowd.pix[0], crowd.pix[1], crowd.overlap12);
+        CsDuoShot_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    if (!WriteTga24(outPath, width, height, pixels)) {
+        (void)std::printf("csduo-fail write '%s'\n", outPath);
+        CsDuoShot_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    eglDestroyContext(display, context);
+    eglDestroySurface(display, surface);
+    eglTerminate(display);
+    OS_DebugOut("mad-sa-linux csduo shot");
+    (void)std::printf(
+        "texcsduo-ok tris=%d sampledTri=%d texelFetch=%ld greyFallback=%d flatTri=%d texPixels=%ld "
+        "render=cpu shared-z=1\n",
+        texStats.tris, texStats.sampledTri, texStats.texelFetch, texStats.fallbackTri,
+        texStats.flatTri, texStats.texPixels);
+    (void)std::printf(
+        "csduo-ok actors=2 models=%s,%s poses=%s@%.1f,%s@%.1f pixels=%ld,%ld overlap=%ld "
+        "checksum=%llu\n",
+        dst.models[0], dst.models[1], dst.anims[0], dst.times[0], dst.anims[1], dst.times[1],
+        crowd.pix[0], crowd.pix[1], crowd.overlap12, static_cast<unsigned long long>(checksum));
+    (void)std::printf(
+        "csduoshot-ok out=%s nonblack=%llu/%llu avg=%llu,%llu,%llu checksum=%llu\n", outPath,
+        static_cast<unsigned long long>(nonBlack), static_cast<unsigned long long>(total),
+        static_cast<unsigned long long>(sumR / total),
+        static_cast<unsigned long long>(sumG / total),
+        static_cast<unsigned long long>(sumB / total), static_cast<unsigned long long>(checksum));
+    CsDuoShot_Shutdown();
+    return 0;
+}
+
 // Round 16 (R6n): kinematic drive. Car (CarPose DFF/TXD, steer+spin) rides a
 // caller-supplied XY polyline; Z comes only from the COL raycast
 // (carZ = groundH + clearance), yaw from the segment, front steer from
@@ -4922,6 +5108,9 @@ int main(int argc, char** argv) {
     }
     if (HasArg(argc, argv, "--shot-crowd")) {
         return RunShotCrowd(argc, argv);
+    }
+    if (HasArg(argc, argv, "--shot-cs-duo")) {
+        return RunShotCsDuo(argc, argv);
     }
     if (HasArg(argc, argv, "--shot-cs-anim")) {
         return RunShotCsAnim(argc, argv);
