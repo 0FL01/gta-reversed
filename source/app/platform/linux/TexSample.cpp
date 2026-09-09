@@ -570,6 +570,23 @@ void ShadeTri(const RasterTri& t, int imgIdx, const float* matCol, RasterCtx& ct
             float z = l0 * t.zo[0] + l1 * t.zo[1] + l2 * t.zo[2]; // == ndc z:
             // zo stores z/w per vertex; screen-space lerp of z/w IS the
             // fragment's ndc depth (dividing by den again would give z_clip).
+            // R6s fog: view-space depth is w_clip = 1/den (the same
+            // perspective denominator the z-buffer test uses; the frustum
+            // gives w_clip = -z_view). factor=clamp((dist-FogSt)/
+            // (FarClp-FogSt),0,1), blended toward fogColor=SkyBot.
+            const bool doFog =
+                ctx.env && ctx.env->fog && (ctx.env->farClp > ctx.env->fogSt);
+            float fogF = 0.0f;
+            if (doFog) {
+                const float dist = 1.0f / den;
+                float f = (dist - ctx.env->fogSt) / (ctx.env->farClp - ctx.env->fogSt);
+                if (f < 0.0f) {
+                    f = 0.0f;
+                } else if (f > 1.0f) {
+                    f = 1.0f;
+                }
+                fogF = f;
+            }
             float shade = (l0 * t.so[0] + l1 * t.so[1] + l2 * t.so[2]) / den;
             // Legacy: `shade` is the interpolated 0.32+0.68*NdotL grey
             // factor. Timecyc: the `s` slot carries interpolated NdotL and
@@ -626,6 +643,17 @@ void ShadeTri(const RasterTri& t, int imgIdx, const float* matCol, RasterCtx& ct
                 r = li[0] * matCol[0] * (tx[0] / 255.0f);
                 g = li[1] * matCol[1] * (tx[1] / 255.0f);
                 b = li[2] * matCol[2] * (tx[2] / 255.0f);
+                if (doFog) {
+                    const float fr = ctx.env->fogColor[0] / 255.0f;
+                    const float fg = ctx.env->fogColor[1] / 255.0f;
+                    const float fb = ctx.env->fogColor[2] / 255.0f;
+                    r = r + (fr - r) * fogF;
+                    g = g + (fg - g) * fogF;
+                    b = b + (fb - b) * fogF;
+                    if (fogF > 0.0f) {
+                        ++ctx.st->foggedPixels;
+                    }
+                }
                 ctx.zbuf[static_cast<size_t>(y) * ctx.w + x] = z;
                 ++ctx.st->texPixels;
                 if (ctx.st->haveFirst && ctx.st->firstPixel[0] == 0 &&
@@ -656,6 +684,17 @@ void ShadeTri(const RasterTri& t, int imgIdx, const float* matCol, RasterCtx& ct
                 r = li[0] * 0.5f;
                 g = li[1] * 0.5f;
                 b = li[2] * 0.5f;
+                if (doFog) {
+                    const float fr = ctx.env->fogColor[0] / 255.0f;
+                    const float fg = ctx.env->fogColor[1] / 255.0f;
+                    const float fb = ctx.env->fogColor[2] / 255.0f;
+                    r = r + (fr - r) * fogF;
+                    g = g + (fg - g) * fogF;
+                    b = b + (fb - b) * fogF;
+                    if (fogF > 0.0f) {
+                        ++ctx.st->foggedPixels;
+                    }
+                }
                 ctx.zbuf[static_cast<size_t>(y) * ctx.w + x] = z;
                 ++ctx.st->fallbackPixels;
                 uint8_t* dst = ctx.px + (static_cast<size_t>(y) * ctx.w + x) * 4;
@@ -675,6 +714,17 @@ void ShadeTri(const RasterTri& t, int imgIdx, const float* matCol, RasterCtx& ct
                 r = li[0] * matCol[0];
                 g = li[1] * matCol[1];
                 b = li[2] * matCol[2];
+                if (doFog) {
+                    const float fr = ctx.env->fogColor[0] / 255.0f;
+                    const float fg = ctx.env->fogColor[1] / 255.0f;
+                    const float fb = ctx.env->fogColor[2] / 255.0f;
+                    r = r + (fr - r) * fogF;
+                    g = g + (fg - g) * fogF;
+                    b = b + (fb - b) * fogF;
+                    if (fogF > 0.0f) {
+                        ++ctx.st->foggedPixels;
+                    }
+                }
                 ctx.zbuf[static_cast<size_t>(y) * ctx.w + x] = z;
                 ++ctx.st->flatPixels;
                 uint8_t* dst = ctx.px + (static_cast<size_t>(y) * ctx.w + x) * 4;

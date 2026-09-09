@@ -61,6 +61,7 @@ struct TexFrameStats {
     long texPixels = 0; // textured pixels written (after alpha test)
     long fallbackPixels = 0;
     long flatPixels = 0;
+    long foggedPixels = 0; // geometry pixels written with fog factor > 0
     float uvMin[2] = { 0.0f, 0.0f };
     float uvMax[2] = { 0.0f, 0.0f };
     bool haveUV = false;
@@ -75,11 +76,21 @@ struct TexFrameStats {
 // bytes / 255); skyTop/skyBot are raw bytes for the background gradient.
 // The light direction is NOT part of this struct: it stays at the legacy
 // fixed vector (sunDir=fixed), and there is no specular term (spec=off).
+// R6s: optional distance fog from the same timecyc row. When fog is false
+// (default) the TC path is bit-for-bit the R6m look. When true, every
+// geometry pixel blends toward fogColor by
+// factor=clamp((dist-FogSt)/(FarClp-FogSt),0,1) with fogColor=SkyBot and
+// dist = view-space depth (w_clip = 1/den from the rasterizer's own
+// perspective denominator, the same data the z-buffer test uses).
 struct TexTimeEnv {
     float amb[3] = { 0.0f, 0.0f, 0.0f };
     float sun[3] = { 0.0f, 0.0f, 0.0f };
     uint8_t skyTop[3] = { 0, 0, 0 };
     uint8_t skyBot[3] = { 0, 0, 0 };
+    bool fog = false;
+    float farClp = 0.0f; // FarClp from timecyc bytes (tokens[27])
+    float fogSt = 0.0f; // FogSt from timecyc bytes (tokens[28])
+    uint8_t fogColor[3] = { 0, 0, 0 }; // SkyBot of the same row
 };
 
 // Software rasterizer over a WorldShotScene (triangle soup + per-tri UV,
