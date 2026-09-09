@@ -39,6 +39,7 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
         app/platform/linux/RadioDecode.cpp
         app/platform/linux/SkinPed.cpp
         app/platform/linux/IfpAnim.cpp
+        app/platform/linux/CsAnim.cpp
         app/platform/linux/CarPose.cpp
         app/platform/linux/DuoShot.cpp
         app/platform/linux/CrowdShot.cpp
