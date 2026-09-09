@@ -308,3 +308,81 @@ bool GameShot_ApplyWanted(const char* gameDir, std::vector<uint8_t>& gamePixels,
     out.starPixels = changed;
     return true;
 }
+
+bool GameShot_ApplyMoney(const char* gameDir, std::vector<uint8_t>& gamePixels, int money,
+                         MoneyStats& out, char* err, std::size_t errSize) {
+    out = MoneyStats{};
+    out.money = money;
+    (void)std::snprintf(out.fmt, sizeof(out.fmt), "$%%08d/-$%%07d");
+    out.posRight = kMoneyRight;
+    out.posTop = kMoneyTop;
+    out.cellH = kMoneyCellH;
+    if (!gameDir || !gameDir[0]) {
+        SetErr(err, errSize, "no game dir");
+        return false;
+    }
+    if (gamePixels.size() != static_cast<std::size_t>(kFbW) * kFbH * 4) {
+        SetErr(err, errSize, "game frame has bad size");
+        return false;
+    }
+    if (money < kMoneyMin || money > kMoneyMax) {
+        SetErr(err, errSize, "bad money (want -999999..9999999)");
+        return false;
+    }
+    // DrawMoney format (game_sa/Hud.cpp, read-only spec): "$%08d" of abs at
+    // >=0, "-$%07d" of abs below; 9 chars max either way.
+    char text[16] = {};
+    if (money < 0) {
+        (void)std::snprintf(text, sizeof(text), "-$%07d", -money);
+        out.inkR = kMoneyRedR;
+        out.inkG = kMoneyRedG;
+        out.inkB = kMoneyRedB;
+    } else {
+        (void)std::snprintf(text, sizeof(text), "$%08d", money);
+        out.inkR = kMoneyGreenR;
+        out.inkG = kMoneyGreenG;
+        out.inkB = kMoneyGreenB;
+    }
+    (void)std::snprintf(out.text, sizeof(out.text), "%s", text);
+    // font2 glyphs (existing MenuShot HUD-font path: fonts.txd + fonts.dat).
+    MenuHudFont font;
+    {
+        char ferr[512] = {};
+        if (!MenuShot_LoadHudFont(gameDir, font, ferr, sizeof(ferr))) {
+            char msg[640];
+            (void)std::snprintf(msg, sizeof(msg), "money font: %s", ferr);
+            SetErr(err, errSize, msg);
+            return false;
+        }
+    }
+    const std::vector<uint8_t> before = gamePixels;
+    // Black drop shadow (+1,+1) first, then green/red ink: same two-pass
+    // order as the HUD digits, the clock, the zone label and the stars.
+    // Integer math, fixed traversal order.
+    const int want = static_cast<int>(std::strlen(text));
+    const int shadowDrawn = MenuShot_DrawTextRight(gamePixels, kFbW, kFbH, font, text,
+                                                   kMoneyRight + 1, kMoneyTop + 1,
+                                                   kMoneyCellH, 0, 0, 0);
+    out.digits = MenuShot_DrawTextRight(gamePixels, kFbW, kFbH, font, text, kMoneyRight,
+                                        kMoneyTop, kMoneyCellH,
+                                        static_cast<uint8_t>(out.inkR),
+                                        static_cast<uint8_t>(out.inkG),
+                                        static_cast<uint8_t>(out.inkB));
+    if (shadowDrawn != want || out.digits != want) {
+        gamePixels = before;
+        char msg[128];
+        (void)std::snprintf(msg, sizeof(msg), "money glyph empty shadow=%d ink=%d want=%d",
+                            shadowDrawn, out.digits, want);
+        SetErr(err, errSize, msg);
+        return false;
+    }
+    long changed = 0;
+    for (std::size_t i = 0; i < before.size(); i += 4) {
+        if (gamePixels[i] != before[i] || gamePixels[i + 1] != before[i + 1] ||
+            gamePixels[i + 2] != before[i + 2]) {
+            ++changed;
+        }
+    }
+    out.moneyPixels = changed;
+    return true;
+}

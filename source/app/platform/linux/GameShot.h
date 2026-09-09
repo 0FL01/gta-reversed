@@ -160,3 +160,63 @@ constexpr int kWantedStarGlyph = 0x5D;
 // any failure; never modifies gamePixels on failure.
 bool GameShot_ApplyWanted(const char* gameDir, std::vector<uint8_t>& gamePixels, int wanted,
                           WantedStats& out, char* err, std::size_t errSize);
+
+// Round 38 (R6aj): money readout over the game frame (--money M).
+// Spec grounding (read-only, NOT linked):
+// - game_sa/Hud.cpp CHud::DrawMoney (0x58EAF0 path): money>=0 prints
+//   "$%08d" of abs(m_nDisplayMoney) in HUD_COLOUR_GREEN, money<0 prints
+//   "-$%07d" of abs in HUD_COLOUR_RED; CPlayerInfo::m_nMoney/m_nDisplayMoney
+//   (PlayerInfo.h:33-34, default 0 in PlayerInfo::Clear).
+// - game_sa/HudColours.cpp: HUD_COLOUR_GREEN=(54,104,44),
+//   HUD_COLOUR_RED=(180,25,29).
+// - Position: PrintString(SCREEN_STRETCH_FROM_RIGHT(32),
+//   GetYPosBasedOnHealth(player, SCREEN_STRETCH_Y(89), 12)), ALIGN_RIGHT,
+//   FONT_PRICEDOWN, proportional=false, same scale as DrawClock. At the
+//   640x480 HUD frame STRETCH_X is identity so right=608; STRETCH_Y=480/448
+//   so y=89*480/448-12*480/448=82.5 with the default m_nMaxHealth=100 (<101,
+//   so the -12 offset applies) -> top=82 (floor). Hence moneyPos=608,82,
+//   cellH=24 (same order as the clock/wanted digits on the reused path).
+// This path formats the same 9-char-max string ("$00000250", "-$0999999")
+// and blits it with the EXISTING MenuShot right-aligned font2 glyph path
+// (fonts.dat advances, black drop shadow + green/red ink), right-justified
+// to the same right edge as the bars/clock. No procedural pixels: every
+// money byte is a fonts.txd texel; an empty/missing glyph fails honestly.
+// Without this call GameShot_Render output is untouched bit-for-bit.
+struct MoneyStats {
+    int money = 0;      // requested amount (-999999..9999999)
+    char text[16] = {}; // formatted string ("$%08d" / "-$%07d")
+    char fmt[32] = {};  // always "$%08d/-$%07d"
+    int digits = 0;     // font2 ink glyphs drawn (want == strlen(text))
+    long moneyPixels = 0; // frame pixels changed by the overlay (want >200)
+    int posRight = 0;   // fixed row right edge, top-down (want 608)
+    int posTop = 0;     // fixed row top, top-down (want 82)
+    int cellH = 0;      // fixed glyph cell height px (want 24)
+    int inkR = 0;       // ink color R (54 green / 180 red)
+    int inkG = 0;       // ink color G (104 green / 25 red)
+    int inkB = 0;       // ink color B (44 green / 29 red)
+};
+
+// Fixed game-layout money geometry at 640x480 (top-down): right edge 608
+// (same STRETCH_FROM_RIGHT(32) edge as the bars/clock/stars), top 82
+// (STRETCH_Y(89) minus the GetYPosBasedOnHealth -12 health offset at
+// 480/448, floored), cell height 24 (same order as the clock digits).
+// Ink is the DrawMoney HUD colour: green (54,104,44) at >=0, red
+// (180,25,29) below; shadow is black at (+1,+1) like the other HUD passes.
+constexpr int kMoneyRight = 608;
+constexpr int kMoneyTop = 82;
+constexpr int kMoneyCellH = 24;
+constexpr int kMoneyGreenR = 54;
+constexpr int kMoneyGreenG = 104;
+constexpr int kMoneyGreenB = 44;
+constexpr int kMoneyRedR = 180;
+constexpr int kMoneyRedG = 25;
+constexpr int kMoneyRedB = 29;
+constexpr int kMoneyMin = -999999;
+constexpr int kMoneyMax = 9999999;
+
+// Overlays the money readout onto gamePixels in place (must be a 640x480
+// bottom-up RGBA frame from GameShot_Render). Returns false with err set on
+// any failure (bad amount, font, empty glyph); never modifies gamePixels on
+// failure.
+bool GameShot_ApplyMoney(const char* gameDir, std::vector<uint8_t>& gamePixels, int money,
+                         MoneyStats& out, char* err, std::size_t errSize);
