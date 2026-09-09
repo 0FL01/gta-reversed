@@ -66,7 +66,7 @@ using uint64 = uint64_t;
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --shot-cs-duo <out.tga> | --shot-water <out.tga> [--hour H] [--water-file water1.dat] | --shot-shore <out.tga> [--hour H] | --shot-hud <out.tga> [--health H] [--armor A] | --shot-radar <out.tga> [--x X] [--y Y] | --zone-at X,Y | --shot-game <out.tga> [--health H] [--armor A] [--show-zone] [--wanted N] [--money M] [--hour H] [--weather W] | --csanim-seq <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--frames 5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] [--hud] [--wanted N] [--money M] [--radar] [--show-zone] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] [--hud] [--show-zone] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --shot-cs-duo <out.tga> | --shot-water <out.tga> [--hour H] [--water-file water1.dat] | --shot-shore <out.tga> [--hour H] | --shot-hud <out.tga> [--health H] [--armor A] | --shot-radar <out.tga> [--x X] [--y Y] | --zone-at X,Y | --shot-game <out.tga> [--health H] [--armor A] [--show-zone] [--wanted N] [--money M] [--hour H] [--weather W] | --csanim-seq <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--frames 5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] [--hud] [--wanted N] [--money M] [--radar] [--show-zone] [--hour H] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] [--hud] [--show-zone] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -5555,6 +5555,40 @@ int RunDrive(int argc, char** argv) {
             hasDriveMoney = true;
         }
     }
+    // R6ba (round 55): optional time-of-day. Absent --hour keeps the legacy
+    // look bit-for-bit (fixed clear-color background, legacy 0.32+0.68*NdotL
+    // shade, HUD clock 12:00). A given H (integer 0-23) relights every
+    // waypoint frame from the EXTRASUNNY_LA row H (same TimeCycle floor path
+    // and same TexTimeEnv amb/dir/sky math as --shot-scene --hour H) and
+    // shows the HUD clock as "%02d:00" of H via the same font2 path (only
+    // with --hud; without --hud no clock is drawn — fixed below). Anything
+    // else fails honestly (no TGA, no drive-ok). The drive corridor pager
+    // holds no water quads, so the WaterRGBA bytes of the same row have no
+    // meshes to color on this path (conditional clause vacuous) — the row
+    // is still the same TimeCycle bytes as the scene cross-check.
+    int driveHour = -1;
+    {
+        const char* hourArg = ArgValue(argc, argv, "--hour", nullptr);
+        if (hourArg) {
+            size_t len = std::strlen(hourArg);
+            bool digits = len > 0 && len <= 2;
+            for (size_t i = 0; digits && i < len; ++i) {
+                if (hourArg[i] < '0' || hourArg[i] > '9') {
+                    digits = false;
+                }
+            }
+            int h = digits ? std::atoi(hourArg) : -1;
+            if (!digits || h < 0 || h > 23) {
+                (void)std::printf("drive-fail bad --hour '%s' (want 0-23)\n", hourArg);
+                eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+                eglDestroyContext(display, context);
+                eglDestroySurface(display, surface);
+                eglTerminate(display);
+                return 1;
+            }
+            driveHour = h;
+        }
+    }
     HandlingParams hp{};
     if (useHandling) {
         char hErr[512] = {};
@@ -5632,6 +5666,39 @@ int RunDrive(int argc, char** argv) {
         eglDestroySurface(display, surface);
         eglTerminate(display);
         return 1;
+    }
+    // R6ba: timecyc row for --hour (same exact bytes as --shot-scene --hour).
+    TexTimeEnv driveEnv{};
+    const TexTimeEnv* driveEnvPtr = nullptr;
+    if (driveHour >= 0) {
+        TimeCycleParams dtcp{};
+        char dtcErr[256] = {};
+        if (!TimeCycle_LoadWeatherHour(gameDir.c_str(), "EXTRASUNNY_LA", driveHour, dtcp,
+                                       dtcErr, sizeof(dtcErr))) {
+            (void)std::printf("drive-fail timecyc %s (game=%s weather=EXTRASUNNY_LA hour=%d)\n",
+                               dtcErr, gameDir.c_str(), driveHour);
+            DriveSim_ShutdownWorld();
+            eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            eglDestroyContext(display, context);
+            eglDestroySurface(display, surface);
+            eglTerminate(display);
+            return 1;
+        }
+        for (int c = 0; c < 3; ++c) {
+            driveEnv.amb[c] = dtcp.amb[c] / 255.0f;
+            driveEnv.sun[c] = dtcp.dir[c] / 255.0f;
+            driveEnv.skyTop[c] = dtcp.skyTop[c];
+            driveEnv.skyBot[c] = dtcp.skyBot[c];
+        }
+        driveEnv.fog = false;
+        driveEnvPtr = &driveEnv;
+        (void)std::printf(
+            "timecyc-load weather=EXTRASUNNY_LA hour=%d amb=%d,%d,%d dir=%d,%d,%d "
+            "skytop=%d,%d,%d skybot=%d,%d,%d suncore=%d,%d,%d sample=%s sunDir=fixed spec=off\n",
+            driveHour, dtcp.amb[0], dtcp.amb[1], dtcp.amb[2], dtcp.dir[0], dtcp.dir[1],
+            dtcp.dir[2], dtcp.skyTop[0], dtcp.skyTop[1], dtcp.skyTop[2], dtcp.skyBot[0],
+            dtcp.skyBot[1], dtcp.skyBot[2], dtcp.sunCore[0], dtcp.sunCore[1], dtcp.sunCore[2],
+            dtcp.sampleName);
     }
     // 3. Sample: legacy uniform arc-length (default, bit-identical) or
     // handling launch profile (uniform in sim time, --use-handling only).
@@ -5912,10 +5979,19 @@ int RunDrive(int argc, char** argv) {
         const int ac0 = kDriveHudArmor > 100 ? 100 : kDriveHudArmor;
         const int barW1 = (hc0 * 109 + 50) / 100;
         const int barW2 = (ac0 * 62 + 50) / 100;
+        // R6ba: HUD clock follows --hour via the same font2 "%02d:00" path
+        // (no hardcoded digits); without --hour it stays 12:00 bit-identical.
+        // Without --hud no clock is drawn at all (this block never runs).
+        const int hudHour = driveHour >= 0 ? driveHour : kDriveHudHour;
+        char hudClock[16] = {};
+        (void)std::snprintf(hudClock, sizeof(hudClock), "%02d:00", hudHour);
         (void)std::printf("drivehud-load sprites=%d barTex=%s barWH=%dx%d fontTex=font2 "
-                           "health=%d armor=%d barW1=%d barW2=%d clock=12:00\n",
+                           "health=%d armor=%d barW1=%d barW2=%d clock=%s\n",
                            hudAssets.sprites, hudAssets.barTex, hudAssets.barW, hudAssets.barH,
-                           kDriveHudHealth, kDriveHudArmor, barW1, barW2);
+                           kDriveHudHealth, kDriveHudArmor, barW1, barW2, hudClock);
+        if (driveHour >= 0) {
+            (void)std::printf("hud-clock text=\"%s\"\n", hudClock);
+        }
         (void)std::printf("drivehud-fmt spdFmt=SPD %%03d kmh=round(v*3.6) src=DriveSim-"
                            "integrator path=%s\n",
                            hudFromHandlingPath ? "handling-waypoints" : "side-handling-sim");
@@ -6009,7 +6085,14 @@ int RunDrive(int argc, char** argv) {
         totalFrames += framesPerLeg;
         std::vector<uint8> pixels;
         TexFrameStats texStats{};
-        TexSample_RenderPath(frame, width, height, eye, target, pixels, texStats);
+        // R6ba: with --hour the same TexTimeEnv relights the frame (amb/dir/
+        // sky as --shot-scene --hour); without it the legacy path is bit-wise.
+        if (driveEnvPtr) {
+            TexSample_RenderPathTC(frame, width, height, eye, target, *driveEnvPtr, pixels,
+                                   texStats);
+        } else {
+            TexSample_RenderPath(frame, width, height, eye, target, pixels, texStats);
+        }
         texAgg.tris += texStats.tris;
         texAgg.sampledTri += texStats.sampledTri;
         texAgg.fallbackTri += texStats.fallbackTri;
@@ -6043,11 +6126,14 @@ int RunDrive(int argc, char** argv) {
                                static_cast<unsigned long long>(checksum));
         } else {
             // R6ao: HUD overlay on a copy via the existing HudShot blit path
-            // (bars 137/60 + clock 12:00 + SPD text from the sim velocities).
+            // (bars 137/60 + clock HH:00 + SPD text from the sim velocities;
+            // R6ba: HH comes from --hour when given, else 12:00 bit-identical).
+            // Without --hud no clock is drawn at all (this branch never runs).
             std::vector<uint8> hudPixels = pixels;
             const char* spdText = hudSpdTexts[static_cast<size_t>(i)].c_str();
+            const int blitHour = driveHour >= 0 ? driveHour : kDriveHudHour;
             int spdInk = HudShot_BlitDriveHud(hudPixels, hudAssets, kDriveHudHealth,
-                                              kDriveHudArmor, kDriveHudHour, spdText);
+                                              kDriveHudArmor, blitHour, spdText);
             if (spdInk < 0) {
                 (void)std::printf("drivehud-fail blit wp=%d spd=\"%s\"\n", i, spdText);
                 failed = true;
@@ -6228,10 +6314,17 @@ int RunDrive(int argc, char** argv) {
         cs += cell;
     }
     OS_DebugOut("mad-sa-linux drive");
+    // R6ba: with --hour every final ok line carries hour=H before checksums
+    // (empty without the flag keeps all legacy lines bit-identical).
+    char hourTag[16] = {};
+    if (driveHour >= 0) {
+        (void)std::snprintf(hourTag, sizeof(hourTag), " hour=%d", driveHour);
+    }
     if (!wantHud) {
         (void)std::printf("drive-ok waypoints=%d frames=%d model=%s distTotal=%.3f "
-                           "wheelSpinTotal=%.6f groundClear=OK checksums=%s\n",
-                           waypoints, totalFrames, meas.model, distTotal, spinTotal, cs.c_str());
+                           "wheelSpinTotal=%.6f groundClear=OK%s checksums=%s\n",
+                           waypoints, totalFrames, meas.model, distTotal, spinTotal, hourTag,
+                           cs.c_str());
         (void)std::printf("drive-verify distTotal=%.3f wheelR=%.6f expectSpin=%.6f "
                            "spinTotal=%.6f relErr=%.6f span=%.2f maxTurn=%.1f\n",
                            distTotal, meas.wheelR, expectSpin, spinTotal, spinErr, span, maxTurn);
@@ -6383,41 +6476,41 @@ int RunDrive(int argc, char** argv) {
         if (hasDriveWanted && hasDriveMoney) {
             if (wantRadar) {
                 (void)std::printf("drivehud-ok waypoints=%d frames=%d model=%s hudPixels=%ld "
-                                   "(sum-over-waypoints) spdTexts=%s wanted=%d money=%d radar=1%s "
+                                   "(sum-over-waypoints) spdTexts=%s wanted=%d money=%d radar=1%s%s "
                                    "checksums=%s\n",
                                    waypoints, totalFrames, meas.model, hudSum, spdJoin.c_str(),
-                                   driveWanted, driveMoney, zoneTag, cs.c_str());
+                                   driveWanted, driveMoney, zoneTag, hourTag, cs.c_str());
             } else {
                 (void)std::printf("drivehud-ok waypoints=%d frames=%d model=%s hudPixels=%ld "
-                                   "(sum-over-waypoints) spdTexts=%s wanted=%d money=%d%s checksums=%s\n",
+                                   "(sum-over-waypoints) spdTexts=%s wanted=%d money=%d%s%s checksums=%s\n",
                                    waypoints, totalFrames, meas.model, hudSum, spdJoin.c_str(),
-                                   driveWanted, driveMoney, zoneTag, cs.c_str());
+                                   driveWanted, driveMoney, zoneTag, hourTag, cs.c_str());
             }
         } else if (hasDriveWanted) {
             if (wantRadar) {
                 (void)std::printf("drivehud-ok waypoints=%d frames=%d model=%s hudPixels=%ld "
-                                   "(sum-over-waypoints) spdTexts=%s wanted=%d radar=1%s "
+                                   "(sum-over-waypoints) spdTexts=%s wanted=%d radar=1%s%s "
                                    "checksums=%s\n",
                                    waypoints, totalFrames, meas.model, hudSum, spdJoin.c_str(),
-                                   driveWanted, zoneTag, cs.c_str());
+                                   driveWanted, zoneTag, hourTag, cs.c_str());
             } else {
                 (void)std::printf("drivehud-ok waypoints=%d frames=%d model=%s hudPixels=%ld "
-                                   "(sum-over-waypoints) spdTexts=%s wanted=%d%s checksums=%s\n",
+                                   "(sum-over-waypoints) spdTexts=%s wanted=%d%s%s checksums=%s\n",
                                    waypoints, totalFrames, meas.model, hudSum, spdJoin.c_str(),
-                                   driveWanted, zoneTag, cs.c_str());
+                                   driveWanted, zoneTag, hourTag, cs.c_str());
             }
         } else {
             if (wantRadar) {
                 (void)std::printf("drivehud-ok waypoints=%d frames=%d model=%s hudPixels=%ld "
-                                   "(sum-over-waypoints) spdTexts=%s money=%d radar=1%s "
+                                   "(sum-over-waypoints) spdTexts=%s money=%d radar=1%s%s "
                                    "checksums=%s\n",
                                    waypoints, totalFrames, meas.model, hudSum, spdJoin.c_str(),
-                                   driveMoney, zoneTag, cs.c_str());
+                                   driveMoney, zoneTag, hourTag, cs.c_str());
             } else {
                 (void)std::printf("drivehud-ok waypoints=%d frames=%d model=%s hudPixels=%ld "
-                                   "(sum-over-waypoints) spdTexts=%s money=%d%s checksums=%s\n",
+                                   "(sum-over-waypoints) spdTexts=%s money=%d%s%s checksums=%s\n",
                                    waypoints, totalFrames, meas.model, hudSum, spdJoin.c_str(),
-                                   driveMoney, zoneTag, cs.c_str());
+                                   driveMoney, zoneTag, hourTag, cs.c_str());
             }
         }
         (void)std::printf(
@@ -6429,14 +6522,14 @@ int RunDrive(int argc, char** argv) {
     }
     if (wantRadar) {
         (void)std::printf("drivehud-ok waypoints=%d frames=%d model=%s hudPixels=%ld "
-                           "(sum-over-waypoints) spdTexts=%s radar=1%s checksums=%s\n",
+                           "(sum-over-waypoints) spdTexts=%s radar=1%s%s checksums=%s\n",
                            waypoints, totalFrames, meas.model, hudSum, spdJoin.c_str(), zoneTag,
-                           cs.c_str());
+                           hourTag, cs.c_str());
     } else {
         (void)std::printf("drivehud-ok waypoints=%d frames=%d model=%s hudPixels=%ld "
-                           "(sum-over-waypoints) spdTexts=%s%s checksums=%s\n",
+                           "(sum-over-waypoints) spdTexts=%s%s%s checksums=%s\n",
                            waypoints, totalFrames, meas.model, hudSum, spdJoin.c_str(), zoneTag,
-                           cs.c_str());
+                           hourTag, cs.c_str());
     }
     (void)std::printf("drive-verify distTotal=%.3f wheelR=%.6f expectSpin=%.6f spinTotal=%.6f "
                        "relErr=%.6f span=%.2f maxTurn=%.1f\n",
