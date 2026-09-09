@@ -66,7 +66,7 @@ using uint64 = uint64_t;
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --shot-cs-duo <out.tga> | --shot-water <out.tga> [--hour H] [--water-file water1.dat] | --shot-shore <out.tga> [--hour H] | --shot-hud <out.tga> [--health H] [--armor A] | --shot-radar <out.tga> [--x X] [--y Y] | --zone-at X,Y | --shot-game <out.tga> [--health H] [--armor A] [--show-zone] [--wanted N] [--money M] [--hour H] [--weather W] | --csanim-seq <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--frames 5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] [--hud] [--wanted N] [--money M] [--radar] [--show-zone] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] [--hud] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --shot-cs-duo <out.tga> | --shot-water <out.tga> [--hour H] [--water-file water1.dat] | --shot-shore <out.tga> [--hour H] | --shot-hud <out.tga> [--health H] [--armor A] | --shot-radar <out.tga> [--x X] [--y Y] | --zone-at X,Y | --shot-game <out.tga> [--health H] [--armor A] [--show-zone] [--wanted N] [--money M] [--hour H] [--weather W] | --csanim-seq <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--frames 5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] [--hud] [--wanted N] [--money M] [--radar] [--show-zone] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] [--hud] [--show-zone] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -6697,13 +6697,29 @@ int RunWalk(int argc, char** argv) {
     // GameShot 1:1 disc blit at radarPos=87,409). Only with --hud (without it
     // an honest walkhud-fail needs --hud). Absent flag keeps all legacy
     // paths bit-for-bit.
+    // R6ax (round 52): optional --show-zone overlays the district name of the
+    // ped XY of every waypoint (existing ZoneInfo smallest-zone rule + GXT
+    // MAIN display string + font2 centered blit at zonePos=320,360 cellH=40,
+    // same layout as --shot-game --show-zone via GameShot_ApplyZoneLabelAt).
+    // Only with --hud (without it an honest walkhud-fail needs --hud).
+    // Absent flag keeps all legacy paths bit-for-bit.
     int walkWanted = -1;
     bool hasWalkWanted = false;
     int walkMoney = 0;
     bool hasWalkMoney = false;
     const bool wantRadar = HasArg(argc, argv, "--radar");
+    const bool wantZone = HasArg(argc, argv, "--show-zone");
     if (wantRadar && !wantHud) {
         (void)std::printf("walkhud-fail needs --hud for --radar\n");
+        WalkSim_ShutdownWorld();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    if (wantZone && !wantHud) {
+        (void)std::printf("walkhud-fail needs --hud for --show-zone\n");
         WalkSim_ShutdownWorld();
         eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
         eglDestroyContext(display, context);
@@ -6866,6 +6882,9 @@ int RunWalk(int argc, char** argv) {
     std::vector<long> wmMoneyPer; // R6ar: per-frame money deltas (hasWalkMoney only)
     std::vector<long> radarPer; // R6at: per-frame radar disc pixels (wantRadar only)
     std::vector<std::string> radarTex; // R6at: per-frame center tile names
+    std::vector<long> zonePer; // R6ax: per-frame zone label pixels (wantZone only)
+    std::vector<std::string> zoneKeys; // R6ax: per-frame GXT keys from info.zon
+    std::vector<std::string> zoneTexts; // R6ax: per-frame GXT display strings
     if (wantHud) {
         hudPer.reserve(static_cast<size_t>(waypoints));
         wmStarPer.reserve(static_cast<size_t>(waypoints));
@@ -6873,6 +6892,11 @@ int RunWalk(int argc, char** argv) {
         if (wantRadar) {
             radarPer.reserve(static_cast<size_t>(waypoints));
             radarTex.reserve(static_cast<size_t>(waypoints));
+        }
+        if (wantZone) {
+            zonePer.reserve(static_cast<size_t>(waypoints));
+            zoneKeys.reserve(static_cast<size_t>(waypoints));
+            zoneTexts.reserve(static_cast<size_t>(waypoints));
         }
     }
     TexFrameStats texAgg{};
@@ -7035,6 +7059,35 @@ int RunWalk(int argc, char** argv) {
                 (void)std::printf("walkhud-radar wp=%d x=%.2f y=%.2f centerTex=%s discPixels=%ld\n",
                                    i, w.x, w.y, rst.firstTile, copied);
             }
+            // R6ax: zone label of THIS waypoint ped XY through the EXISTING
+            // ZoneInfo+GXT+font2 path (same zonePos=320,360 cellH=40 layout as
+            // --shot-game --show-zone via GameShot_ApplyZoneLabelAt). Fixed
+            // pier text on every frame would be synthetic; here key/text
+            // follow w.x/w.y (see log).
+            if (wantZone) {
+                ZoneLabelStats zSt{};
+                char zerr[768] = {};
+                if (!GameShot_ApplyZoneLabelAt(gameDir.c_str(), hudPixels, w.x, w.y, zSt,
+                                               zerr, sizeof(zerr))) {
+                    (void)std::printf("walkhud-fail zone %s (wp=%d x=%.2f y=%.2f)\n",
+                                       zerr, i, w.x, w.y);
+                    failed = true;
+                    break;
+                }
+                if (zSt.labelPixels <= 500) {
+                    (void)std::printf(
+                        "walkhud-fail thin zone wp=%d labelPixels=%ld (want >500)\n", i,
+                        zSt.labelPixels);
+                    failed = true;
+                    break;
+                }
+                zonePer.push_back(zSt.labelPixels);
+                zoneKeys.emplace_back(zSt.key);
+                zoneTexts.emplace_back(zSt.text);
+                (void)std::printf("walkhud-zone wp=%d x=%.2f y=%.2f key=%s text=\"%s\" "
+                                   "labelPixels=%ld\n",
+                                   i, w.x, w.y, zSt.key, zSt.text, zSt.labelPixels);
+            }
             long hudChanged = 0;
             for (std::size_t b = 0; b < pixels.size(); b += 4) {
                 if (hudPixels[b] != pixels[b] || hudPixels[b + 1] != pixels[b + 1] ||
@@ -7183,6 +7236,42 @@ int RunWalk(int argc, char** argv) {
         (void)std::printf("walkhud-radar-ok waypoints=%d radarPixels=%ld\n", waypoints,
                            radarSum);
     }
+    // R6ax: zone summary (only with --show-zone; without it this block never
+    // runs and all legacy walkhud-ok lines below stay bit-identical).
+    long zoneSum = 0;
+    if (wantZone) {
+        if (static_cast<int>(zonePer.size()) != waypoints ||
+            static_cast<int>(zoneKeys.size()) != waypoints ||
+            static_cast<int>(zoneTexts.size()) != waypoints) {
+            (void)std::printf("walkhud-fail zone count %d/%d/%d (want %d)\n",
+                               static_cast<int>(zonePer.size()),
+                               static_cast<int>(zoneKeys.size()),
+                               static_cast<int>(zoneTexts.size()), waypoints);
+            WalkSim_ShutdownWorld();
+            return 1;
+        }
+        for (long v : zonePer) {
+            if (!(v > 500)) {
+                (void)std::printf("walkhud-fail thin zone total zonePixels=%ld (want >500)\n",
+                                   v);
+                WalkSim_ShutdownWorld();
+                return 1;
+            }
+            zoneSum += v;
+        }
+        if (!(zoneSum > 500)) {
+            (void)std::printf("walkhud-fail thin zone total zonePixels=%ld(need >500)\n",
+                               zoneSum);
+            WalkSim_ShutdownWorld();
+            return 1;
+        }
+        (void)std::printf("walkhud-zone-ok waypoints=%d zonePixels=%ld\n", waypoints,
+                           zoneSum);
+    }
+    // R6ax: zone tag for the final lines (empty without --show-zone keeps all
+    // legacy walkhud-ok lines bit-identical; with the flag every variant
+    // carries zoneLabel=1 before checksums).
+    const char* zoneTag = wantZone ? " zoneLabel=1" : "";
     // R6ar: wanted/money summary through the same GameShot metrics. Without
     // the flags this block never runs (legacy walkhud-ok below bit-identical).
     if (hasWalkWanted || hasWalkMoney) {
@@ -7251,45 +7340,49 @@ int RunWalk(int argc, char** argv) {
             if (wantRadar) {
                 (void)std::printf("walkhud-ok waypoints=%d frames=%d model=%s anim=%s hudPixels=%ld "
                                    "(sum-over-waypoints) spdTexts=%s walkV=%.6f walkKmh=%d "
-                                   "wanted=%d money=%d radar=1 checksums=%s\n",
+                                   "wanted=%d money=%d radar=1%s checksums=%s\n",
                                    waypoints, totalFrames, clip.model, clip.anim, hudSum,
                                    spdJoin.c_str(), walkV, walkKmh, walkWanted, walkMoney,
-                                   cs.c_str());
+                                   zoneTag, cs.c_str());
             } else {
                 (void)std::printf("walkhud-ok waypoints=%d frames=%d model=%s anim=%s hudPixels=%ld "
                                    "(sum-over-waypoints) spdTexts=%s walkV=%.6f walkKmh=%d "
-                                   "wanted=%d money=%d checksums=%s\n",
+                                   "wanted=%d money=%d%s checksums=%s\n",
                                    waypoints, totalFrames, clip.model, clip.anim, hudSum,
                                    spdJoin.c_str(), walkV, walkKmh, walkWanted, walkMoney,
-                                   cs.c_str());
+                                   zoneTag, cs.c_str());
             }
         } else if (hasWalkWanted) {
             if (wantRadar) {
                 (void)std::printf("walkhud-ok waypoints=%d frames=%d model=%s anim=%s hudPixels=%ld "
                                    "(sum-over-waypoints) spdTexts=%s walkV=%.6f walkKmh=%d "
-                                   "wanted=%d radar=1 checksums=%s\n",
+                                   "wanted=%d radar=1%s checksums=%s\n",
                                    waypoints, totalFrames, clip.model, clip.anim, hudSum,
-                                   spdJoin.c_str(), walkV, walkKmh, walkWanted, cs.c_str());
+                                   spdJoin.c_str(), walkV, walkKmh, walkWanted, zoneTag,
+                                   cs.c_str());
             } else {
                 (void)std::printf("walkhud-ok waypoints=%d frames=%d model=%s anim=%s hudPixels=%ld "
                                    "(sum-over-waypoints) spdTexts=%s walkV=%.6f walkKmh=%d "
-                                   "wanted=%d checksums=%s\n",
+                                   "wanted=%d%s checksums=%s\n",
                                    waypoints, totalFrames, clip.model, clip.anim, hudSum,
-                                   spdJoin.c_str(), walkV, walkKmh, walkWanted, cs.c_str());
+                                   spdJoin.c_str(), walkV, walkKmh, walkWanted, zoneTag,
+                                   cs.c_str());
             }
         } else {
             if (wantRadar) {
                 (void)std::printf("walkhud-ok waypoints=%d frames=%d model=%s anim=%s hudPixels=%ld "
                                    "(sum-over-waypoints) spdTexts=%s walkV=%.6f walkKmh=%d "
-                                   "money=%d radar=1 checksums=%s\n",
+                                   "money=%d radar=1%s checksums=%s\n",
                                    waypoints, totalFrames, clip.model, clip.anim, hudSum,
-                                   spdJoin.c_str(), walkV, walkKmh, walkMoney, cs.c_str());
+                                   spdJoin.c_str(), walkV, walkKmh, walkMoney, zoneTag,
+                                   cs.c_str());
             } else {
                 (void)std::printf("walkhud-ok waypoints=%d frames=%d model=%s anim=%s hudPixels=%ld "
                                    "(sum-over-waypoints) spdTexts=%s walkV=%.6f walkKmh=%d "
-                                   "money=%d checksums=%s\n",
+                                   "money=%d%s checksums=%s\n",
                                    waypoints, totalFrames, clip.model, clip.anim, hudSum,
-                                   spdJoin.c_str(), walkV, walkKmh, walkMoney, cs.c_str());
+                                   spdJoin.c_str(), walkV, walkKmh, walkMoney, zoneTag,
+                                   cs.c_str());
             }
         }
         (void)std::printf("walk-verify distTotal=%.3f strideLen=%.6f expectCycles=%.6f "
@@ -7300,15 +7393,15 @@ int RunWalk(int argc, char** argv) {
     }
     if (wantRadar) {
         (void)std::printf("walkhud-ok waypoints=%d frames=%d model=%s anim=%s hudPixels=%ld "
-                           "(sum-over-waypoints) spdTexts=%s walkV=%.6f walkKmh=%d radar=1 "
+                           "(sum-over-waypoints) spdTexts=%s walkV=%.6f walkKmh=%d radar=1%s "
                            "checksums=%s\n",
                            waypoints, totalFrames, clip.model, clip.anim, hudSum, spdJoin.c_str(),
-                           walkV, walkKmh, cs.c_str());
+                           walkV, walkKmh, zoneTag, cs.c_str());
     } else {
         (void)std::printf("walkhud-ok waypoints=%d frames=%d model=%s anim=%s hudPixels=%ld "
-                           "(sum-over-waypoints) spdTexts=%s walkV=%.6f walkKmh=%d checksums=%s\n",
+                           "(sum-over-waypoints) spdTexts=%s walkV=%.6f walkKmh=%d%s checksums=%s\n",
                            waypoints, totalFrames, clip.model, clip.anim, hudSum, spdJoin.c_str(),
-                           walkV, walkKmh, cs.c_str());
+                           walkV, walkKmh, zoneTag, cs.c_str());
     }
     (void)std::printf("walk-verify distTotal=%.3f strideLen=%.6f expectCycles=%.6f "
                        "actualCycles=%.6f relErr=%.6f span=%.2f\n",
