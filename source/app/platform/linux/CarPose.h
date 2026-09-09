@@ -64,3 +64,21 @@ bool CarPose_Init(const char* gameDir, const char* model, double steerDeg, doubl
                   WorldShotScene& scene, CarPoseStats& stats, CarPoseAudit& audit, char* err,
                   std::size_t errSize);
 void CarPose_Shutdown();
+
+// DFF-derived kinematic constants for the drive slice (R6n): wheel radius
+// from the stored wheel-mesh extents, wheelbase from the dummy Y positions,
+// clearance = -minZ of the bound wheel instances (car origin height that
+// puts the wheel bottoms on z=0). All values come from DFF bytes only.
+struct CarPoseMeasure {
+    char model[64];
+    char src[160];
+    double wheelR = 0.0;
+    double wheelbase = 0.0;
+    double clearance = 0.0;
+    double frontY = 0.0;
+    double rearY = 0.0;
+    int wheels = 0;
+};
+
+bool CarPose_Measure(const char* gameDir, const char* model, CarPoseMeasure& out, char* err,
+                     std::size_t errSize);

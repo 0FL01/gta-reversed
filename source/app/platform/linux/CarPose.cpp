@@ -156,6 +156,15 @@ bool RwInitEngine() {
     if (s_rwInit) {
         return true;
     }
+    // Tolerant across slices in one process (DriveSim composes CarPose +
+    // StreamPager, which register the identical plugin set): when another
+    // slice already brought the engine up, reuse it instead of failing
+    // (check first to avoid the librw RWERROR print on double init).
+    if (rw::Engine::state != rw::Engine::Dead) {
+        rw::Texture::setLoadTextures(false);
+        s_rwInit = true;
+        return true;
+    }
     if (!rw::Engine::init(nil)) {
         return false;
     }
@@ -977,4 +986,280 @@ void CarPose_Shutdown() {
         }
     }
     s_txds.clear();
+}
+
+bool CarPose_Measure(const char* gameDir, const char* model, CarPoseMeasure& out, char* err,
+                     std::size_t errSize) {
+    out = CarPoseMeasure{};
+    if (!gameDir || !gameDir[0]) {
+        SetErr(err, errSize, "no game dir");
+        return false;
+    }
+    std::string want = model && model[0] ? model : "landstal";
+    std::string wantLower = want;
+    ToLowerInPlace(wantLower);
+    std::string game(gameDir);
+    OS_SetFilePathOffset(game.c_str());
+    s_gameAbs = game;
+
+    static const char* kImgs[] = { "models/gta3.img", "models/gta_int.img" };
+    std::vector<ImgIndex> imgs;
+    for (const char* rel : kImgs) {
+        ImgIndex idx;
+        if (BuildImgIndex(rel, idx)) {
+            imgs.push_back(std::move(idx));
+        }
+    }
+    if (imgs.empty()) {
+        SetErr(err, errSize, "no IMG archive indexed (models/gta3.img)");
+        return false;
+    }
+    if (!RwInitEngine()) {
+        SetErr(err, errSize, "librw Engine::init failed");
+        return false;
+    }
+    std::vector<uint8> dffBytes;
+    std::string dffFile = wantLower + ".dff";
+    const ImgIndex* hitImg = nil;
+    for (const ImgIndex& idx : imgs) {
+        if (ImgReadBytesStd(idx, dffFile, dffBytes)) {
+            hitImg = &idx;
+            break;
+        }
+    }
+    if (dffBytes.empty()) {
+        char msg[256];
+        (void)std::snprintf(msg, sizeof(msg), "car DFF '%s' not found in gta3/gta_int.img",
+                             dffFile.c_str());
+        SetErr(err, errSize, msg);
+        return false;
+    }
+    {
+        bool named = false;
+        for (const ImgEntry& e : hitImg->entries) {
+            if (e.nameLower == dffFile) {
+                (void)std::snprintf(out.src, sizeof(out.src), "%s:%s", hitImg->label.c_str(),
+                                     e.name.c_str());
+                named = true;
+                break;
+            }
+        }
+        if (!named) {
+            (void)std::snprintf(out.src, sizeof(out.src), "%s:%s", hitImg->label.c_str(),
+                                 dffFile.c_str());
+        }
+    }
+    (void)std::snprintf(out.model, sizeof(out.model), "%s", wantLower.c_str());
+
+    LinkedClump lc = TexSample_LinkedParse(dffBytes.data(), dffBytes.size(), nil, nil, 0);
+    if (!lc.clump) {
+        TexSample_FreeLinked(lc);
+        SetErr(err, errSize, "DFF parse produced no clump (not a RenderWare clump?)");
+        return false;
+    }
+    rw::Frame* root = lc.clump->getFrame();
+    if (!root || root->getParent()) {
+        TexSample_FreeLinked(lc);
+        SetErr(err, errSize, "clump root frame missing");
+        return false;
+    }
+    std::vector<RawFrame> raw;
+    if (!ParseFrameNames(dffBytes, raw, err, errSize)) {
+        TexSample_FreeLinked(lc);
+        return false;
+    }
+    if (static_cast<int>(raw.size()) != root->count()) {
+        TexSample_FreeLinked(lc);
+        SetErr(err, errSize, "framelist count != librw frame count");
+        return false;
+    }
+    std::vector<rw::Frame*> byRaw(raw.size(), nil);
+    if (!PairFrames(raw, 0, root, byRaw, err, errSize)) {
+        TexSample_FreeLinked(lc);
+        return false;
+    }
+    struct Wheel {
+        int raw = -1;
+        rw::Frame* frame = nil;
+        bool front = false;
+        std::string name;
+    };
+    std::vector<Wheel> wheels;
+    for (size_t i = 0; i < raw.size(); ++i) {
+        std::string low = raw[i].name;
+        ToLowerInPlace(low);
+        int cls = ClassifyWheel(low);
+        if (cls != 0) {
+            Wheel w;
+            w.raw = static_cast<int>(i);
+            w.frame = byRaw[i];
+            w.front = cls == 1;
+            w.name = raw[i].name;
+            wheels.push_back(w);
+        }
+    }
+    if (wheels.empty()) {
+        TexSample_FreeLinked(lc);
+        SetErr(err, errSize, "no wheel dummy frames in DFF");
+        return false;
+    }
+    std::set<rw::Frame*> wheelSet;
+    for (const Wheel& w : wheels) {
+        wheelSet.insert(w.frame);
+    }
+    // Wheelbase from dummy Y positions (DFF bytes, car +Y forward).
+    double frontSum = 0.0, rearSum = 0.0;
+    int frontN = 0, rearN = 0;
+    for (const Wheel& w : wheels) {
+        double y = raw[static_cast<size_t>(w.raw)].pos[1];
+        if (w.front) {
+            frontSum += y;
+            ++frontN;
+        } else {
+            rearSum += y;
+            ++rearN;
+        }
+    }
+    if (frontN == 0 || rearN == 0) {
+        TexSample_FreeLinked(lc);
+        SetErr(err, errSize, "need front and rear wheel dummies for wheelbase");
+        return false;
+    }
+    out.frontY = frontSum / frontN;
+    out.rearY = rearSum / rearN;
+    out.wheelbase = out.frontY - out.rearY;
+    if (!(out.wheelbase > 0.1 && out.wheelbase < 20.0)) {
+        TexSample_FreeLinked(lc);
+        SetErr(err, errSize, "wheelbase out of range");
+        return false;
+    }
+    // Kit geoms: atomics inside a wheel-dummy subtree (same rule as Init).
+    struct KitGeom {
+        rw::Geometry* geo = nil;
+        rw::Frame* frame = nil;
+        rw::Frame* owner = nil;
+    };
+    std::vector<KitGeom> kit;
+    FORLIST(link, lc.clump->atomics) {
+        rw::Atomic* atomic = rw::Atomic::fromClump(link);
+        rw::Geometry* geo = atomic ? atomic->geometry : nil;
+        if (!geo || geo->numTriangles <= 0 || geo->numVertices <= 0) {
+            continue;
+        }
+        if (!geo->triangles || !geo->morphTargets || !geo->morphTargets[0].vertices) {
+            continue;
+        }
+        if (rw::Skin::get(geo)) {
+            continue;
+        }
+        rw::Frame* af = atomic->getFrame();
+        rw::Frame* owner = nil;
+        for (rw::Frame* f = af; f; f = f->getParent()) {
+            if (wheelSet.count(f)) {
+                owner = f;
+                break;
+            }
+        }
+        if (owner) {
+            KitGeom k;
+            k.geo = geo;
+            k.frame = af;
+            k.owner = owner;
+            kit.push_back(k);
+        }
+    }
+    if (kit.empty()) {
+        TexSample_FreeLinked(lc);
+        SetErr(err, errSize, "wheel dummies carry no geometry");
+        return false;
+    }
+    // Relative matrices R_k = inv(ownerBind) * wheelFrameBind (DFF bytes).
+    std::vector<rw::Matrix> kitRel(kit.size());
+    for (size_t k = 0; k < kit.size(); ++k) {
+        rw::Matrix* ownerLtm = kit[k].owner->getLTM();
+        rw::Matrix* wheelLtm = kit[k].frame->getLTM();
+        if (!ownerLtm || !wheelLtm) {
+            TexSample_FreeLinked(lc);
+            SetErr(err, errSize, "missing bind LTM for wheel-relative matrix");
+            return false;
+        }
+        rw::Matrix invOwner;
+        rw::Matrix::invert(&invOwner, ownerLtm);
+        rw::Matrix::mult(&kitRel[k], &invOwner, wheelLtm);
+    }
+    // Per-wheel car-space bounds in bind pose (dummyBind * R_k).
+    double minZAll = 0.0;
+    bool haveZ = false;
+    double firstMinY = 0.0, firstMaxY = 0.0, firstMinZ = 0.0, firstMaxZ = 0.0;
+    bool haveFirst = false;
+    for (size_t wi = 0; wi < wheels.size(); ++wi) {
+        rw::Matrix* dummyLtm = wheels[wi].frame->getLTM();
+        if (!dummyLtm) {
+            TexSample_FreeLinked(lc);
+            SetErr(err, errSize, "missing wheel-dummy bind LTM");
+            return false;
+        }
+        for (size_t k = 0; k < kit.size(); ++k) {
+            rw::Matrix m;
+            rw::Matrix::mult(&m, &kitRel[k], dummyLtm);
+            rw::Geometry* geo = kit[k].geo;
+            int nv = geo->numVertices;
+            rw::V3d* verts = geo->morphTargets[0].vertices;
+            std::vector<rw::V3d> wv(static_cast<size_t>(nv));
+            rw::V3d::transformPoints(wv.data(), verts, nv, &m);
+            for (int vi = 0; vi < nv; ++vi) {
+                double y = wv[static_cast<size_t>(vi)].y;
+                double z = wv[static_cast<size_t>(vi)].z;
+                if (!haveZ) {
+                    minZAll = z;
+                    haveZ = true;
+                } else if (z < minZAll) {
+                    minZAll = z;
+                }
+                if (wi == 0 && k == 0) {
+                    if (!haveFirst) {
+                        firstMinY = firstMaxY = y;
+                        firstMinZ = firstMaxZ = z;
+                        haveFirst = true;
+                    } else {
+                        if (y < firstMinY) {
+                            firstMinY = y;
+                        }
+                        if (y > firstMaxY) {
+                            firstMaxY = y;
+                        }
+                        if (z < firstMinZ) {
+                            firstMinZ = z;
+                        }
+                        if (z > firstMaxZ) {
+                            firstMaxZ = z;
+                        }
+                    }
+                }
+            }
+        }
+        // For wheels beyond the first, still extend the first-wheel R only
+        // from wheel 0 (identical clone); minZAll spans all wheels.
+    }
+    TexSample_FreeLinked(lc);
+    if (!haveZ || !haveFirst) {
+        SetErr(err, errSize, "no wheel vertices measured");
+        return false;
+    }
+    // Wheel spins about the X axle, so the rolling circle lies in the YZ
+    // plane: radius = max(Y extent, Z extent) / 2 (DFF bytes only).
+    double extY = firstMaxY - firstMinY;
+    double extZ = firstMaxZ - firstMinZ;
+    if (!(extY > 0.05 && extY < 5.0 && extZ > 0.05 && extZ < 5.0)) {
+        SetErr(err, errSize, "wheel extents out of range");
+        return false;
+    }
+    out.wheelR = (extY > extZ ? extY : extZ) * 0.5;
+    out.clearance = -minZAll;
+    if (!(out.wheelR > 0.05 && out.wheelR < 2.0 && out.clearance > 0.0 && out.clearance < 5.0)) {
+        SetErr(err, errSize, "wheelR/clearance out of range");
+        return false;
+    }
+    out.wheels = static_cast<int>(wheels.size());
+    return true;
 }
