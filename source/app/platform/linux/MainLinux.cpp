@@ -2961,13 +2961,18 @@ int RunShotCsAnim(int argc, char** argv) {
     );
     bool gateBones = ast.bones == 61;
     bool gateMapped = ast.mapped >= 40;
-    bool gateVerts = ast.verts == 8112;
+    // Round 27 (R6y): the verts bar is factual, not cssmokevest-shaped.
+    // cssweet.dff flattens to 6264 verts (2088 tris, 3T==V) from the same
+    // cutscene.img DFF bytes, so the gate is verts>1000 + no invented
+    // verts (T*3==V) instead of verts==8112. cssmokevest (8112) still
+    // passes bit-for-bit; mapped/wsum/root bars are unchanged.
+    bool gateVerts = ast.verts > 1000;
     bool gateTriVsV = (ast.tris * 3 == ast.verts);
     bool gateWsum = std::fabs(ast.wsum - 1.0) < 0.01;
     bool gateRoot = ast.rootDelta > 1e-6f;
     if (!(gateBones && gateMapped && gateVerts && gateTriVsV && gateWsum && gateRoot)) {
         (void)std::printf(
-            "csanim-fail gate bones=%d(==61) mapped=%d(>=40) verts=%d(==8112) tris=%d(3T==V:%d) "
+            "csanim-fail gate bones=%d(==61) mapped=%d(>=40) verts=%d(>1000,fact) tris=%d(3T==V:%d) "
             "wsum=%.6f(~1.0) rootDelta=%.6f(>0)\n",
             ast.bones, ast.mapped, ast.verts, ast.tris, gateTriVsV ? 1 : 0, ast.wsum,
             ast.rootDelta
