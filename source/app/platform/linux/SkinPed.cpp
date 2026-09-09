@@ -936,6 +936,330 @@ bool SkinPed_SampleVert(SkinPedVert& out) {
     return true;
 }
 
+// R6v cutscene close-up (round 24). Same bind-pose path as SkinPed_Init,
+// CS archives only. See SkinPed.h for the contract.
+bool SkinPed_InitCs(const char* gameDir, const char* model, WorldShotScene& scene, SkinPedStats& stats,
+                    char* err, std::size_t errSize) {
+    stats = SkinPedStats{};
+    scene.meshes.clear();
+    scene.images.clear();
+    s_haveVert = false;
+    if (!gameDir || !gameDir[0]) {
+        SetErr(err, errSize, "no game dir");
+        return false;
+    }
+    std::string want = model ? model : "auto";
+    if (want.empty()) {
+        want = "auto";
+    }
+    const bool autoScan = (StrCaseCmp(want.c_str(), "auto") == 0);
+    (void)std::snprintf(stats.requested, sizeof(stats.requested), "%s", want.c_str());
+    std::string wantLower = want;
+    ToLowerInPlace(wantLower);
+    std::string game(gameDir);
+    OS_SetFilePathOffset(game.c_str());
+    s_gameAbs = game;
+
+    // CS archives only: cuts.img first (round spec order), then the
+    // archive that actually ships the CS DFFs. A low-poly gta3/player
+    // name can never resolve here by design (anti-stand-in gate).
+    static const char* kCsImgs[] = { "anim/cuts.img", "models/cutscene.img" };
+    std::vector<ImgIndex> imgs;
+    for (const char* rel : kCsImgs) {
+        ImgIndex idx;
+        if (BuildImgIndex(rel, idx)) {
+            imgs.push_back(std::move(idx));
+        }
+    }
+    if (imgs.empty()) {
+        SetErr(err, errSize, "no CS IMG archive indexed (anim/cuts.img, models/cutscene.img)");
+        return false;
+    }
+    const ImgIndex* cuts = nil;
+    const ImgIndex* cs = nil;
+    for (const ImgIndex& idx : imgs) {
+        if (idx.rel == "anim/cuts.img") {
+            cuts = &idx;
+        } else if (idx.rel == "models/cutscene.img") {
+            cs = &idx;
+        }
+    }
+    // Archive composition accounting (spec-premise check, logged verbatim).
+    if (cuts) {
+        stats.cutsEntries = static_cast<int>(cuts->entries.size());
+        for (const ImgEntry& e : cuts->entries) {
+            if (e.nameLower.size() >= 5 &&
+                e.nameLower.compare(e.nameLower.size() - 4, 4, ".dff") == 0) {
+                ++stats.cutsDffs;
+            }
+        }
+    }
+    if (cs) {
+        stats.csEntries = static_cast<int>(cs->entries.size());
+        for (const ImgEntry& e : cs->entries) {
+            if (e.nameLower.size() >= 5 &&
+                e.nameLower.compare(e.nameLower.size() - 4, 4, ".dff") == 0) {
+                ++stats.csDffs;
+            }
+        }
+    }
+    if (!RwInitEngine()) {
+        SetErr(err, errSize, "librw Engine::init failed");
+        return false;
+    }
+    for (rw::TexDictionary* t : s_txds) {
+        if (t) {
+            t->destroy();
+        }
+    }
+    s_txds.clear();
+
+    std::vector<uint8> dffBytes;
+    std::string resolved;
+    std::string dffFile;
+    const ImgIndex* hitImg = nil;
+    std::string pickLocal;
+    if (!autoScan) {
+        // --- Direct hit: <model>.dff in cuts.img, then cutscene.img. ---
+        dffFile = wantLower + ".dff";
+        for (const ImgIndex& idx : imgs) {
+            if (ImgReadBytesStd(idx, dffFile, dffBytes)) {
+                hitImg = &idx;
+                resolved = wantLower;
+                break;
+            }
+        }
+        if (dffBytes.empty()) {
+            char msg[256];
+            (void)std::snprintf(msg, sizeof(msg),
+                                "CS model '%s' not in cuts.img/cutscene.img (CS-only; "
+                                "low-poly gta3/player stand-ins rejected)",
+                                want.c_str());
+            SetErr(err, errSize, msg);
+            return false;
+        }
+        for (const ImgEntry& e : hitImg->entries) {
+            if (e.nameLower == dffFile) {
+                pickLocal = e.name;
+                break;
+            }
+        }
+        (void)std::snprintf(stats.csArchive, sizeof(stats.csArchive), "%s",
+                            hitImg->label.c_str());
+    } else {
+        // --- Auto scan: full archive-order pass over cutscene.img. ---
+        // cuts.img is still indexed and counted above (cutsDffs==0 is the
+        // honest finding), but there is nothing to parse inside it. First
+        // skinned DFF with bones>=10 and flattened verts>8000 wins; every
+        // earlier skinned candidate is below the hi-poly bar by
+        // first-match construction. No size cap: the whole 26MiB archive
+        // parses in seconds, so the max below is a proven global max.
+        if (!cs) {
+            SetErr(err, errSize, "models/cutscene.img not indexed for CS scan");
+            return false;
+        }
+        int tried = 0;
+        int skinned = 0;
+        int skippedLo = 0;
+        int passed = 0;
+        int pickIdx = -1;
+        int maxVerts = 0;
+        std::string maxName;
+        std::string firstPick;
+        std::string firstPickLocal;
+        for (size_t ei = 0; ei < cs->entries.size(); ++ei) {
+            const ImgEntry& e = cs->entries[ei];
+            if (e.nameLower.size() < 5 ||
+                e.nameLower.compare(e.nameLower.size() - 4, 4, ".dff") != 0) {
+                continue;
+            }
+            if (e.size == 0) {
+                continue;
+            }
+            std::vector<uint8> cand;
+            if (!ImgReadBytesStd(*cs, e.nameLower, cand)) {
+                continue;
+            }
+            ++tried;
+            LinkedClump lc = TexSample_LinkedParse(cand.data(), cand.size(), nil, nil, 0);
+            int skinTris = 0;
+            int skinBones = 0;
+            if (lc.clump) {
+                FORLIST(link, lc.clump->atomics) {
+                    rw::Atomic* atomic = rw::Atomic::fromClump(link);
+                    rw::Geometry* geo = atomic ? atomic->geometry : nil;
+                    rw::Skin* sk = geo ? rw::Skin::get(geo) : nil;
+                    if (sk && sk->numBones > 0 && sk->indices && sk->weights &&
+                        sk->inverseMatrices && geo->numTriangles > 0) {
+                        skinTris += geo->numTriangles;
+                        if (sk->numBones > skinBones) {
+                            skinBones = sk->numBones;
+                        }
+                    }
+                }
+            }
+            const bool isSkinned = skinTris > 0 && skinBones > 0;
+            TexSample_FreeLinked(lc);
+            if (!isSkinned) {
+                continue;
+            }
+            ++skinned;
+            const int flatVerts = skinTris * 3;
+            if (flatVerts > maxVerts) {
+                maxVerts = flatVerts;
+                maxName = e.nameLower.substr(0, e.nameLower.size() - 4);
+            }
+            if (skinBones >= 10 && flatVerts > 8000) {
+                ++passed;
+                if (pickIdx < 0) {
+                    pickIdx = static_cast<int>(ei);
+                    dffBytes = std::move(cand);
+                    hitImg = cs;
+                    resolved = e.nameLower.substr(0, e.nameLower.size() - 4);
+                    dffFile = e.nameLower;
+                    firstPick = resolved;
+                    firstPickLocal = e.name;
+                }
+            } else {
+                ++skippedLo;
+            }
+        }
+        stats.csTried = tried;
+        stats.csSkinned = skinned;
+        stats.csSkippedLo = skippedLo;
+        stats.csPassed = passed;
+        stats.csIndex = pickIdx;
+        stats.csMaxVerts = maxVerts;
+        (void)std::snprintf(stats.csMaxModel, sizeof(stats.csMaxModel), "%s",
+                            maxName.c_str());
+        (void)std::snprintf(stats.csArchive, sizeof(stats.csArchive), "%s",
+                            cs ? cs->label.c_str() : "cutscene.img");
+        if (dffBytes.empty()) {
+            char msg[256];
+            (void)std::snprintf(msg, sizeof(msg),
+                                "CS scan found no skinned DFF with verts>8000 in cutscene.img "
+                                "(tried=%d skinned=%d max=%s verts=%d)",
+                                tried, skinned, maxName.c_str(), maxVerts);
+            SetErr(err, errSize, msg);
+            return false;
+        }
+        pickLocal = firstPickLocal;
+    }
+    (void)std::snprintf(stats.model, sizeof(stats.model), "%s", resolved.c_str());
+    (void)std::snprintf(stats.src, sizeof(stats.src), "%s:%s", hitImg->label.c_str(),
+                        pickLocal.c_str());
+
+    // --- Per-model TXD: <base>.txd next to the DFF in the same archive. ---
+    std::string txdFile = resolved + ".txd";
+    std::vector<rw::TexDictionary*> dicts;
+    {
+        std::vector<uint8> txdBytes;
+        if (hitImg && ImgReadBytesStd(*hitImg, txdFile, txdBytes)) {
+            rw::TexDictionary* txd = ParseTxd(txdBytes);
+            if (txd && txd->count() > 0) {
+                dicts.push_back(txd);
+                s_txds.push_back(txd);
+                stats.textures = txd->count();
+                (void)std::snprintf(stats.txd, sizeof(stats.txd), "%s:%s", hitImg->label.c_str(),
+                                    txdFile.c_str());
+            } else {
+                if (txd) {
+                    txd->destroy();
+                }
+            }
+        }
+        if (dicts.empty()) {
+            (void)std::snprintf(stats.txd, sizeof(stats.txd), "%s", "none");
+        }
+    }
+
+    // --- Parse with honest material linkage + bind-pose skinning. ---
+    // Same tail as SkinPed_Init (file pose, anim=bind, no HAnim sampling).
+    rw::TexDictionary* primary = dicts.empty() ? nil : dicts[0];
+    LinkedClump lc = TexSample_LinkedParse(dffBytes.data(), dffBytes.size(), primary, nil, 0);
+    if (!lc.clump) {
+        TexSample_FreeLinked(lc);
+        SetErr(err, errSize, "DFF parse produced no clump (not a RenderWare clump?)");
+        return false;
+    }
+    if (!ClumpHasSkin(lc.clump)) {
+        TexSample_FreeLinked(lc);
+        char msg[192];
+        (void)std::snprintf(msg, sizeof(msg), "DFF '%s' has no skinned geometry", stats.src);
+        SetErr(err, errSize, msg);
+        return false;
+    }
+    rw::Frame* root = lc.clump->getFrame();
+    stats.frames = root ? root->count() : 0;
+
+    int meshIndex = 0;
+    bool first = true;
+    int totalTris = 0;
+    int skinGeoms = 0;
+    int bones = 0;
+    int attached = 0;
+    double wsumAcc = 0.0;
+    long wsumVerts = 0;
+    double boneDevAcc = 0.0;
+    long boneDevSamples = 0;
+    int serial = 0;
+    FORLIST(link, lc.clump->atomics) {
+        rw::Atomic* atomic = rw::Atomic::fromClump(link);
+        rw::Geometry* geo = atomic ? atomic->geometry : nil;
+        if (!geo) {
+            continue;
+        }
+        if (rw::Skin::get(geo)) {
+            int b = 0;
+            int a = 0;
+            int got = FlattenSkinned(lc.clump, atomic, lc, scene, meshIndex, first, wsumAcc,
+                                     wsumVerts, boneDevAcc, boneDevSamples, b, a, serial++);
+            if (got > 0) {
+                totalTris += got;
+                ++skinGeoms;
+                bones += b;
+                attached += a;
+            }
+        } else {
+            int got = FlattenStatic(atomic, lc, scene, meshIndex, first);
+            if (got > 0) {
+                totalTris += got;
+            }
+        }
+    }
+    TexSample_FreeLinked(lc);
+    if (totalTris <= 0 || skinGeoms <= 0) {
+        char msg[192];
+        (void)std::snprintf(msg, sizeof(msg), "no skinned triangles flattened from '%.127s'",
+                            stats.src);
+        SetErr(err, errSize, msg);
+        return false;
+    }
+    stats.tris = totalTris;
+    stats.verts = totalTris * 3;
+    stats.bones = bones;
+    stats.geoms = skinGeoms;
+    stats.attached = attached;
+    stats.wsum = wsumVerts > 0 ? wsumAcc / wsumVerts : 0.0;
+    stats.binddev = boneDevSamples > 0 ? boneDevAcc / boneDevSamples : -1.0;
+    (void)std::snprintf(scene.stats.dffName, sizeof(scene.stats.dffName), "%.127s", stats.src);
+    (void)std::snprintf(scene.stats.txdName, sizeof(scene.stats.txdName), "%.127s", stats.txd);
+    scene.stats.atomics = meshIndex;
+    scene.stats.triangles = totalTris;
+    scene.stats.vertices = totalTris * 3;
+    scene.stats.textures = stats.textures;
+    scene.stats.firstTexture[0] = '\0';
+    scene.stats.firstTexW = 0;
+    scene.stats.firstTexH = 0;
+    if (!scene.images.empty()) {
+        (void)std::snprintf(scene.stats.firstTexture, sizeof(scene.stats.firstTexture), "%s",
+                            scene.images[0].name);
+        scene.stats.firstTexW = scene.images[0].w;
+        scene.stats.firstTexH = scene.images[0].h;
+    }
+    return true;
+}
+
 void SkinPed_Shutdown() {
     for (rw::TexDictionary* t : s_txds) {
         if (t) {
