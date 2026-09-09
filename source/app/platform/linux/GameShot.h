@@ -67,3 +67,41 @@ bool GameShot_Render(const char* gameDir, int health, int armor, std::vector<uin
                      std::vector<uint8_t>& gamePixels, GameShotStats& stats, char* err,
                      std::size_t errSize);
 void GameShot_Shutdown();
+
+// Round 36 (R6ah): zone label over the game frame (--show-zone).
+// Resolves the frame-center zone (fixed pier 836,-1866, same center as the
+// shore/radar paths) through the EXISTING ZoneInfo path (data/info.zon
+// smallest-zone rule) + the EXISTING GXT MAIN path (english/american.gxt
+// display string), then blits the display string with the EXISTING font2
+// glyph path (MenuShot centered blit, white ink + black drop shadow) at the
+// fixed game-layout zone-name position (bottom-center, lower third).
+// zonePos is fixed (kZoneCx,kZoneYTop) and logged verbatim; glyphs is the
+// display-string length in characters (including the inter-word space), so
+// the pier string counts 12; labelPixels counts frame pixels differing from
+// the input frame after both shadow+ink passes. No hardcoded district
+// string anywhere on this path (every byte comes from info.zon/GXT/font2).
+// Without this call GameShot_Render output is untouched bit-for-bit.
+struct ZoneLabelStats {
+    char key[16] = {};  // display GXT key from info.zon (e.g. file bytes)
+    char text[256] = {}; // display string from GXT MAIN (e.g. TDAT bytes)
+    int level = 0;      // zone record level column
+    int glyphs = 0;     // display-string characters incl. space (want 12)
+    long labelPixels = 0; // frame pixels changed by the label (want >500)
+    int posX = 0;       // fixed label center-x, top-down (want 320)
+    int posY = 0;       // fixed label top-y, top-down (want 360)
+    int cellH = 0;      // fixed glyph cell height px (want 40)
+    int inkDrawn = 0;   // font2 ink glyphs drawn (excl. space)
+};
+
+// Fixed game-layout zone-name geometry at 640x480 (top-down): center-x 320
+// (frame middle, as the retail district intro), top-y 360 (lower third
+// 320..480, above the bottom edge with the 40px label ending at 400).
+constexpr int kZoneLabelCx = 320;
+constexpr int kZoneLabelYTop = 360;
+constexpr int kZoneLabelCellH = 40;
+
+// Overlays the zone label onto gamePixels in place (must be a 640x480
+// bottom-up RGBA frame from GameShot_Render). Returns false with err set on
+// any failure (zone/GXT/font); never modifies gamePixels on failure.
+bool GameShot_ApplyZoneLabel(const char* gameDir, std::vector<uint8_t>& gamePixels,
+                             ZoneLabelStats& out, char* err, std::size_t errSize);

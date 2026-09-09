@@ -7,6 +7,10 @@
 #include <cstring>
 #include <vector>
 
+#include "app/platform/linux/GxtText.h"
+#include "app/platform/linux/MenuShot.h"
+#include "app/platform/linux/ZoneInfo.h"
+
 namespace {
 
 constexpr int kFbW = 640;
@@ -137,4 +141,100 @@ bool GameShot_Render(const char* gameDir, int health, int armor, std::vector<uin
 void GameShot_Shutdown() {
     HudShot_Shutdown();
     RadarMap_Shutdown();
+}
+
+bool GameShot_ApplyZoneLabel(const char* gameDir, std::vector<uint8_t>& gamePixels,
+                             ZoneLabelStats& out, char* err, std::size_t errSize) {
+    out = ZoneLabelStats{};
+    if (!gameDir || !gameDir[0]) {
+        SetErr(err, errSize, "no game dir");
+        return false;
+    }
+    if (gamePixels.size() != static_cast<std::size_t>(kFbW) * kFbH * 4) {
+        SetErr(err, errSize, "game frame has bad size");
+        return false;
+    }
+    // 1. Zone rects from data/info.zon bytes (existing ZoneInfo path).
+    ZoneData zones;
+    {
+        char zerr[512] = {};
+        if (!ZoneInfo_Load(gameDir, zones, zerr, sizeof(zerr))) {
+            char msg[640];
+            (void)std::snprintf(msg, sizeof(msg), "zone-load: %s", zerr);
+            SetErr(err, errSize, msg);
+            return false;
+        }
+    }
+    const int best = ZoneInfo_FindSmallest(zones, kPierX, kPierY);
+    if (best < 0) {
+        SetErr(err, errSize, "no zone at frame center");
+        return false;
+    }
+    const ZoneRect& win = zones.zones[static_cast<std::size_t>(best)];
+    // 2. Display string from text/american.gxt MAIN (existing GxtText path).
+    std::string text;
+    {
+        GxtTable table;
+        char gerr[512] = {};
+        if (!GxtText_Load(gameDir, "english", table, gerr, sizeof(gerr))) {
+            char msg[640];
+            (void)std::snprintf(msg, sizeof(msg), "gxt-load: %s", gerr);
+            SetErr(err, errSize, msg);
+            return false;
+        }
+        if (!GxtText_Find(table, win.key.c_str(), text) || text.empty()) {
+            char msg[128];
+            (void)std::snprintf(msg, sizeof(msg), "no gxt for key '%s'", win.key.c_str());
+            SetErr(err, errSize, msg);
+            return false;
+        }
+    }
+    // 3. font2 glyphs (existing MenuShot HUD-font path).
+    MenuHudFont font;
+    {
+        char ferr[512] = {};
+        if (!MenuShot_LoadHudFont(gameDir, font, ferr, sizeof(ferr))) {
+            char msg[640];
+            (void)std::snprintf(msg, sizeof(msg), "zone font: %s", ferr);
+            SetErr(err, errSize, msg);
+            return false;
+        }
+    }
+    // 4. Centered blit at the fixed game-layout position: black drop shadow
+    // (+1,+1) first, then white ink. Integer math, fixed traversal order.
+    out.posX = kZoneLabelCx;
+    out.posY = kZoneLabelYTop;
+    out.cellH = kZoneLabelCellH;
+    (void)std::snprintf(out.key, sizeof(out.key), "%s", win.key.c_str());
+    (void)std::snprintf(out.text, sizeof(out.text), "%s", text.c_str());
+    out.level = win.level;
+    out.glyphs = static_cast<int>(text.size());
+    const std::vector<uint8_t> before = gamePixels;
+    (void)MenuShot_DrawTextCentered(gamePixels, kFbW, kFbH, font, text.c_str(),
+                                    kZoneLabelCx + 1, kZoneLabelYTop + 1, kZoneLabelCellH,
+                                    0, 0, 0);
+    out.inkDrawn = MenuShot_DrawTextCentered(gamePixels, kFbW, kFbH, font, text.c_str(),
+                                             kZoneLabelCx, kZoneLabelYTop, kZoneLabelCellH,
+                                             255, 255, 255);
+    if (out.inkDrawn <= 0) {
+        gamePixels = before;
+        SetErr(err, errSize, "zone label drew no ink");
+        return false;
+    }
+    long changed = 0;
+    for (std::size_t i = 0; i < before.size(); i += 4) {
+        if (gamePixels[i] != before[i] || gamePixels[i + 1] != before[i + 1] ||
+            gamePixels[i + 2] != before[i + 2]) {
+            ++changed;
+        }
+    }
+    out.labelPixels = changed;
+    if (changed <= 500) {
+        gamePixels = before;
+        char msg[128];
+        (void)std::snprintf(msg, sizeof(msg), "zone label too thin labelPixels=%ld", changed);
+        SetErr(err, errSize, msg);
+        return false;
+    }
+    return true;
 }
