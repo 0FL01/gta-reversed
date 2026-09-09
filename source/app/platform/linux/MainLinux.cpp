@@ -56,6 +56,7 @@ using uint64 = uint64_t;
 #include "app/platform/linux/HudShot.h"
 #include "app/platform/linux/RadarMap.h"
 #include "app/platform/linux/GameShot.h"
+#include "app/platform/linux/ZoneInfo.h"
 #include "app/platform/linux/DriveSim.h"
 #include "app/platform/linux/Handling.h"
 #include "app/platform/linux/WalkSim.h"
@@ -65,7 +66,7 @@ using uint64 = uint64_t;
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --shot-cs-duo <out.tga> | --shot-water <out.tga> [--hour H] [--water-file water1.dat] | --shot-shore <out.tga> [--hour H] | --shot-hud <out.tga> [--health H] [--armor A] | --shot-radar <out.tga> [--x X] [--y Y] | --shot-game <out.tga> [--health H] [--armor A] | --csanim-seq <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--frames 5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --shot-cs-duo <out.tga> | --shot-water <out.tga> [--hour H] [--water-file water1.dat] | --shot-shore <out.tga> [--hour H] | --shot-hud <out.tga> [--health H] [--armor A] | --shot-radar <out.tga> [--x X] [--y Y] | --zone-at X,Y | --shot-game <out.tga> [--health H] [--armor A] | --csanim-seq <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--frames 5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -1200,6 +1201,80 @@ int RunShotHud(int argc, char** argv) {
                        static_cast<unsigned long long>(hB / (640ULL * 480ULL)),
                        static_cast<unsigned long long>(checksum));
     HudShot_Shutdown();
+    return 0;
+}
+
+// R6ag: district name at world coordinates (round 35). Every rectangle comes
+// from data/info.zon bytes via ZoneInfo (same 10-token LoadZone contract as
+// the game); the display string comes from text/american.gxt MAIN through
+// the existing GxtText path. The winner is the smallest containing zone in
+// a 2D inclusive slice (FindSmallestZoneForPosition semantics); every
+// containing candidate is logged with its file rect so overlaps are audited
+// with numbers, never assumed. Pure data lookup, no EGL.
+int RunZoneAt(int argc, char** argv) {
+    const char* xyArg = ArgValue(argc, argv, "--zone-at", "836,-1866");
+    double wx = 836.0;
+    double wy = -1866.0;
+    if (!xyArg || std::sscanf(xyArg, "%lf,%lf", &wx, &wy) != 2) {
+        (void)std::printf("zone-fail bad --zone-at '%s' (want X,Y)\n",
+                           xyArg ? xyArg : "(null)");
+        return 1;
+    }
+    std::string gameDir = ResolveGameDir(argc, argv);
+    ZoneData zones;
+    char zoneErr[512] = {};
+    if (!ZoneInfo_Load(gameDir.c_str(), zones, zoneErr, sizeof(zoneErr))) {
+        (void)std::printf("zone-fail load %s (game=%s)\n", zoneErr, gameDir.c_str());
+        return 1;
+    }
+    GxtTable gxt;
+    char gxtErr[512] = {};
+    if (!GxtText_Load(gameDir.c_str(), "english", gxt, gxtErr, sizeof(gxtErr))) {
+        (void)std::printf("zone-fail gxt %s (game=%s)\n", gxtErr, gameDir.c_str());
+        return 1;
+    }
+    const int zoneCount = static_cast<int>(zones.zones.size());
+    (void)std::printf("zoneSrc=%s\n", zones.src.c_str());
+    (void)std::printf("zone-list src=%s count=%d\n", zones.src.c_str(), zoneCount);
+    for (int i = 0; i < zoneCount; ++i) {
+        const ZoneRect& z = zones.zones[i];
+        (void)std::printf("zone-item name=%s key=%s type=%d "
+                           "x1=%.4f y1=%.4f x2=%.4f y2=%.4f level=%d\n",
+                           z.name.c_str(), z.key.c_str(), z.type, z.x1, z.y1, z.x2,
+                           z.y2, z.level);
+    }
+    int hits = 0;
+    for (int i = 0; i < zoneCount; ++i) {
+        const ZoneRect& z = zones.zones[i];
+        if (!ZoneInfo_Contains2D(z, wx, wy)) {
+            continue;
+        }
+        const double size = static_cast<double>(z.x2 - z.x1) +
+                            static_cast<double>(z.y2 - z.y1);
+        (void)std::printf("zone-hit name=%s key=%s size=%.3f "
+                           "x1=%.4f y1=%.4f x2=%.4f y2=%.4f level=%d\n",
+                           z.name.c_str(), z.key.c_str(), size, z.x1, z.y1, z.x2,
+                           z.y2, z.level);
+        ++hits;
+    }
+    (void)std::printf("zone-candidates n=%d\n", hits);
+    const int best = ZoneInfo_FindSmallest(zones, wx, wy);
+    if (best < 0) {
+        (void)std::printf("zone-fail no zone at x=%.6g y=%.6g (zones=%d)\n", wx, wy,
+                           zoneCount);
+        return 1;
+    }
+    const ZoneRect& win = zones.zones[static_cast<std::size_t>(best)];
+    std::string text;
+    if (!GxtText_Find(gxt, win.key.c_str(), text) || text.empty()) {
+        (void)std::printf("zone-fail no gxt for key '%s' (zone %s)\n",
+                           win.key.c_str(), win.name.c_str());
+        return 1;
+    }
+    OS_DebugOut("mad-sa-linux zone lookup");
+    (void)std::printf("zone-ok x=%.6g y=%.6g key=%s text=\"%s\" level=%d\n", wx, wy,
+                       win.key.c_str(), text.c_str(), win.level);
+    (void)std::printf("zoneCount=%d\n", zoneCount);
     return 0;
 }
 
@@ -5953,6 +6028,9 @@ int main(int argc, char** argv) {
     }
     if (HasArg(argc, argv, "--shot-radar")) {
         return RunShotRadar(argc, argv);
+    }
+    if (HasArg(argc, argv, "--zone-at")) {
+        return RunZoneAt(argc, argv);
     }
     if (HasArg(argc, argv, "--shot-game")) {
         return RunShotGame(argc, argv);

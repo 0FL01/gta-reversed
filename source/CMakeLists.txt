@@ -50,6 +50,7 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
         app/platform/linux/HudShot.cpp
         app/platform/linux/RadarMap.cpp
         app/platform/linux/GameShot.cpp
+        app/platform/linux/ZoneInfo.cpp
         app/platform/linux/DriveSim.cpp
         app/platform/linux/Handling.cpp
         app/platform/linux/WalkSim.cpp
