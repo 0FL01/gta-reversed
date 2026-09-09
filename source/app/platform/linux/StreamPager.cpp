@@ -409,6 +409,11 @@ bool RwInitEngine() {
     if (s_rwInit) {
         return true;
     }
+    if (rw::Engine::state != rw::Engine::Dead) {
+        rw::Texture::setLoadTextures(false);
+        s_rwInit = true;
+        return true;
+    }
     if (!rw::Engine::init(nil)) {
         return false;
     }
