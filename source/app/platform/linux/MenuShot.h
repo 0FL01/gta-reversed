@@ -68,4 +68,13 @@ bool MenuShot_LoadHudFont(const char* gameDir, MenuHudFont& font, char* err, std
 int MenuShot_DrawTextRight(std::vector<uint8_t>& px, int fbW, int fbH, const MenuHudFont& font,
                            const char* text, int xRight, int yTop, int cellDstH, uint8_t cr,
                            uint8_t cg, uint8_t cb);
+// Round 36 (R6ah): zone-label support on the SAME glyph path. Measure returns
+// the total advance width in framebuffer px (same math as the right-aligned
+// blit); DrawCentered draws left-to-right centered on cx (xLeft=cx-w/2).
+// Both use integer math only (deterministic). Space advances but draws no
+// ink (same as the right-aligned path).
+int MenuShot_MeasureText(const MenuHudFont& font, const char* text, int cellDstH);
+int MenuShot_DrawTextCentered(std::vector<uint8_t>& px, int fbW, int fbH,
+                              const MenuHudFont& font, const char* text, int cx, int yTop,
+                              int cellDstH, uint8_t cr, uint8_t cg, uint8_t cb);
 void MenuShot_Shutdown();

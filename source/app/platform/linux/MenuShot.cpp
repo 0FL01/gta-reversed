@@ -710,3 +710,61 @@ int MenuShot_DrawTextRight(std::vector<uint8_t>& px, int fbW, int fbH, const Men
     }
     return drawn;
 }
+
+int MenuShot_MeasureText(const MenuHudFont& font, const char* text, int cellDstH) {
+    if (!font.ok || !text || cellDstH <= 0) {
+        return 0;
+    }
+    FontMetrics m;
+    for (int i = 0; i < 208; ++i) {
+        m.prop[i] = font.prop[i];
+    }
+    m.unprop = font.unprop;
+    m.space = font.space;
+    m.ok = true;
+    long totalAdv = 0;
+    for (const char* p = text; *p; ++p) {
+        totalAdv += AdvanceFor(static_cast<uint8>(*p), m);
+    }
+    return static_cast<int>(totalAdv * cellDstH / 40);
+}
+
+int MenuShot_DrawTextCentered(std::vector<uint8_t>& px, int fbW, int fbH,
+                              const MenuHudFont& font, const char* text, int cx, int yTop,
+                              int cellDstH, uint8_t cr, uint8_t cg, uint8_t cb) {
+    if (!font.ok || !text || fbW != kWidth || fbH != kHeight || cellDstH <= 0) {
+        return 0;
+    }
+    const int totalDst = MenuShot_MeasureText(font, text, cellDstH);
+    const int xLeft = cx - totalDst / 2;
+    FontMetrics m;
+    for (int i = 0; i < 208; ++i) {
+        m.prop[i] = font.prop[i];
+    }
+    m.unprop = font.unprop;
+    m.space = font.space;
+    m.ok = true;
+    TexImage img;
+    (void)std::snprintf(img.name, sizeof(img.name), "%s", font.name);
+    img.w = font.texW;
+    img.h = font.texH;
+    img.filter = 0;
+    img.rgba = font.rgba; // one 1MB copy per call; zone label draws twice
+    int x = xLeft;
+    int drawn = 0;
+    for (const char* p = text; *p; ++p) {
+        const uint8 ch = static_cast<uint8>(*p);
+        const int adv = AdvanceFor(ch, m);
+        if (ch == ' ') {
+            x += adv * cellDstH / 40;
+            continue;
+        }
+        const int advDst = adv * cellDstH / 40;
+        bool empty = false;
+        if (BlitGlyph(px, img, x, yTop, advDst, cellDstH, adv, ch, cr, cg, cb, empty)) {
+            ++drawn;
+        }
+        x += advDst;
+    }
+    return drawn;
+}
