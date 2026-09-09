@@ -66,7 +66,7 @@ using uint64 = uint64_t;
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --shot-cs-duo <out.tga> | --shot-water <out.tga> [--hour H] [--water-file water1.dat] | --shot-shore <out.tga> [--hour H] | --shot-hud <out.tga> [--health H] [--armor A] | --shot-radar <out.tga> [--x X] [--y Y] | --zone-at X,Y | --shot-game <out.tga> [--health H] [--armor A] [--show-zone] [--wanted N] [--money M] [--hour H] [--weather W] | --csanim-seq <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--frames 5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --shot-cs-duo <out.tga> | --shot-water <out.tga> [--hour H] [--water-file water1.dat] | --shot-shore <out.tga> [--hour H] | --shot-hud <out.tga> [--health H] [--armor A] | --shot-radar <out.tga> [--x X] [--y Y] | --zone-at X,Y | --shot-game <out.tga> [--health H] [--armor A] [--show-zone] [--wanted N] [--money M] [--hour H] [--weather W] | --csanim-seq <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--frames 5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] [--hud] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -5452,6 +5452,8 @@ int RunDrive(int argc, char** argv) {
         meas.frontY, meas.rearY);
     // R6p: optional handling-data speed profile (default path untouched).
     const bool useHandling = HasArg(argc, argv, "--use-handling");
+    // R6ao: optional HUD overlay on every waypoint frame (default path bit-identical).
+    const bool wantHud = HasArg(argc, argv, "--hud");
     HandlingParams hp{};
     if (useHandling) {
         char hErr[512] = {};
@@ -5713,9 +5715,135 @@ int RunDrive(int argc, char** argv) {
         eglTerminate(display);
         return 1;
     }
+    // R6ao: HUD overlay prep (only with --hud; default path untouched).
+    HudDriveAssets hudAssets{};
+    std::vector<std::string> hudSpdTexts;
+    std::vector<double> hudVel;
+    std::vector<int> hudKmh;
+    double hudVmaxMs = 0.0;
+    bool hudFromHandlingPath = false;
+    if (wantHud) {
+        char hudErr[768] = {};
+        if (!HudShot_LoadDriveAssets(gameDir.c_str(), hudAssets, hudErr, sizeof(hudErr))) {
+            (void)std::printf("drivehud-fail hud-assets %s\n", hudErr);
+            DriveSim_ShutdownWorld();
+            eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            eglDestroyContext(display, context);
+            eglDestroySurface(display, surface);
+            eglTerminate(display);
+            return 1;
+        }
+        if (useHandling) {
+            hudFromHandlingPath = true;
+            hudVmaxMs = hp.vmaxMs;
+            for (int i = 0; i < waypoints; ++i) {
+                hudVel.push_back(wps[static_cast<size_t>(i)].vel);
+            }
+        } else {
+            // Display-only side channel: handling row + DriveSim integrator
+            // give the overlay speeds; geometry/render stay kinematic.
+            HandlingParams hudHp{};
+            char hhErr[512] = {};
+            if (!Handling_Load(gameDir.c_str(), model, hudHp, hhErr, sizeof(hhErr))) {
+                (void)std::printf("drivehud-fail handling %s (game=%s model=%s)\n", hhErr,
+                                   gameDir.c_str(), model);
+                DriveSim_ShutdownWorld();
+                eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+                eglDestroyContext(display, context);
+                eglDestroySurface(display, surface);
+                eglTerminate(display);
+                return 1;
+            }
+            (void)std::printf("drivehud-handling model=%s mass=%s vmax=%s accel=%s drag=%s "
+                               "gears=%s displayOnly=1\n",
+                               hudHp.requested, hudHp.massTok, hudHp.vmaxTok, hudHp.accelTok,
+                               hudHp.dragTok, hudHp.gearsTok);
+            std::vector<DriveWaypoint> hudWps;
+            std::vector<DriveSimTrace> hudTrace;
+            double hudT = 0.0;
+            char hsErr[512] = {};
+            if (!DriveSim_SampleHandling(ctrl, waypoints, meas.wheelbase, meas.wheelR,
+                                         hudHp.vmaxMs, hudHp.accelSi, 1.0 / 30.0, hudWps,
+                                         hudTrace, hudT, hsErr, sizeof(hsErr))) {
+                (void)std::printf("drivehud-fail hud-sim %s\n", hsErr);
+                DriveSim_ShutdownWorld();
+                eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+                eglDestroyContext(display, context);
+                eglDestroySurface(display, surface);
+                eglTerminate(display);
+                return 1;
+            }
+            hudVmaxMs = hudHp.vmaxMs;
+            for (int i = 0; i < waypoints; ++i) {
+                hudVel.push_back(hudWps[static_cast<size_t>(i)].vel);
+            }
+        }
+        hudSpdTexts.reserve(static_cast<size_t>(waypoints));
+        hudKmh.reserve(static_cast<size_t>(waypoints));
+        for (int i = 0; i < waypoints; ++i) {
+            double v = hudVel[static_cast<size_t>(i)];
+            int kmh = static_cast<int>(std::lround(v * 3.6));
+            if (kmh < 0) {
+                kmh = 0;
+            }
+            if (kmh > 999) {
+                kmh = 999;
+            }
+            hudKmh.push_back(kmh);
+            char cell[16] = {};
+            (void)std::snprintf(cell, sizeof(cell), "SPD %03d", kmh);
+            hudSpdTexts.emplace_back(cell);
+        }
+        bool hudMono = true;
+        for (int i = 1; i < waypoints; ++i) {
+            if (!(hudVel[static_cast<size_t>(i)] >=
+                  hudVel[static_cast<size_t>(i - 1)] - 1e-9)) {
+                hudMono = false;
+            }
+        }
+        bool hudClamped = false;
+        for (int i = 0; i < waypoints; ++i) {
+            if (hudVel[static_cast<size_t>(i)] >= hudVmaxMs - 1e-6) {
+                hudClamped = true;
+            }
+        }
+        const int hc0 = kDriveHudHealth > 100 ? 100 : kDriveHudHealth;
+        const int ac0 = kDriveHudArmor > 100 ? 100 : kDriveHudArmor;
+        const int barW1 = (hc0 * 109 + 50) / 100;
+        const int barW2 = (ac0 * 62 + 50) / 100;
+        (void)std::printf("drivehud-load sprites=%d barTex=%s barWH=%dx%d fontTex=font2 "
+                           "health=%d armor=%d barW1=%d barW2=%d clock=12:00\n",
+                           hudAssets.sprites, hudAssets.barTex, hudAssets.barW, hudAssets.barH,
+                           kDriveHudHealth, kDriveHudArmor, barW1, barW2);
+        (void)std::printf("drivehud-fmt spdFmt=SPD %%03d kmh=round(v*3.6) src=DriveSim-"
+                           "integrator path=%s\n",
+                           hudFromHandlingPath ? "handling-waypoints" : "side-handling-sim");
+        for (int i = 0; i < waypoints; ++i) {
+            (void)std::printf("drivehud-wp i=%d v=%.2f kmh=%d text=\"%s\"\n", i,
+                               hudVel[static_cast<size_t>(i)], hudKmh[static_cast<size_t>(i)],
+                               hudSpdTexts[static_cast<size_t>(i)].c_str());
+        }
+        (void)std::printf("drivehud-speed mono=%d clamped=%d vmaxMs=%.6f note=%s\n",
+                           hudMono ? 1 : 0, hudClamped ? 1 : 0, hudVmaxMs,
+                           hudClamped ? "cruise-constant-at-VMAX(last-legs-equal)"
+                                      : "accelerating(mono-ramp)");
+        if (!hudMono) {
+            (void)std::printf("drivehud-fail non-monotonic speeds\n");
+            DriveSim_ShutdownWorld();
+            eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            eglDestroyContext(display, context);
+            eglDestroySurface(display, surface);
+            eglTerminate(display);
+            return 1;
+        }
+    }
     // 5. Ride the waypoints: page + pose + merge + chase render, one TGA each.
     std::vector<uint64_t> checksums;
     checksums.reserve(static_cast<size_t>(waypoints));
+    std::vector<long> hudPer; // R6ao: per-frame overlay deltas (wantHud only)
+    if (wantHud) {
+        hudPer.reserve(static_cast<size_t>(waypoints));
+    }
     TexFrameStats texAgg{};
     int totalFrames = 0;
     bool failed = false;
@@ -5771,28 +5899,79 @@ int RunDrive(int argc, char** argv) {
         texAgg.texPixels += texStats.texPixels;
         texAgg.fallbackPixels += texStats.fallbackPixels;
         texAgg.flatPixels += texStats.flatPixels;
-        uint64_t sumR = 0, sumG = 0, sumB = 0, nonBlack = 0;
-        uint64_t checksum = PixelsChecksum(pixels, sumR, sumG, sumB, nonBlack);
-        uint64_t total = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
-        if (nonBlack == 0) {
-            (void)std::printf("drive-fail black frame wp=%d\n", i);
-            failed = true;
-            break;
+        if (!wantHud) {
+            uint64_t sumR = 0, sumG = 0, sumB = 0, nonBlack = 0;
+            uint64_t checksum = PixelsChecksum(pixels, sumR, sumG, sumB, nonBlack);
+            uint64_t total = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
+            if (nonBlack == 0) {
+                (void)std::printf("drive-fail black frame wp=%d\n", i);
+                failed = true;
+                break;
+            }
+            char outPath[1024];
+            (void)std::snprintf(outPath, sizeof(outPath), "%s_W%d.tga", prefix.c_str(), i);
+            if (!WriteTga24(outPath, width, height, pixels)) {
+                (void)std::printf("drive-fail write '%s'\n", outPath);
+                failed = true;
+                break;
+            }
+            checksums.push_back(checksum);
+            (void)std::printf("drive-shot wp=%d out=%s carTris=%d worldTris=%d nonblack=%llu/%llu "
+                               "checksum=%llu\n",
+                               i, outPath, carScene.stats.triangles, pf.tris,
+                               static_cast<unsigned long long>(nonBlack),
+                               static_cast<unsigned long long>(total),
+                               static_cast<unsigned long long>(checksum));
+        } else {
+            // R6ao: HUD overlay on a copy via the existing HudShot blit path
+            // (bars 137/60 + clock 12:00 + SPD text from the sim velocities).
+            std::vector<uint8> hudPixels = pixels;
+            const char* spdText = hudSpdTexts[static_cast<size_t>(i)].c_str();
+            int spdInk = HudShot_BlitDriveHud(hudPixels, hudAssets, kDriveHudHealth,
+                                              kDriveHudArmor, kDriveHudHour, spdText);
+            if (spdInk < 0) {
+                (void)std::printf("drivehud-fail blit wp=%d spd=\"%s\"\n", i, spdText);
+                failed = true;
+                break;
+            }
+            long hudChanged = 0;
+            for (std::size_t b = 0; b < pixels.size(); b += 4) {
+                if (hudPixels[b] != pixels[b] || hudPixels[b + 1] != pixels[b + 1] ||
+                    hudPixels[b + 2] != pixels[b + 2]) {
+                    ++hudChanged;
+                }
+            }
+            uint64_t sumR = 0, sumG = 0, sumB = 0, nonBlack = 0;
+            uint64_t checksum = PixelsChecksum(hudPixels, sumR, sumG, sumB, nonBlack);
+            uint64_t total = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
+            if (nonBlack == 0) {
+                (void)std::printf("drivehud-fail black frame wp=%d\n", i);
+                failed = true;
+                break;
+            }
+            if (hudChanged <= 2000) {
+                (void)std::printf("drivehud-fail thin overlay wp=%d hudPixels=%ld(need >2000)\n",
+                                   i, hudChanged);
+                failed = true;
+                break;
+            }
+            char outPath[1024];
+            (void)std::snprintf(outPath, sizeof(outPath), "%s_W%d.tga", prefix.c_str(), i);
+            if (!WriteTga24(outPath, width, height, hudPixels)) {
+                (void)std::printf("drivehud-fail write '%s'\n", outPath);
+                failed = true;
+                break;
+            }
+            checksums.push_back(checksum);
+            hudPer.push_back(hudChanged);
+            (void)std::printf("drivehud-shot wp=%d out=%s carTris=%d worldTris=%d "
+                               "nonblack=%llu/%llu hudPixels=%ld spd=\"%s\" spdInk=%d "
+                               "checksum=%llu\n",
+                               i, outPath, carScene.stats.triangles, pf.tris,
+                               static_cast<unsigned long long>(nonBlack),
+                               static_cast<unsigned long long>(total), hudChanged, spdText,
+                               spdInk, static_cast<unsigned long long>(checksum));
         }
-        char outPath[1024];
-        (void)std::snprintf(outPath, sizeof(outPath), "%s_W%d.tga", prefix.c_str(), i);
-        if (!WriteTga24(outPath, width, height, pixels)) {
-            (void)std::printf("drive-fail write '%s'\n", outPath);
-            failed = true;
-            break;
-        }
-        checksums.push_back(checksum);
-        (void)std::printf("drive-shot wp=%d out=%s carTris=%d worldTris=%d nonblack=%llu/%llu "
-                           "checksum=%llu\n",
-                           i, outPath, carScene.stats.triangles, pf.tris,
-                           static_cast<unsigned long long>(nonBlack),
-                           static_cast<unsigned long long>(total),
-                           static_cast<unsigned long long>(checksum));
     }
     int sectorsLoaded = 0, sectorsEvicted = 0, modelsPeak = 0, trisPeak = 0;
     StreamPager_Counters(sectorsLoaded, sectorsEvicted, modelsPeak, trisPeak);
@@ -5836,9 +6015,37 @@ int RunDrive(int argc, char** argv) {
         cs += cell;
     }
     OS_DebugOut("mad-sa-linux drive");
-    (void)std::printf("drive-ok waypoints=%d frames=%d model=%s distTotal=%.3f wheelSpinTotal=%.6f "
-                       "groundClear=OK checksums=%s\n",
-                       waypoints, totalFrames, meas.model, distTotal, spinTotal, cs.c_str());
+    if (!wantHud) {
+        (void)std::printf("drive-ok waypoints=%d frames=%d model=%s distTotal=%.3f "
+                           "wheelSpinTotal=%.6f groundClear=OK checksums=%s\n",
+                           waypoints, totalFrames, meas.model, distTotal, spinTotal, cs.c_str());
+        (void)std::printf("drive-verify distTotal=%.3f wheelR=%.6f expectSpin=%.6f "
+                           "spinTotal=%.6f relErr=%.6f span=%.2f maxTurn=%.1f\n",
+                           distTotal, meas.wheelR, expectSpin, spinTotal, spinErr, span, maxTurn);
+        DriveSim_ShutdownWorld();
+        return 0;
+    }
+    // R6ao: HUD-trip final. Hp is the SUM over waypoints (per-frame counts
+    // are in the drivehud-shot lines above); S is the comma-joined SPD texts.
+    long hudSum = 0;
+    for (long v : hudPer) {
+        hudSum += v;
+    }
+    std::string spdJoin;
+    for (size_t i = 0; i < hudSpdTexts.size(); ++i) {
+        if (i) {
+            spdJoin += ",";
+        }
+        spdJoin += hudSpdTexts[i];
+    }
+    if (!(hudSum > 2000)) {
+        (void)std::printf("drivehud-fail thin total hudPixels=%ld(need >2000)\n", hudSum);
+        DriveSim_ShutdownWorld();
+        return 1;
+    }
+    (void)std::printf("drivehud-ok waypoints=%d frames=%d model=%s hudPixels=%ld "
+                       "(sum-over-waypoints) spdTexts=%s checksums=%s\n",
+                       waypoints, totalFrames, meas.model, hudSum, spdJoin.c_str(), cs.c_str());
     (void)std::printf("drive-verify distTotal=%.3f wheelR=%.6f expectSpin=%.6f spinTotal=%.6f "
                        "relErr=%.6f span=%.2f maxTurn=%.1f\n",
                        distTotal, meas.wheelR, expectSpin, spinTotal, spinErr, span, maxTurn);
