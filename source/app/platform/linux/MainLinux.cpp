@@ -66,7 +66,7 @@ using uint64 = uint64_t;
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --shot-cs-duo <out.tga> | --shot-water <out.tga> [--hour H] [--water-file water1.dat] | --shot-shore <out.tga> [--hour H] | --shot-hud <out.tga> [--health H] [--armor A] | --shot-radar <out.tga> [--x X] [--y Y] | --zone-at X,Y | --shot-game <out.tga> [--health H] [--armor A] | --csanim-seq <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--frames 5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --shot-cs-duo <out.tga> | --shot-water <out.tga> [--hour H] [--water-file water1.dat] | --shot-shore <out.tga> [--hour H] | --shot-hud <out.tga> [--health H] [--armor A] | --shot-radar <out.tga> [--x X] [--y Y] | --zone-at X,Y | --shot-game <out.tga> [--health H] [--armor A] [--show-zone] | --csanim-seq <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--frames 5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -1367,6 +1367,10 @@ int RunShotRadar(int argc, char** argv) {
 // CHud::DrawRadar / TransformRadarPointToScreenSpace -> radarPos=87,409).
 // Pure CPU 2D, no EGL. game-ok requires baseMatchesShore=1, Rp>20000, and at
 // the default 137/60 also hudMatchesHud=1 + radarMatchesRadar=1.
+// R6ah (round 36): optional --show-zone overlays the frame-center district
+// name (fixed pier 836,-1866 via the existing ZoneInfo+GXT path, font2
+// centered blit at the fixed lower-third zonePos) onto the game frame.
+// Without the flag the pixels and the game-ok line are bit-identical to R6af.
 int RunShotGame(int argc, char** argv) {
     const char* outPath = ArgValue(argc, argv, "--shot-game", "game.tga");
     if (!outPath || outPath[0] == '\0') {
@@ -1515,6 +1519,25 @@ int RunShotGame(int argc, char** argv) {
         GameShot_Shutdown();
         return 1;
     }
+    const bool showZone = HasArg(argc, argv, "--show-zone");
+    ZoneLabelStats zoneStats{};
+    if (showZone) {
+        char zerr[1024] = {};
+        if (!GameShot_ApplyZoneLabel(gameDir.c_str(), gamePixels, zoneStats, zerr,
+                                     sizeof(zerr))) {
+            (void)std::printf("game-fail zone-label %s (game=%s)\n", zerr,
+                              gameDir.c_str());
+            GameShot_Shutdown();
+            return 1;
+        }
+        (void)std::printf("zone-label key=%s text=\"%s\" glyphs=%d labelPixels=%ld "
+                          "zonePos=%d,%d cellH=%d inkDrawn=%d\n",
+                          zoneStats.key, zoneStats.text, zoneStats.glyphs,
+                          zoneStats.labelPixels, zoneStats.posX, zoneStats.posY,
+                          zoneStats.cellH, zoneStats.inkDrawn);
+        (void)std::printf("zone-ok x=836 y=-1866 key=%s text=\"%s\" level=%d\n",
+                          zoneStats.key, zoneStats.text, zoneStats.level);
+    }
     uint64_t checksum = PixelsChecksum(gamePixels, gR, gG, gB, gN);
     if (!WriteTga24(outPath, 640, 480, gamePixels)) {
         (void)std::printf("game-fail write '%s'\n", outPath);
@@ -1522,14 +1545,25 @@ int RunShotGame(int argc, char** argv) {
         return 1;
     }
     OS_DebugOut("mad-sa-linux game shot");
-    (void)std::printf(
-        "game-ok health=%d armor=%d hudPixels=%ld radarPixels=%ld baseChecksum=%llu "
-        "hudChecksum=%llu radarChecksum=%llu checksum=%llu\n",
-        gst.hud.health, gst.hud.armor, gst.hud.hudPixels, gst.radarPixels,
-        static_cast<unsigned long long>(baseChecksum),
-        static_cast<unsigned long long>(hudChecksum),
-        static_cast<unsigned long long>(radarChecksum),
-        static_cast<unsigned long long>(checksum));
+    if (showZone) {
+        (void)std::printf(
+            "game-ok health=%d armor=%d hudPixels=%ld radarPixels=%ld baseChecksum=%llu "
+            "hudChecksum=%llu radarChecksum=%llu zoneLabel=1 checksum=%llu\n",
+            gst.hud.health, gst.hud.armor, gst.hud.hudPixels, gst.radarPixels,
+            static_cast<unsigned long long>(baseChecksum),
+            static_cast<unsigned long long>(hudChecksum),
+            static_cast<unsigned long long>(radarChecksum),
+            static_cast<unsigned long long>(checksum));
+    } else {
+        (void)std::printf(
+            "game-ok health=%d armor=%d hudPixels=%ld radarPixels=%ld baseChecksum=%llu "
+            "hudChecksum=%llu radarChecksum=%llu checksum=%llu\n",
+            gst.hud.health, gst.hud.armor, gst.hud.hudPixels, gst.radarPixels,
+            static_cast<unsigned long long>(baseChecksum),
+            static_cast<unsigned long long>(hudChecksum),
+            static_cast<unsigned long long>(radarChecksum),
+            static_cast<unsigned long long>(checksum));
+    }
     (void)std::printf("gameshot-ok out=%s nonblack=%llu/%llu avg=%llu,%llu,%llu checksum=%llu\n",
                        outPath, static_cast<unsigned long long>(gN),
                        static_cast<unsigned long long>(640ULL * 480ULL),
