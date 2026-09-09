@@ -113,3 +113,25 @@ void TexSample_RenderOrbitTC(const WorldShotScene& scene, int width, int height,
 void TexSample_RenderPath(const WorldShotScene& scene, int width, int height, const float eye[3],
                           const float target[3], std::vector<uint8_t>& outRGBA,
                           TexFrameStats& stats);
+
+// Duo render (R6t, round 22): ONE shared-depth CPU frame over a merged
+// car+ped scene. The first `carMeshes` meshes belong to the car (actor 0),
+// the rest to the ped (actor 1). Pixels come from a single z-buffer pass
+// with the legacy look (no timecyc env, no turntable, fixed 60deg frustum
+// along eye->target, exactly the RenderPath camera). Coverage of EVERY
+// valid fragment (inside-test + den>eps, before the depth test, even on
+// alpha-cutout) sets that actor's coverage bit; the depth winner sets the
+// per-pixel owner. carPixels/pedPixels count depth winners in the final
+// image; overlap counts pixels where BOTH actors projected (both coverage
+// bits set) regardless of who won the shared z-test. Rendered in fixed
+// mesh order (car first, then ped), float math, no threads: deterministic.
+// Legacy Render* paths are untouched bit-for-bit.
+struct TexDuoStats {
+    long carPixels = 0; // depth winners owned by the car meshes
+    long pedPixels = 0; // depth winners owned by the ped meshes
+    long overlap = 0; // pixels where both actors projected (shared-z proof)
+};
+void TexSample_RenderDuo(const WorldShotScene& scene, int carMeshes, int width, int height,
+                         const float eye[3], const float target[3],
+                         std::vector<uint8_t>& outRGBA, TexFrameStats& stats,
+                         TexDuoStats& duo);
