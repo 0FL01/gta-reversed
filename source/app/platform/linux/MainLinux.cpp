@@ -47,13 +47,14 @@ using uint64 = uint64_t;
 #include "app/platform/linux/IfpAnim.h"
 #include "app/platform/linux/CarPose.h"
 #include "app/platform/linux/TimeCycle.h"
+#include "app/platform/linux/DriveSim.h"
 
 #include <sys/resource.h>
 
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --list-anims | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] | --list-anims | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -2265,6 +2266,388 @@ int RunShotCar(int argc, char** argv) {
     return 0;
 }
 
+// Round 16 (R6n): kinematic drive. Car (CarPose DFF/TXD, steer+spin) rides a
+// caller-supplied XY polyline; Z comes only from the COL raycast
+// (carZ = groundH + clearance), yaw from the segment, front steer from
+// curvature, spin from distance/wheelR, chase-cam behind-above, world from
+// the existing StreamPager, pixels from the existing CPU rasterizer.
+// Kinematics only: no handling.cfg physics in this slice (honest cut).
+int RunDrive(int argc, char** argv) {
+    const char* pathArg = ArgValue(argc, argv, "--path", nullptr);
+    const char* model = ArgValue(argc, argv, "--model", "landstal");
+    const char* outArg = ArgValue(argc, argv, "--out", "drive");
+    if (!model || model[0] == '\0' || !outArg || outArg[0] == '\0') {
+        (void)std::printf("drive-fail bad args model='%s' out='%s'\n", model ? model : "(null)",
+                           outArg ? outArg : "(null)");
+        return 1;
+    }
+    // Default drive path: downtown freeway -> crossroads deck -> airport
+    // terminal, all on bound COL road decks (see R6g probes). Bend ~68 deg,
+    // ground span ~14 m (no constant height).
+    std::string pathStr = pathArg ? pathArg : "1608.20,-1721.80:1755.60,-1812.30:1683.22,-2242.96";
+    std::vector<std::pair<double, double>> ctrl;
+    {
+        size_t pos = 0;
+        while (pos <= pathStr.size()) {
+            size_t end = pathStr.find(':', pos);
+            std::string tok =
+                pathStr.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+            pos = end == std::string::npos ? pathStr.size() + 1 : end + 1;
+            // Trim spaces.
+            size_t b = tok.find_first_not_of(" \t");
+            size_t e = tok.find_last_not_of(" \t");
+            if (b == std::string::npos) {
+                (void)std::printf("drive-fail bad --path '%s' (empty point)\n", pathStr.c_str());
+                return 1;
+            }
+            tok = tok.substr(b, e - b + 1);
+            double x = 0.0, y = 0.0;
+            // XY only in this round (Z comes from the COL raycast).
+            if (std::sscanf(tok.c_str(), "%lf , %lf", &x, &y) != 2 || !std::isfinite(x) ||
+                !std::isfinite(y)) {
+                (void)std::printf("drive-fail bad --path '%s' (want Ax,Ay:Bx,By:...)\n",
+                                   pathStr.c_str());
+                return 1;
+            }
+            ctrl.emplace_back(x, y);
+            if (pos > pathStr.size()) {
+                break;
+            }
+        }
+    }
+    if (ctrl.size() < 2) {
+        (void)std::printf("drive-fail need >= 2 path points (got %d)\n",
+                           static_cast<int>(ctrl.size()));
+        return 1;
+    }
+    const char* wpArg = ArgValue(argc, argv, "--waypoints", nullptr);
+    int waypoints = wpArg ? std::atoi(wpArg) : static_cast<int>(ctrl.size());
+    int framesPerLeg = std::atoi(ArgValue(argc, argv, "--frames-per-leg", "3"));
+    if (waypoints < 3 || waypoints > 64 || framesPerLeg < 1 || framesPerLeg > 120) {
+        (void)std::printf("drive-fail bad args waypoints='%s' frames-per-leg='%s' (want W 3..64, F 1..120)\n",
+                           ArgValue(argc, argv, "--waypoints", "3"),
+                           ArgValue(argc, argv, "--frames-per-leg", "3"));
+        return 1;
+    }
+    std::string prefix = outArg;
+    // "--out dir/" (trailing slash) means <dir>/drive_W?.tga; otherwise the
+    // value is a file prefix exactly like the --e2e mode.
+    if (!prefix.empty() && prefix.back() == '/') {
+        prefix += "drive";
+    }
+    const int width = 640;
+    const int height = 480;
+    auto getPlatformDisplay = reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(
+        eglGetProcAddress("eglGetPlatformDisplayEXT")
+    );
+    if (!getPlatformDisplay) {
+        (void)std::printf("drive-fail no eglGetPlatformDisplayEXT\n");
+        return 1;
+    }
+#ifndef EGL_PLATFORM_SURFACELESS_MESA
+#define EGL_PLATFORM_SURFACELESS_MESA 0x31DD
+#endif
+    EGLDisplay display = getPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
+    if (display == EGL_NO_DISPLAY) {
+        (void)std::printf("drive-fail no surfaceless display 0x%x\n", eglGetError());
+        return 1;
+    }
+    if (!eglInitialize(display, nullptr, nullptr)) {
+        (void)std::printf("drive-fail egl init 0x%x\n", eglGetError());
+        return 1;
+    }
+    const EGLint configAttrs[] = {
+        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
+        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+        EGL_DEPTH_SIZE, 24,
+        EGL_NONE
+    };
+    EGLConfig config = nullptr;
+    EGLint configCount = 0;
+    if (!eglChooseConfig(display, configAttrs, &config, 1, &configCount) || configCount < 1) {
+        (void)std::printf("drive-fail choose config 0x%x\n", eglGetError());
+        eglTerminate(display);
+        return 1;
+    }
+    const EGLint pbufferAttrs[] = { EGL_WIDTH, width, EGL_HEIGHT, height, EGL_NONE };
+    EGLSurface surface = eglCreatePbufferSurface(display, config, pbufferAttrs);
+    if (surface == EGL_NO_SURFACE) {
+        (void)std::printf("drive-fail pbuffer 0x%x\n", eglGetError());
+        eglTerminate(display);
+        return 1;
+    }
+    (void)eglBindAPI(EGL_OPENGL_API);
+    EGLContext context = eglCreateContext(display, config, EGL_NO_CONTEXT, nullptr);
+    if (context == EGL_NO_CONTEXT) {
+        (void)std::printf("drive-fail context 0x%x\n", eglGetError());
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    if (!eglMakeCurrent(display, surface, surface, context)) {
+        (void)std::printf("drive-fail make current 0x%x\n", eglGetError());
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    const char* glVersion = reinterpret_cast<const char*>(glGetString(GL_VERSION));
+    (void)std::printf("drive-gl %s\n", glVersion ? glVersion : "(null)");
+    std::string gameDir = ResolveGameDir(argc, argv);
+    // 1. DFF kinematics constants (wheelR/wheelbase/clearance from DFF bytes).
+    DriveMeasure meas{};
+    {
+        char mErr[512] = {};
+        if (!DriveSim_Measure(gameDir.c_str(), model, meas, mErr, sizeof(mErr))) {
+            (void)std::printf("drive-fail measure %s (game=%s model=%s)\n", mErr,
+                               gameDir.c_str(), model);
+            eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            eglDestroyContext(display, context);
+            eglDestroySurface(display, surface);
+            eglTerminate(display);
+            return 1;
+        }
+    }
+    (void)std::printf(
+        "drive-load model=%s src=%s wheels=%d wheelR=%.6f wheelbase=%.6f clearance=%.6f "
+        "frontY=%.6f rearY=%.6f\n",
+        meas.model, meas.src, meas.wheels, meas.wheelR, meas.wheelbase, meas.clearance,
+        meas.frontY, meas.rearY);
+    // 2. World (pager + COL) around the drive corridor.
+    E2ELoadInfo load{};
+    {
+        char wErr[512] = {};
+        if (!DriveSim_InitWorld(gameDir.c_str(), load, wErr, sizeof(wErr))) {
+            (void)std::printf("drive-fail world-init %s (game=%s)\n", wErr, gameDir.c_str());
+            eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            eglDestroyContext(display, context);
+            eglDestroySurface(display, surface);
+            eglTerminate(display);
+            return 1;
+        }
+    }
+    (void)std::printf("drive-world iplTotal=%d kept=%d ide=%d ideFiles=%d iplFiles=%d cell=300 "
+                       "R=300 H=100 cap=80\n",
+                       load.iplTotal, load.iplKept, load.ideModels, load.ideFiles, load.iplFiles);
+    // Fixed chase + steering laws (logged verbatim for the report).
+    constexpr double kCamD = 8.0;
+    constexpr double kCamH = 4.0;
+    (void)std::printf("drive-formula steerFormula=atan(wheelbase*dyaw/ds) camD=%.1f camH=%.1f "
+                       "clearance=%.6f wheelR=%.6f\n",
+                       kCamD, kCamH, meas.clearance, meas.wheelR);
+    double maxTurn = DriveSim_MaxTurnDeg(ctrl);
+    {
+        std::string ps;
+        for (size_t i = 0; i < ctrl.size(); ++i) {
+            char cell[64];
+            (void)std::snprintf(cell, sizeof(cell), "%s%.2f,%.2f", i ? ":" : "", ctrl[i].first,
+                                 ctrl[i].second);
+            ps += cell;
+        }
+        (void)std::printf("drive-path controls=%d waypoints=%d framesPerLeg=%d path=%s "
+                           "maxTurn=%.1f\n",
+                           static_cast<int>(ctrl.size()), waypoints, framesPerLeg, ps.c_str(),
+                           maxTurn);
+    }
+    if (maxTurn < 20.0) {
+        (void)std::printf("drive-fail no turn >= 20 deg (maxTurn=%.1f)\n", maxTurn);
+        DriveSim_ShutdownWorld();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    // 3. Kinematic sample (yaw/steer/spin/dist from path + DFF constants).
+    std::vector<DriveWaypoint> wps;
+    {
+        char sErr[512] = {};
+        if (!DriveSim_Sample(ctrl, waypoints, meas.wheelbase, meas.wheelR, wps, sErr,
+                              sizeof(sErr))) {
+            (void)std::printf("drive-fail sample %s\n", sErr);
+            DriveSim_ShutdownWorld();
+            eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            eglDestroyContext(display, context);
+            eglDestroySurface(display, surface);
+            eglTerminate(display);
+            return 1;
+        }
+    }
+    // 4. Ground every waypoint (COL raycast only, no constant heights).
+    bool groundClear = true;
+    double zMin = 0.0, zMax = 0.0;
+    for (int i = 0; i < waypoints; ++i) {
+        DriveWaypoint& w = wps[static_cast<size_t>(i)];
+        double h = -50.0;
+        char gm[32] = {};
+        char gp[8] = {};
+        bool hit = DriveSim_Ground(w.x, w.y, h, gm, sizeof(gm), gp, sizeof(gp));
+        w.groundH = h;
+        (void)std::snprintf(w.groundModel, sizeof(w.groundModel), "%s", gm[0] ? gm : "-");
+        (void)std::snprintf(w.groundPrim, sizeof(w.groundPrim), "%s", gp[0] ? gp : "none");
+        if (!hit || !std::isfinite(h) || h < -50.0 || h > 500.0) {
+            groundClear = false;
+        }
+        w.carZ = h + meas.clearance;
+        if (i == 0) {
+            zMin = zMax = w.carZ;
+        } else {
+            if (w.carZ < zMin) {
+                zMin = w.carZ;
+            }
+            if (w.carZ > zMax) {
+                zMax = w.carZ;
+            }
+        }
+        (void)std::printf("drive-wp i=%d x=%.2f y=%.2f ground=%.2f model=%s prim=%s carZ=%.2f "
+                           "yaw=%.3f steer=%.3f spinDeg=%.3f spinRad=%.6f dist=%.2f\n",
+                           i, w.x, w.y, w.groundH, w.groundModel, w.groundPrim, w.carZ, w.yawPath,
+                           w.steerDeg, w.spinDeg, w.spinRad, w.dist);
+    }
+    (void)std::printf("drive-heights min=%.2f max=%.2f span=%.2f\n", zMin, zMax, zMax - zMin);
+    if (!groundClear) {
+        (void)std::printf("drive-fail ground miss (need COL hit on every waypoint)\n");
+        DriveSim_ShutdownWorld();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    // 5. Ride the waypoints: page + pose + merge + chase render, one TGA each.
+    std::vector<uint64_t> checksums;
+    checksums.reserve(static_cast<size_t>(waypoints));
+    TexFrameStats texAgg{};
+    int totalFrames = 0;
+    bool failed = false;
+    for (int i = 0; i < waypoints && !failed; ++i) {
+        const DriveWaypoint& w = wps[static_cast<size_t>(i)];
+        WorldShotScene worldScene{};
+        E2EPagerFrame pf{};
+        char pErr[512] = {};
+        if (!DriveSim_Page(w.x, w.y, w.carZ, worldScene, pf, pErr, sizeof(pErr))) {
+            (void)std::printf("drive-fail pager wp=%d %s\n", i, pErr);
+            failed = true;
+            break;
+        }
+        (void)std::printf("drive-pager wp=%d cam=%.2f,%.2f,%.2f yaw=%.3f active=%d loaded=%d "
+                           "evicted=%d instances=%d models=%d cached=%d tris=%d fallback=%d\n",
+                           i, w.x, w.y, w.carZ, w.yawPath, pf.activeCells, pf.loadedCells,
+                           pf.evictedCells, pf.instances, pf.modelsUnique, pf.cacheModels, pf.tris,
+                           pf.fallback);
+        for (int e = 0; e < pf.evictedShown; ++e) {
+            (void)std::printf("drive-evict wp=%d sector=(%d,%d) dist=%d\n", i, pf.evictedCX[e],
+                               pf.evictedCY[e], pf.evictedDist[e]);
+        }
+        WorldShotScene carScene{};
+        {
+            char cErr[512] = {};
+            if (!DriveSim_Car(gameDir.c_str(), model, w.steerDeg, w.spinDeg, carScene, cErr,
+                              sizeof(cErr))) {
+                (void)std::printf("drive-fail car wp=%d %s\n", i, cErr);
+                failed = true;
+                break;
+            }
+        }
+        WorldShotScene frame{};
+        DriveSim_Merge(worldScene, carScene, w.x, w.y, w.carZ, w.yawBody, frame);
+        float eye[3], target[3];
+        DriveSim_Chase(w.x, w.y, w.carZ, w.yawPath, kCamD, kCamH, eye, target);
+        (void)std::printf("drive-cam wp=%d eye=%.2f,%.2f,%.2f target=%.2f,%.2f,%.2f\n", i, eye[0],
+                           eye[1], eye[2], target[0], target[1], target[2]);
+        for (int f = 0; f < framesPerLeg; ++f) {
+            SDL_Event event = {};
+            while (SDL_PollEvent(&event)) {
+            }
+        }
+        totalFrames += framesPerLeg;
+        std::vector<uint8> pixels;
+        TexFrameStats texStats{};
+        TexSample_RenderPath(frame, width, height, eye, target, pixels, texStats);
+        texAgg.tris += texStats.tris;
+        texAgg.sampledTri += texStats.sampledTri;
+        texAgg.fallbackTri += texStats.fallbackTri;
+        texAgg.flatTri += texStats.flatTri;
+        texAgg.texelFetch += texStats.texelFetch;
+        texAgg.texPixels += texStats.texPixels;
+        texAgg.fallbackPixels += texStats.fallbackPixels;
+        texAgg.flatPixels += texStats.flatPixels;
+        uint64_t sumR = 0, sumG = 0, sumB = 0, nonBlack = 0;
+        uint64_t checksum = PixelsChecksum(pixels, sumR, sumG, sumB, nonBlack);
+        uint64_t total = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
+        if (nonBlack == 0) {
+            (void)std::printf("drive-fail black frame wp=%d\n", i);
+            failed = true;
+            break;
+        }
+        char outPath[1024];
+        (void)std::snprintf(outPath, sizeof(outPath), "%s_W%d.tga", prefix.c_str(), i);
+        if (!WriteTga24(outPath, width, height, pixels)) {
+            (void)std::printf("drive-fail write '%s'\n", outPath);
+            failed = true;
+            break;
+        }
+        checksums.push_back(checksum);
+        (void)std::printf("drive-shot wp=%d out=%s carTris=%d worldTris=%d nonblack=%llu/%llu "
+                           "checksum=%llu\n",
+                           i, outPath, carScene.stats.triangles, pf.tris,
+                           static_cast<unsigned long long>(nonBlack),
+                           static_cast<unsigned long long>(total),
+                           static_cast<unsigned long long>(checksum));
+    }
+    int sectorsLoaded = 0, sectorsEvicted = 0, modelsPeak = 0, trisPeak = 0;
+    StreamPager_Counters(sectorsLoaded, sectorsEvicted, modelsPeak, trisPeak);
+    eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    eglDestroyContext(display, context);
+    eglDestroySurface(display, surface);
+    eglTerminate(display);
+    if (failed) {
+        DriveSim_ShutdownWorld();
+        return 1;
+    }
+    // 6. Honest kinematics gates (no separate pictures).
+    double distTotal = wps.back().dist;
+    double spinTotal = wps.back().spinRad;
+    double expectSpin = (meas.wheelR > 0.0) ? distTotal / meas.wheelR : 0.0;
+    double spinErr = (expectSpin > 1e-9) ? std::fabs(spinTotal - expectSpin) / expectSpin : 1.0;
+    bool gateSpin = spinErr < 0.01;
+    bool gateDistinct = true;
+    for (size_t i = 0; i < checksums.size() && gateDistinct; ++i) {
+        for (size_t j = i + 1; j < checksums.size(); ++j) {
+            if (checksums[i] == checksums[j]) {
+                gateDistinct = false;
+                break;
+            }
+        }
+    }
+    double span = zMax - zMin;
+    if (!(gateSpin && gateDistinct && groundClear)) {
+        (void)std::printf("drive-fail gate spinErr=%.6f(<0.01) distinct=%d groundClear=%d "
+                           "spin=%.6f expect=%.6f\n",
+                           spinErr, gateDistinct ? 1 : 0, groundClear ? 1 : 0, spinTotal,
+                           expectSpin);
+        DriveSim_ShutdownWorld();
+        return 1;
+    }
+    std::string cs;
+    for (size_t i = 0; i < checksums.size(); ++i) {
+        char cell[32];
+        (void)std::snprintf(cell, sizeof(cell), "%s%llu", i ? "," : "",
+                             static_cast<unsigned long long>(checksums[i]));
+        cs += cell;
+    }
+    OS_DebugOut("mad-sa-linux drive");
+    (void)std::printf("drive-ok waypoints=%d frames=%d model=%s distTotal=%.3f wheelSpinTotal=%.6f "
+                       "groundClear=OK checksums=%s\n",
+                       waypoints, totalFrames, meas.model, distTotal, spinTotal, cs.c_str());
+    (void)std::printf("drive-verify distTotal=%.3f wheelR=%.6f expectSpin=%.6f spinTotal=%.6f "
+                       "relErr=%.6f span=%.2f maxTurn=%.1f\n",
+                       distTotal, meas.wheelR, expectSpin, spinTotal, spinErr, span, maxTurn);
+    DriveSim_ShutdownWorld();
+    return 0;
+}
+
 // Round 12 helper: enumerate the ped IFP bank (names as stored).
 int RunListAnims(int argc, char** argv) {
     std::string gameDir = ResolveGameDir(argc, argv);
@@ -2544,6 +2927,9 @@ int main(int argc, char** argv) {
     }
     if (HasArg(argc, argv, "--shot-car")) {
         return RunShotCar(argc, argv);
+    }
+    if (HasArg(argc, argv, "--drive")) {
+        return RunDrive(argc, argv);
     }
     if (HasArg(argc, argv, "--list-anims")) {
         return RunListAnims(argc, argv);
