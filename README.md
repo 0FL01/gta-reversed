@@ -2,6 +2,11 @@
 
 A project to reverse Grand Theft Auto San Andreas completely, and to rewrite and document every function.
 
+## This fork: native Linux track
+On top of the upstream model (MSVC DLL injected via an ASI loader) this fork builds a standalone Linux executable, `mad-sa-linux` (x86_64 ELF): SDL3 video/input, OpenAL audio, librw-based rendering, no Wine at runtime. It boots from a read-only game install (mounted at `/game:ro`), parses game assets directly (`IMG/DFF/TXD/GXT/dat` via its own IO layer), and ships a self-verifying CLI harness (`--smoke`, `--smoke-video`, `--headless`, `--smoke-audio[-real]`, `--shot`, `--shot-scene`, `--shot-menu`, `--menu-nav`, `--e2e`): each gate exits 0 and prints its `*-ok` marker; failures print `*-fail` and exit 1 — no synthetic success paths.
+
+The dev environment is the `mad-sa:dev` Docker image from the parent workspace (root `Dockerfile`); the objective contract and per-round evidence live in the parent's `docs/goals/`. The upstream DLL build remains the reference and must stay green — shared code sits behind platform guards. You still need a legally obtained copy of the game; no assets or executables are distributed here.
+
 ### Community
 Please join our community Discord: [GTA Groupies](https://discord.gg/FG8XJ5Npqe) [The invite is permanent, feel free to share it!]
 
