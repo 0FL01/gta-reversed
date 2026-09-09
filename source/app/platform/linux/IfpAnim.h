@@ -128,4 +128,40 @@ bool IfpAnim_Seq(const char* gameDir, const char* model, const char* animName, i
                  std::vector<IfpAnimSeqFrame>& out, char* err, std::size_t errSize);
 bool IfpAnim_LoopGap(const char* gameDir, const char* animName, float* gapOut, int* mappedOut,
                      char* err, std::size_t errSize);
+// R6q blender (round 19): two-pose HAnim blend fromAnim -> toAnim.
+// Pose A = legacy single-key sample of `fromAnim` at T=0.5 (the exact
+// --shot-anim path, R6j etalon-preserving); pose B = legacy single-key
+// sample of `toAnim` at T=0 (first keyframe). Interior frames blend every
+// bone through the R6k operators: q = slerp(qA,qB,alpha), t =
+// lerp(tA,tB,alpha), alpha_i = i/(K-1). Endpoint frames copy the exact
+// endpoint locals, so alpha=0 reproduces the R6j frame bit-for-bit. All SRT
+// come from IFP bytes; bones mapped in neither pose keep bind (their
+// decomposed bind quat only feeds the slerp of partially-mapped bones).
+struct IfpAnimBlendFrame {
+    WorldShotScene scene;
+    IfpAnimStats stats; // stats.time carries alpha for blend frames
+};
+struct IfpAnimBlendResult {
+    std::vector<IfpAnimBlendFrame> frames;
+    char fromAnim[64]; // resolved stored-case names (e.g. "IDLE_stance")
+    char toAnim[64];
+    std::vector<double> alphas; // size K, alphas[i] = i/(K-1)
+    // Blendaudit: ONE bone (prefer doubly-mapped Pelvis) with its endpoint
+    // quats/trans from IFP bytes and the exact slerp/lerp value at 0.5.
+    char boneName[40];
+    int boneTag = -9999;
+    float qA[4];
+    float qB[4];
+    float qI[4]; // slerp(qA,qB,0.5), normalised
+    float tA[3];
+    float tB[3];
+    float tI[3]; // lerp(tA,tB,0.5)
+    // morphMono: fraction of bones whose angular distance to B is
+    // monotonically non-increasing across frames (slerp morph proof).
+    double morphMono = 0.0;
+    int morphPassed = 0;
+    int morphChecked = 0;
+};
+bool IfpAnim_Blend(const char* gameDir, const char* model, const char* fromAnim, const char* toAnim,
+                   int frames, IfpAnimBlendResult& out, char* err, std::size_t errSize);
 void IfpAnim_Shutdown();
