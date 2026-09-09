@@ -41,7 +41,8 @@ struct CarPoseStats {
     int wheels = 0; // wheel dummy frames found by name (4 on landstal)
     char wheelNames[4][32]; // in hierarchy (raw-index) order
     int fronts = 0; // front (steered) dummies among them
-    int textures = 0;
+    int textures = 0; // loaded model + shared dictionary entries
+    int sharedTextures = 0; // textures loaded from models/generic/vehicle.txd
     double steerDeg = 0.0; // --steer as passed
     double spinDeg = 0.0; // --spin as passed
     int chassisSame = 0; // 1 when the body audit frame LTM is bit-identical
@@ -57,12 +58,16 @@ struct CarPoseAudit {
     int bodySame = 0; // 1 when body LTM is bit-identical before/after
 };
 
+enum class CarPoseTextures { ModelOnly, RealtimeVehicle };
+// ModelOnly preserves the historical offline fixtures. RealtimeVehicle requires
+// the common vehicle TXD and uses upstream common-before-model name resolution.
+// scene owns decoded RGBA; later Init/Shutdown calls cannot invalidate its images.
 // Loads the car relative to gameDir (e.g. "/game") and poses the wheels by
 // steerDeg/spinDeg. On failure returns false with a message in err (never
 // car-ok). audit is filled on success (even for steer=spin=0).
 bool CarPose_Init(const char* gameDir, const char* model, double steerDeg, double spinDeg,
                   WorldShotScene& scene, CarPoseStats& stats, CarPoseAudit& audit, char* err,
-                  std::size_t errSize);
+                  std::size_t errSize, CarPoseTextures textures = CarPoseTextures::ModelOnly);
 void CarPose_Shutdown();
 
 // DFF-derived kinematic constants for the drive slice (R6n): wheel radius

@@ -15,6 +15,7 @@
 #include <vector>
 #include <map>
 #include <set>
+#include <memory>
 
 #include "app/platform/linux/TexSample.h"
 
@@ -200,6 +201,18 @@ rw::TexDictionary* ParseTxd(const std::vector<uint8>& bytes) {
     rw::TexDictionary* txd = rw::TexDictionary::streamRead(&stream);
     stream.close();
     return txd;
+}
+
+static rw::TexDictionary* LoadVehicleTxd() {
+    void* file = nullptr;
+    if (OS_FileOpen(FILE_DATA_AREA_DEFAULT, &file, "models/generic/vehicle.txd", FILE_ACCESS_READ) != 0 || !file) {
+        return nil;
+    }
+    const int32 size = OS_FileSize(file);
+    std::vector<uint8> bytes(size > 0 ? static_cast<size_t>(size) : 0);
+    const bool ok = size >= 12 && OS_FileRead(file, bytes.data(), size) == 0;
+    OS_FileClose(file);
+    return ok ? ParseTxd(bytes) : nil;
 }
 
 void CrossSub(const float* a, const float* b, const float* c, float* n) {
@@ -525,7 +538,7 @@ std::vector<rw::TexDictionary*> s_txds;
 
 bool CarPose_Init(const char* gameDir, const char* model, double steerDeg, double spinDeg,
                   WorldShotScene& scene, CarPoseStats& stats, CarPoseAudit& audit, char* err,
-                  std::size_t errSize) {
+                  std::size_t errSize, CarPoseTextures textures) {
     stats = CarPoseStats{};
     audit = CarPoseAudit{};
     scene.meshes.clear();
@@ -631,8 +644,21 @@ bool CarPose_Init(const char* gameDir, const char* model, double steerDeg, doubl
     }
 
     // --- 3. Parse with honest material linkage. ---
+    // The common dictionary lives through linking and RGBA flattening, including
+    // every error path. Scene images own their texels, never these RW pointers.
+    const auto destroyTxd = [](rw::TexDictionary* txd) { if (txd) txd->destroy(); };
+    std::unique_ptr<rw::TexDictionary, decltype(destroyTxd)> shared(nil, destroyTxd);
+    if (textures == CarPoseTextures::RealtimeVehicle) {
+        shared.reset(LoadVehicleTxd());
+        if (!shared || shared->count() == 0) {
+            SetErr(err, errSize, "cannot load models/generic/vehicle.txd for realtime vehicle");
+            return false;
+        }
+        stats.sharedTextures = shared->count();
+        stats.textures += stats.sharedTextures;
+    }
     rw::TexDictionary* primary = dicts.empty() ? nil : dicts[0];
-    LinkedClump lc = TexSample_LinkedParse(dffBytes.data(), dffBytes.size(), primary, nil, 0);
+    LinkedClump lc = TexSample_LinkedParse(dffBytes.data(), dffBytes.size(), primary, nil, 0, shared.get());
     if (!lc.clump) {
         TexSample_FreeLinked(lc);
         SetErr(err, errSize, "DFF parse produced no clump (not a RenderWare clump?)");

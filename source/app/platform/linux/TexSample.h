@@ -43,7 +43,14 @@ struct LinkedClump {
 
 LinkedClump TexSample_LinkedParse(const uint8_t* bytes, std::size_t size,
                                   rw::TexDictionary* primary,
-                                  rw::TexDictionary* const* fallbacks, std::size_t nFallbacks);
+                                  rw::TexDictionary* const* fallbacks, std::size_t nFallbacks,
+                                  rw::TexDictionary* vehicleShared = nullptr);
+// CVehicleModelInfo::FindTextureCB: common vehicle dictionary precedes the
+// model dictionary, then remap/#emap aliasing in the model dictionary only.
+// vehicleShared opts LinkedParse into this lookup (no world fallbacks). Both
+// dictionaries must outlive the linked clump. Model remaps are renamed as upstream.
+rw::Texture* TexSample_FindVehicleTexture(const char* name, rw::TexDictionary* model,
+                                        rw::TexDictionary* shared);
 void TexSample_FreeLinked(LinkedClump& lc);
 
 // Decodes a REAL (raster-backed) TXD texture to RGBA8. Returns false for

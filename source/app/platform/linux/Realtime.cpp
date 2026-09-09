@@ -4,6 +4,7 @@
 #include "app/platform/linux/StreamPager.h"
 #include "app/platform/linux/RealtimeEnvironment.h"
 #include "app/platform/linux/RealtimeGameplay.h"
+#include "app/platform/linux/RealtimeStreaming.h"
 
 #include <SDL3/SDL.h>
 #include <EGL/egl.h>
@@ -15,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <vector>
 #include <string>
 
@@ -45,21 +47,33 @@ static GLint WrapMode(uint32_t mode) {
     return mode == 3 || mode == 4 ? GL_CLAMP_TO_EDGE : GL_REPEAT;
 }
 
-// Compatibility GL is already a native-track dependency. Compile static
-// geometry once per pager update; no per-frame asset IO or texture upload.
+// Compatibility GL is already a native-track dependency. Static geometry uses
+// bounded lists, preserving precisely the dynamic Draw vertex/material path.
 struct GpuScene {
-    GLuint list = 0;
     std::vector<GLuint> textures;
+    std::vector<GLuint> lists;
+    size_t uploadImage = 0, uploadMesh = 0;
+    int uploadRow = -1, uploadTriangle = 0;
+    bool complete = false;
+    const std::thread::id owner = std::this_thread::get_id();
 
+    GpuScene() = default;
+    GpuScene(const GpuScene&) = delete;
+    GpuScene& operator=(const GpuScene&) = delete;
     ~GpuScene() { Clear(); }
 
     void Clear() {
-        if (list) {
-            glDeleteLists(list, 1);
-            list = 0;
-        }
+        assert(owner == std::this_thread::get_id());
         glDeleteTextures(static_cast<GLsizei>(textures.size()), textures.data());
         textures.clear();
+        for (auto chunk : lists) {
+            glDeleteLists(chunk, 1);
+        }
+        lists.clear();
+        uploadImage = uploadMesh = 0;
+        uploadRow = -1;
+        uploadTriangle = 0;
+        complete = false;
     }
 
     bool UploadTextures(const WorldShotScene& scene) {
@@ -85,28 +99,119 @@ struct GpuScene {
     }
 
     bool Upload(const WorldShotScene& scene) {
-        if (!UploadTextures(scene)) {
-            return false;
-        }
-        list = glGenLists(1);
-        if (!list) {
-            std::printf("play-fail GL display list allocation\n");
-            return false;
-        }
-        glNewList(list, GL_COMPILE);
-        Draw(scene);
-        glEndList();
-        const auto error = glGetError();
-        if (error != GL_NO_ERROR) {
-            std::printf("play-fail upload GL=0x%x\n", error);
-            return false;
+        Clear();
+        while (!complete) {
+            if (!UploadStep(scene, realtime_streaming::Milliseconds() + 4.0)) {
+                return false;
+            }
         }
         return true;
     }
 
+    // Every GL operation is on the context thread. A deadline is a soft budget:
+    // a driver allocation can overrun it. No glBegin/glNewList spans frames.
+    bool UploadStep(const WorldShotScene& scene, double deadline) {
+        assert(owner == std::this_thread::get_id());
+        if (textures.empty()) {
+            textures.resize(scene.images.size());
+            lists.reserve((scene.stats.triangles + 1023) / 1024);
+        }
+        do {
+            if (uploadImage < scene.images.size()) {
+                const auto& image = scene.images[uploadImage];
+                if (image.w <= 0 || image.h <= 0 ||
+                    image.rgba.size() != static_cast<size_t>(image.w) * image.h * 4) {
+                    std::printf("play-fail invalid texture %s\n", image.name);
+                    return false;
+                }
+                auto& texture = textures[uploadImage];
+                if (uploadRow < 0) {
+                    glGenTextures(1, &texture);
+                    glBindTexture(GL_TEXTURE_2D, texture);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, WrapMode((image.filter >> 8) & 15));
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, WrapMode((image.filter >> 12) & 15));
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, image.w, image.h, 0,
+                                 GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+                    uploadRow = 0;
+                } else {
+                    glBindTexture(GL_TEXTURE_2D, texture);
+                    const int rows = std::min(image.h - uploadRow, std::max(1, 65536 / (image.w * 4)));
+                    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, uploadRow, image.w, rows,
+                        GL_RGBA, GL_UNSIGNED_BYTE, image.rgba.data() + static_cast<size_t>(uploadRow) * image.w * 4);
+                    uploadRow += rows;
+                    if (uploadRow == image.h) {
+                        ++uploadImage;
+                        uploadRow = -1;
+                    }
+                }
+            } else if (uploadMesh < scene.meshes.size()) {
+                const auto chunk = glGenLists(1);
+                if (!chunk) {
+                    std::printf("play-fail GL display list allocation\n");
+                    return false;
+                }
+                lists.push_back(chunk);
+                glNewList(chunk, GL_COMPILE);
+                Draw(scene, uploadMesh, uploadTriangle, 1024);
+                glEndList();
+                int remaining = 1024;
+                while (uploadMesh < scene.meshes.size()) {
+                    const int count = std::min(remaining, scene.meshes[uploadMesh].tris - uploadTriangle);
+                    uploadTriangle += count;
+                    remaining -= count;
+                    if (uploadTriangle == scene.meshes[uploadMesh].tris) {
+                        ++uploadMesh;
+                        uploadTriangle = 0;
+                    } else {
+                        break;
+                    }
+                }
+            } else {
+                complete = true;
+            }
+            const auto error = glGetError();
+            if (error != GL_NO_ERROR) {
+                std::printf("play-fail staged upload GL=0x%x\n", error);
+                return false;
+            }
+        } while (!complete && realtime_streaming::Milliseconds() < deadline);
+        return true;
+    }
+
+    bool RetireStep(double deadline) {
+        assert(owner == std::this_thread::get_id());
+        do {
+            if (!lists.empty()) {
+                glDeleteLists(lists.back(), 1);
+                lists.pop_back();
+            } else if (!textures.empty()) {
+                glDeleteTextures(1, &textures.back());
+                textures.pop_back();
+            } else {
+                return true;
+            }
+        } while (realtime_streaming::Milliseconds() < deadline);
+        return lists.empty() && textures.empty();
+    }
+
+    void Render() const {
+        assert(owner == std::this_thread::get_id() && complete);
+        for (auto chunk : lists) {
+            glCallList(chunk);
+        }
+    }
+
     // Dynamic actors retain textures; only posed vertices change each tick.
-    void Draw(const WorldShotScene& scene) const {
-        for (const auto& mesh : scene.meshes) {
+    void Draw(const WorldShotScene& scene, size_t firstMesh = 0, int firstTriangle = 0,
+              int remaining = std::numeric_limits<int>::max()) const {
+        assert(owner == std::this_thread::get_id());
+        for (size_t m = firstMesh; m < scene.meshes.size() && remaining > 0; ++m) {
+            const auto& mesh = scene.meshes[m];
+            const int begin = m == firstMesh ? firstTriangle : 0;
+            const int end = begin + std::min(mesh.tris - begin, remaining);
+            remaining -= end - begin;
             assert(mesh.pos.size() == static_cast<size_t>(mesh.tris) * 9);
             assert(mesh.nrm.size() == mesh.pos.size());
             const bool hasUV = mesh.uv.size() == static_cast<size_t>(mesh.tris) * 6;
@@ -116,11 +221,11 @@ struct GpuScene {
             const bool hasDay = mesh.dayColors.size() == static_cast<size_t>(mesh.tris) * 12;
             const bool hasNight = mesh.nightColors.size() == mesh.dayColors.size() && hasDay;
             int previous = -3;
-            for (int t = 0; t < mesh.tris; ++t) {
+            for (int t = begin; t < end; ++t) {
                 const int image = hasImages && hasUV ? mesh.triImg[t] : -1;
                 assert(image < static_cast<int>(textures.size()));
                 if (image != previous) {
-                    if (t) {
+                    if (t != begin) {
                         glEnd();
                     }
                     if (image >= 0) {
@@ -163,11 +268,94 @@ struct GpuScene {
                     glVertex3fv(&mesh.pos[v * 3]);
                 }
             }
-            if (mesh.tris) {
+            if (end > begin) {
                 glEnd();
             }
         }
         glDisable(GL_TEXTURE_2D);
+    }
+};
+
+struct ResidentWorld {
+    std::unique_ptr<realtime_streaming::CpuWorld> cpu;
+    GpuScene gpu;
+};
+
+struct LiveWorld {
+    std::unique_ptr<ResidentWorld> active = std::make_unique<ResidentWorld>();
+    std::unique_ptr<ResidentWorld> pending, retiring;
+    std::unique_ptr<realtime_streaming::Worker> worker;
+    double uploadMs = 0;
+
+    ~LiveWorld() {
+        if (worker) {
+            worker->Stop(std::move(active->cpu), pending ? std::move(pending->cpu) : nullptr);
+        }
+        // Remaining GL handles die here, before Window/Pager. No worker holds
+        // scene references now. During play retirement is incremental instead.
+    }
+
+    bool Initialize(realtime_streaming::Center center, bool collision) {
+        active->cpu = std::make_unique<realtime_streaming::CpuWorld>();
+        active->cpu->Position = center;
+        active->cpu->Generation = 1;
+        active->cpu->Build(collision);
+        if (!active->cpu->Error.empty()) {
+            std::printf("play-fail initial world: %s\n", active->cpu->Error.c_str());
+            return false;
+        }
+        return active->gpu.Upload(active->cpu->Scene);
+    }
+
+    void Start(bool collision) { worker = std::make_unique<realtime_streaming::Worker>(collision); }
+
+    // Call once, BEFORE Tick: physics and draw see exactly the same generation.
+    bool Advance(realtime_streaming::Center center, bool& published) {
+        published = false;
+        auto request = [&] {
+            const auto loaded = active->cpu->Position;
+            worker->Request(center, std::hypot(center.X - loaded.X, center.Y - loaded.Y) >= 40.0f);
+        };
+        request();
+        const double start = realtime_streaming::Milliseconds();
+        constexpr double budgetMs = 4.0;
+        if (retiring) {
+            if (retiring->gpu.RetireStep(start + budgetMs)) {
+                retiring.reset();
+                worker->Release();
+            }
+            return true;
+        }
+        if (!pending) {
+            if (auto cpu = worker->TakeReady()) {
+                pending = std::make_unique<ResidentWorld>();
+                pending->cpu = std::move(cpu);
+                uploadMs = 0;
+                if (!pending->cpu->Error.empty()) {
+                    std::printf("play-fail worker world: %s\n", pending->cpu->Error.c_str());
+                    return false;
+                }
+            }
+        }
+        if (pending) {
+            if (!pending->gpu.UploadStep(pending->cpu->Scene, start + budgetMs)) {
+                return false;
+            }
+            uploadMs += realtime_streaming::Milliseconds() - start;
+            if (pending->gpu.complete) {
+                active.swap(pending); // matching immutable soup + BVH + GL handles
+                retiring = std::move(pending);
+                worker->Retire(std::move(retiring->cpu));
+                request(); // don't rebuild the just-published center from stale mailbox state
+                published = true;
+                const auto& cpu = *active->cpu;
+                std::printf("play-stream generation=%llu pagerMs=%.2f bvhMs=%.2f gpuMs=%.2f ageMs=%.2f lagM=%.1f\n",
+                    static_cast<unsigned long long>(cpu.Generation), cpu.PagerMs, cpu.CollisionMs, uploadMs,
+                    realtime_streaming::Milliseconds() - cpu.Started,
+                    std::hypot(center.X - cpu.Position.X, center.Y - cpu.Position.Y));
+            }
+        }
+        return true;
     }
 };
 
@@ -317,7 +505,6 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
     }
     std::printf("play-load textAndBinary=%d outdoor=%d binaryFiles=%d binaryInstances=%d radius=%.0f cap=%d\n",
         load.iplTotal, load.iplKept, load.binaryIplFiles, load.binaryInstances, options.radius, options.maxInstances);
-    GpuScene gpu;
     GpuScene actorGpu;
     RealtimeEnvironment environment;
     if (!environment.Load(gameDir, error, sizeof(error), hour, weather) ||
@@ -329,47 +516,34 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
                 environment.GetWaterTriangleCount(), freezeTime ? "frozen" : "one-minute-per-second");
     const bool gameplayEnabled = !freecam;
     RealtimeGameplay gameplay;
-    RealtimeGameplayWorld collision;
     std::string gameplayError;
-    WorldShotScene world;
-    float loadedX = camera.x, loadedY = camera.y;
+    LiveWorld world;
     int updates = 0;
-    auto updateWorld = [&]() {
-        E2EPagerFrame frame{};
-        if (!StreamPager_Update(camera.x, camera.y, camera.z, world, frame, error, sizeof(error))) {
-            std::printf("play-fail pager update: %s\n", error);
-            return false;
-        }
-        if (!gpu.Upload(world)) {
-            return false;
-        }
-        if (gameplayEnabled && !collision.Rebuild(world, gameplayError)) {
-            std::printf("play-fail collision: %s\n", gameplayError.c_str());
-            return false;
-        }
-        loadedX = camera.x;
-        loadedY = camera.y;
+    auto reportWorld = [&]() {
+        const auto& cpu = *world.active->cpu;
         ++updates;
         std::printf("play-scene update=%d instances=%d tris=%d textures=%zu cam=%.1f,%.1f,%.1f\n",
-            updates, frame.instances, frame.tris, world.images.size(), camera.x, camera.y, camera.z);
+            updates, cpu.Frame.instances, cpu.Frame.tris, cpu.Scene.images.size(),
+            cpu.Position.X, cpu.Position.Y, cpu.Position.Z);
         std::fflush(stdout);
-        return true;
     };
-    if (!updateWorld()) {
+    if (!world.Initialize({camera.x, camera.y, camera.z}, gameplayEnabled)) {
         return 1;
     }
+    reportWorld();
     if (gameplayEnabled) {
         const auto initStart = SDL_GetTicksNS();
         if (!gameplay.Initialize(gameDir, gameplayError) ||
-            !gameplay.Spawn(collision, camera.x, camera.y, camera.z, camera.yaw, gameplayError) ||
+            !gameplay.Spawn(world.active->cpu->Collision, camera.x, camera.y, camera.z, camera.yaw, gameplayError) ||
             !actorGpu.UploadTextures(gameplay.Actors())) {
             std::printf("play-fail gameplay: %s\n", gameplayError.c_str());
             return 1;
         }
         std::printf("play-gameplay-init seconds=%.3f collisionTris=%zu actorTris=%d textures=%zu\n",
-            static_cast<double>(SDL_GetTicksNS() - initStart) / 1e9, collision.TriangleCount(),
+            static_cast<double>(SDL_GetTicksNS() - initStart) / 1e9, world.active->cpu->Collision.TriangleCount(),
             gameplay.Actors().stats.triangles, gameplay.Actors().images.size());
     }
+    world.Start(gameplayEnabled); // final startup parser has returned; transfer exclusive pager ownership
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_ALPHA_TEST);
     glAlphaFunc(GL_GREATER, 0.5f); // TXD cutouts (foliage/fences), no opaque rectangles.
@@ -379,6 +553,7 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
     const Uint64 start = SDL_GetTicksNS();
     Uint64 previous = start, report = start;
     uint64_t frames = 0, reportFrames = 0;
+    double reportMaxFrameMs = 0, reportMaxStreamMs = 0;
     bool running = true;
     bool demoJumped = false;
     bool demoEntered = false;
@@ -421,6 +596,15 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
         if (freecam) {
             camera.Update(dt, keys, demo);
         }
+        const double streamStart = realtime_streaming::Milliseconds();
+        bool published = false;
+        if (!world.Advance({camera.x, camera.y, camera.z}, published)) {
+            return 1;
+        }
+        reportMaxStreamMs = std::max(reportMaxStreamMs, realtime_streaming::Milliseconds() - streamStart);
+        if (published) {
+            reportWorld();
+        }
         if (gameplayEnabled) {
             if (!freecam) {
                 input.Forward = keys[SDL_SCANCODE_W] - keys[SDL_SCANCODE_S];
@@ -462,7 +646,7 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             } else {
                 input = {};
             }
-            gameplay.Tick(dt, input, collision);
+            gameplay.Tick(dt, input, world.active->cpu->Collision);
             if (!freecam) {
                 const auto& view = gameplay.Camera();
                 camera.x = view.Position.X;
@@ -472,9 +656,6 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
                 camera.pitch = view.Pitch;
             }
         }
-        if (std::hypot(camera.x - loadedX, camera.y - loadedY) >= 40.0f && !updateWorld()) {
-            return 1;
-        }
         camera.Apply(width, height, std::max(1600.0f, environment.GetParams().farClip));
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         if (!freezeTime) {
@@ -483,7 +664,7 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
         }
         environment.DrawSky(camera.x, camera.y, camera.z);
         environment.BeginWorld();
-        glCallList(gpu.list);
+        world.active->gpu.Render();
         environment.EndWorld();
         if (gameplayEnabled) {
             environment.BeginObjects();
@@ -500,15 +681,16 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
         // Always pace: swap interval may be ignored/overridden by the driver
         // or overlay. No busy-spin and no batch-waypoint pseudo-FPS.
         const Uint64 elapsed = SDL_GetTicksNS() - now;
+        reportMaxFrameMs = std::max(reportMaxFrameMs, static_cast<double>(elapsed) / 1e6);
         constexpr Uint64 frameNs = 1'000'000'000 / 60;
         if (elapsed < frameNs) {
             SDL_DelayNS(frameNs - elapsed);
         }
         if (now - report >= 1'000'000'000) {
-            std::printf("play-frame swaps=%llu fps=%.1f drawable=%dx%d cam=%.1f,%.1f,%.1f\n",
+            std::printf("play-frame swaps=%llu fps=%.1f drawable=%dx%d cam=%.1f,%.1f,%.1f maxWorkMs=%.2f maxStreamMs=%.2f\n",
                 static_cast<unsigned long long>(frames),
                 static_cast<double>(frames - reportFrames) * 1e9 / (now - report),
-                width, height, camera.x, camera.y, camera.z);
+                width, height, camera.x, camera.y, camera.z, reportMaxFrameMs, reportMaxStreamMs);
             std::fflush(stdout);
             if (gameplayEnabled) {
                 const auto& state = gameplay.State();
@@ -526,6 +708,7 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             }
             report = now;
             reportFrames = frames;
+            reportMaxFrameMs = reportMaxStreamMs = 0;
         }
     }
     std::printf("play-ok swaps=%llu seconds=%.3f sceneUpdates=%d\n",

@@ -16,7 +16,9 @@ struct RealtimeVec3 {
 
 // Owns a BVH COPY of the actual pager triangles: no retained scene pointers,
 // no text-IPL-only collision bindings, no invented ground on a ray miss.
-// Rebuild only after a successful pager update, on the gameplay thread.
+// Rebuild after a successful pager update, with exclusive ownership. A worker
+// may build a separate world, then hand it to gameplay at a frame boundary.
+// Queries (including const queries' counters) require single-thread ownership.
 class RealtimeGameplayWorld {
 public:
     RealtimeGameplayWorld();

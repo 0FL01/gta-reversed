@@ -595,7 +595,7 @@ bool RealtimeGameplay::Initialize(const char* gameDir,std::string& error) {
     }
     CarPoseAudit audit{};
     if (!CarPose_Measure(gameDir,"landstal",next->Measure,err,sizeof(err)) ||
-        !CarPose_Init(gameDir,"landstal",0,0,next->CarBind,next->CarStats,audit,err,sizeof(err))) { error=err; return false; }
+        !CarPose_Init(gameDir,"landstal",0,0,next->CarBind,next->CarStats,audit,err,sizeof(err),CarPoseTextures::RealtimeVehicle)) { error=err; return false; }
     if (next->CarStats.wheels!=4 || next->Measure.wheelbase<=0 || next->Measure.wheelR<=0 ||
         (next->CarBind.meshes.size()-next->CarStats.geoms)%4) { error="invalid car wheel layout"; return false; }
     WorldShotScene spin,steer;

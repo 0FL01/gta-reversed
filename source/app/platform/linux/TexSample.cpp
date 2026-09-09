@@ -33,9 +33,29 @@ using uint64 = uint64_t;
 
 // --- Production: linkage, decode, CPU rasterizer (R6c) ---
 
+rw::Texture* TexSample_FindVehicleTexture(const char* name, rw::TexDictionary* model,
+                                        rw::TexDictionary* shared) {
+    if (auto* texture = shared ? shared->find(name) : nil) {
+        return texture;
+    }
+    auto* texture = model ? model->find(name) : nil;
+    if (std::strncmp(name, "remap", 5)) {
+        return texture;
+    }
+    if (texture) {
+        texture->name[0] = '#';
+        return texture;
+    }
+    char alias[32]{};
+    (void)std::snprintf(alias, sizeof(alias), "%s", name);
+    alias[0] = '#';
+    return model ? model->find(alias) : nil;
+}
+
 LinkedClump TexSample_LinkedParse(const uint8_t* bytes, std::size_t size,
                                   rw::TexDictionary* primary,
-                                  rw::TexDictionary* const* fallbacks, std::size_t nFallbacks) {
+                                  rw::TexDictionary* const* fallbacks, std::size_t nFallbacks,
+                                  rw::TexDictionary* vehicleShared) {
     LinkedClump lc;
     if (!bytes || size < 12) {
         return lc;
@@ -78,8 +98,10 @@ LinkedClump TexSample_LinkedParse(const uint8_t* bytes, std::size_t size,
             r.filter = dum->filterAddressing; // DFF sampler state survives below
             std::memcpy(r.name, dum->name, sizeof(r.name));
             r.name[sizeof(r.name) - 1] = '\0';
-            rw::Texture* found = primary ? primary->find(dum->name) : nil;
-            for (std::size_t f = 0; found == nil && f < nFallbacks; ++f) {
+            rw::Texture* found = vehicleShared ?
+                TexSample_FindVehicleTexture(dum->name, primary, vehicleShared) :
+                primary ? primary->find(dum->name) : nil;
+            for (std::size_t f = 0; !vehicleShared && found == nil && f < nFallbacks; ++f) {
                 if (fallbacks[f]) {
                     found = fallbacks[f]->find(dum->name);
                 }
