@@ -66,7 +66,7 @@ using uint64 = uint64_t;
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --shot-cs-duo <out.tga> | --shot-water <out.tga> [--hour H] [--water-file water1.dat] | --shot-shore <out.tga> [--hour H] | --shot-hud <out.tga> [--health H] [--armor A] | --shot-radar <out.tga> [--x X] [--y Y] | --zone-at X,Y | --shot-game <out.tga> [--health H] [--armor A] [--show-zone] [--wanted N] [--money M] [--hour H] [--weather W] | --csanim-seq <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--frames 5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] [--hud] [--wanted N] [--money M] [--radar] [--show-zone] [--hour H] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] [--hud] [--show-zone] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --shot-cs-duo <out.tga> | --shot-water <out.tga> [--hour H] [--water-file water1.dat] | --shot-shore <out.tga> [--hour H] | --shot-hud <out.tga> [--health H] [--armor A] | --shot-radar <out.tga> [--x X] [--y Y] | --zone-at X,Y | --shot-game <out.tga> [--health H] [--armor A] [--show-zone] [--wanted N] [--money M] [--hour H] [--weather W] | --csanim-seq <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--frames 5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] [--hud] [--wanted N] [--money M] [--radar] [--show-zone] [--hour H] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] [--hud] [--show-zone] [--hour H] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -6887,6 +6887,74 @@ int RunWalk(int argc, char** argv) {
             hasWalkMoney = true;
         }
     }
+    // R6bb (round 56): optional time-of-day. Absent --hour keeps the legacy
+    // look bit-for-bit (fixed clear-color background, legacy 0.32+0.68*NdotL
+    // shade, HUD clock 12:00). A given H (integer 0-23) relights every
+    // waypoint frame from the EXTRASUNNY_LA row H (same TimeCycle floor path
+    // and same TexTimeEnv amb/dir/sky math as --shot-scene --hour H and the
+    // R6ba drive path) and shows the HUD clock as "%02d:00" of H via the
+    // same font2 path (only with --hud; without --hud no clock is drawn).
+    // Anything else fails honestly (no TGA, no walk-ok). The walk corridor
+    // pager holds no water quads, so the WaterRGBA bytes of the same row
+    // have no meshes to color on this path (conditional clause vacuous) —
+    // the row is still the same TimeCycle bytes as the scene cross-check.
+    int walkHour = -1;
+    {
+        const char* hourArg = ArgValue(argc, argv, "--hour", nullptr);
+        if (hourArg) {
+            size_t len = std::strlen(hourArg);
+            bool digits = len > 0 && len <= 2;
+            for (size_t i = 0; digits && i < len; ++i) {
+                if (hourArg[i] < '0' || hourArg[i] > '9') {
+                    digits = false;
+                }
+            }
+            int h = digits ? std::atoi(hourArg) : -1;
+            if (!digits || h < 0 || h > 23) {
+                (void)std::printf("walk-fail bad --hour '%s' (want 0-23)\n", hourArg);
+                WalkSim_ShutdownWorld();
+                eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+                eglDestroyContext(display, context);
+                eglDestroySurface(display, surface);
+                eglTerminate(display);
+                return 1;
+            }
+            walkHour = h;
+        }
+    }
+    // R6bb: timecyc row for --hour (same exact bytes as --shot-scene --hour).
+    TexTimeEnv walkEnv{};
+    const TexTimeEnv* walkEnvPtr = nullptr;
+    if (walkHour >= 0) {
+        TimeCycleParams wtcp{};
+        char wtcErr[256] = {};
+        if (!TimeCycle_LoadWeatherHour(gameDir.c_str(), "EXTRASUNNY_LA", walkHour, wtcp,
+                                       wtcErr, sizeof(wtcErr))) {
+            (void)std::printf("walk-fail timecyc %s (game=%s weather=EXTRASUNNY_LA hour=%d)\n",
+                               wtcErr, gameDir.c_str(), walkHour);
+            WalkSim_ShutdownWorld();
+            eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            eglDestroyContext(display, context);
+            eglDestroySurface(display, surface);
+            eglTerminate(display);
+            return 1;
+        }
+        for (int c = 0; c < 3; ++c) {
+            walkEnv.amb[c] = wtcp.amb[c] / 255.0f;
+            walkEnv.sun[c] = wtcp.dir[c] / 255.0f;
+            walkEnv.skyTop[c] = wtcp.skyTop[c];
+            walkEnv.skyBot[c] = wtcp.skyBot[c];
+        }
+        walkEnv.fog = false;
+        walkEnvPtr = &walkEnv;
+        (void)std::printf(
+            "timecyc-load weather=EXTRASUNNY_LA hour=%d amb=%d,%d,%d dir=%d,%d,%d "
+            "skytop=%d,%d,%d skybot=%d,%d,%d suncore=%d,%d,%d sample=%s sunDir=fixed spec=off\n",
+            walkHour, wtcp.amb[0], wtcp.amb[1], wtcp.amb[2], wtcp.dir[0], wtcp.dir[1],
+            wtcp.dir[2], wtcp.skyTop[0], wtcp.skyTop[1], wtcp.skyTop[2], wtcp.skyBot[0],
+            wtcp.skyBot[1], wtcp.skyBot[2], wtcp.sunCore[0], wtcp.sunCore[1], wtcp.sunCore[2],
+            wtcp.sampleName);
+    }
     HudDriveAssets hudAssets{};
     std::vector<std::string> hudSpdTexts;
     std::vector<double> hudVel;
@@ -6945,14 +7013,23 @@ int RunWalk(int argc, char** argv) {
         const int ac0 = kDriveHudArmor > 100 ? 100 : kDriveHudArmor;
         const int barW1 = (hc0 * 109 + 50) / 100;
         const int barW2 = (ac0 * 62 + 50) / 100;
+        // R6bb: HUD clock follows --hour via the same font2 "%02d:00" path
+        // (no hardcoded digits); without --hour it stays 12:00 bit-identical.
+        // Without --hud no clock is drawn at all (this block never runs).
+        const int hudHour = walkHour >= 0 ? walkHour : kDriveHudHour;
+        char hudClock[16] = {};
+        (void)std::snprintf(hudClock, sizeof(hudClock), "%02d:00", hudHour);
         (void)std::printf("walkhud-formula walkV=strideLen/clipTotal=%.6f/%.6f=%.6fms "
                            "kmh=round(v*3.6)=%d src=WalkSim-clip(IFP-bytes) distTotal=%.3f "
                            "simTime=distTotal/walkV=%.3f\n",
                            clip.strideLen, clip.total, walkV, kmh, distTotalHud, simTime);
         (void)std::printf("walkhud-load sprites=%d barTex=%s barWH=%dx%d fontTex=font2 "
-                           "health=%d armor=%d barW1=%d barW2=%d clock=12:00\n",
+                           "health=%d armor=%d barW1=%d barW2=%d clock=%s\n",
                            hudAssets.sprites, hudAssets.barTex, hudAssets.barW, hudAssets.barH,
-                           kDriveHudHealth, kDriveHudArmor, barW1, barW2);
+                           kDriveHudHealth, kDriveHudArmor, barW1, barW2, hudClock);
+        if (walkHour >= 0) {
+            (void)std::printf("hud-clock text=\"%s\"\n", hudClock);
+        }
         (void)std::printf("walkhud-fmt spdFmt=SPD %%03d kmh=round(v*3.6) src=WalkSim-"
                            "strideLen/clipTotal\n");
         for (int i = 0; i < waypoints; ++i) {
@@ -7043,7 +7120,14 @@ int RunWalk(int argc, char** argv) {
         totalFrames += framesPerLeg;
         std::vector<uint8> pixels;
         TexFrameStats texStats{};
-        TexSample_RenderPath(frame, width, height, eye, target, pixels, texStats);
+        // R6bb: with --hour the same TexTimeEnv relights the frame (amb/dir/
+        // sky as --shot-scene --hour); without it the legacy path is bit-wise.
+        if (walkEnvPtr) {
+            TexSample_RenderPathTC(frame, width, height, eye, target, *walkEnvPtr, pixels,
+                                   texStats);
+        } else {
+            TexSample_RenderPath(frame, width, height, eye, target, pixels, texStats);
+        }
         texAgg.tris += texStats.tris;
         texAgg.sampledTri += texStats.sampledTri;
         texAgg.fallbackTri += texStats.fallbackTri;
@@ -7077,11 +7161,14 @@ int RunWalk(int argc, char** argv) {
                                static_cast<unsigned long long>(checksum));
         } else {
             // R6ap: HUD overlay on a copy via the existing HudShot blit path
-            // (bars 137/60 + clock 12:00 + SPD text from the WalkSim velocity).
+            // (bars 137/60 + clock HH:00 + SPD text from the WalkSim velocity;
+            // R6bb: HH comes from --hour when given, else 12:00 bit-identical).
+            // Without --hud no clock is drawn at all (this branch never runs).
             std::vector<uint8> hudPixels = pixels;
             const char* spdText = hudSpdTexts[static_cast<size_t>(i)].c_str();
+            const int blitHour = walkHour >= 0 ? walkHour : kDriveHudHour;
             int spdInk = HudShot_BlitDriveHud(hudPixels, hudAssets, kDriveHudHealth,
-                                              kDriveHudArmor, kDriveHudHour, spdText);
+                                              kDriveHudArmor, blitHour, spdText);
             if (spdInk < 0) {
                 (void)std::printf("walkhud-fail blit wp=%d spd=\"%s\"\n", i, spdText);
                 failed = true;
@@ -7276,11 +7363,17 @@ int RunWalk(int argc, char** argv) {
     }
     double phaseEnd = wps.back().phase;
     OS_DebugOut("mad-sa-linux walk");
+    // R6bb: with --hour every final ok line carries hour=H before checksums
+    // (empty without the flag keeps all legacy lines bit-identical).
+    char hourTag[16] = {};
+    if (walkHour >= 0) {
+        (void)std::snprintf(hourTag, sizeof(hourTag), " hour=%d", walkHour);
+    }
     if (!wantHud) {
         (void)std::printf("walk-ok waypoints=%d frames=%d model=%s anim=%s distTotal=%.3f cycles=%.6f "
-                           "phaseEnd=%.6f checksums=%s\n",
+                           "phaseEnd=%.6f%s checksums=%s\n",
                            waypoints, totalFrames, clip.model, clip.anim, distTotal, actualCycles,
-                           phaseEnd, cs.c_str());
+                           phaseEnd, hourTag, cs.c_str());
         (void)std::printf("walk-verify distTotal=%.3f strideLen=%.6f expectCycles=%.6f "
                            "actualCycles=%.6f relErr=%.6f span=%.2f\n",
                            distTotal, clip.strideLen, expectCycles, actualCycles, cycErr, span);
@@ -7433,49 +7526,49 @@ int RunWalk(int argc, char** argv) {
             if (wantRadar) {
                 (void)std::printf("walkhud-ok waypoints=%d frames=%d model=%s anim=%s hudPixels=%ld "
                                    "(sum-over-waypoints) spdTexts=%s walkV=%.6f walkKmh=%d "
-                                   "wanted=%d money=%d radar=1%s checksums=%s\n",
+                                   "wanted=%d money=%d radar=1%s%s checksums=%s\n",
                                    waypoints, totalFrames, clip.model, clip.anim, hudSum,
                                    spdJoin.c_str(), walkV, walkKmh, walkWanted, walkMoney,
-                                   zoneTag, cs.c_str());
+                                   zoneTag, hourTag, cs.c_str());
             } else {
                 (void)std::printf("walkhud-ok waypoints=%d frames=%d model=%s anim=%s hudPixels=%ld "
                                    "(sum-over-waypoints) spdTexts=%s walkV=%.6f walkKmh=%d "
-                                   "wanted=%d money=%d%s checksums=%s\n",
+                                   "wanted=%d money=%d%s%s checksums=%s\n",
                                    waypoints, totalFrames, clip.model, clip.anim, hudSum,
                                    spdJoin.c_str(), walkV, walkKmh, walkWanted, walkMoney,
-                                   zoneTag, cs.c_str());
+                                   zoneTag, hourTag, cs.c_str());
             }
         } else if (hasWalkWanted) {
             if (wantRadar) {
                 (void)std::printf("walkhud-ok waypoints=%d frames=%d model=%s anim=%s hudPixels=%ld "
                                    "(sum-over-waypoints) spdTexts=%s walkV=%.6f walkKmh=%d "
-                                   "wanted=%d radar=1%s checksums=%s\n",
+                                   "wanted=%d radar=1%s%s checksums=%s\n",
                                    waypoints, totalFrames, clip.model, clip.anim, hudSum,
                                    spdJoin.c_str(), walkV, walkKmh, walkWanted, zoneTag,
-                                   cs.c_str());
+                                   hourTag, cs.c_str());
             } else {
                 (void)std::printf("walkhud-ok waypoints=%d frames=%d model=%s anim=%s hudPixels=%ld "
                                    "(sum-over-waypoints) spdTexts=%s walkV=%.6f walkKmh=%d "
-                                   "wanted=%d%s checksums=%s\n",
+                                   "wanted=%d%s%s checksums=%s\n",
                                    waypoints, totalFrames, clip.model, clip.anim, hudSum,
                                    spdJoin.c_str(), walkV, walkKmh, walkWanted, zoneTag,
-                                   cs.c_str());
+                                   hourTag, cs.c_str());
             }
         } else {
             if (wantRadar) {
                 (void)std::printf("walkhud-ok waypoints=%d frames=%d model=%s anim=%s hudPixels=%ld "
                                    "(sum-over-waypoints) spdTexts=%s walkV=%.6f walkKmh=%d "
-                                   "money=%d radar=1%s checksums=%s\n",
+                                   "money=%d radar=1%s%s checksums=%s\n",
                                    waypoints, totalFrames, clip.model, clip.anim, hudSum,
                                    spdJoin.c_str(), walkV, walkKmh, walkMoney, zoneTag,
-                                   cs.c_str());
+                                   hourTag, cs.c_str());
             } else {
                 (void)std::printf("walkhud-ok waypoints=%d frames=%d model=%s anim=%s hudPixels=%ld "
                                    "(sum-over-waypoints) spdTexts=%s walkV=%.6f walkKmh=%d "
-                                   "money=%d%s checksums=%s\n",
+                                   "money=%d%s%s checksums=%s\n",
                                    waypoints, totalFrames, clip.model, clip.anim, hudSum,
                                    spdJoin.c_str(), walkV, walkKmh, walkMoney, zoneTag,
-                                   cs.c_str());
+                                   hourTag, cs.c_str());
             }
         }
         (void)std::printf("walk-verify distTotal=%.3f strideLen=%.6f expectCycles=%.6f "
@@ -7486,15 +7579,15 @@ int RunWalk(int argc, char** argv) {
     }
     if (wantRadar) {
         (void)std::printf("walkhud-ok waypoints=%d frames=%d model=%s anim=%s hudPixels=%ld "
-                           "(sum-over-waypoints) spdTexts=%s walkV=%.6f walkKmh=%d radar=1%s "
+                           "(sum-over-waypoints) spdTexts=%s walkV=%.6f walkKmh=%d radar=1%s%s "
                            "checksums=%s\n",
                            waypoints, totalFrames, clip.model, clip.anim, hudSum, spdJoin.c_str(),
-                           walkV, walkKmh, zoneTag, cs.c_str());
+                           walkV, walkKmh, zoneTag, hourTag, cs.c_str());
     } else {
         (void)std::printf("walkhud-ok waypoints=%d frames=%d model=%s anim=%s hudPixels=%ld "
-                           "(sum-over-waypoints) spdTexts=%s walkV=%.6f walkKmh=%d%s checksums=%s\n",
+                           "(sum-over-waypoints) spdTexts=%s walkV=%.6f walkKmh=%d%s%s checksums=%s\n",
                            waypoints, totalFrames, clip.model, clip.anim, hudSum, spdJoin.c_str(),
-                           walkV, walkKmh, zoneTag, cs.c_str());
+                           walkV, walkKmh, zoneTag, hourTag, cs.c_str());
     }
     (void)std::printf("walk-verify distTotal=%.3f strideLen=%.6f expectCycles=%.6f "
                        "actualCycles=%.6f relErr=%.6f span=%.2f\n",
