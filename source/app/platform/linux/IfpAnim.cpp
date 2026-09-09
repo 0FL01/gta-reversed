@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cmath>
+#include <array>
 #include <string>
 #include <vector>
 #include <map>
@@ -680,6 +681,72 @@ bool ClumpHasSkin(rw::Clump* clump) {
     return false;
 }
 
+// --- R6k interpolation helpers (lerp trans + slerp quat, IFP bytes only) ---
+void NormQuat4(float q[4]) {
+    float l = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+    if (l > 1e-9f) {
+        q[0] /= l;
+        q[1] /= l;
+        q[2] /= l;
+        q[3] /= l;
+    } else {
+        q[0] = q[1] = q[2] = 0.0f;
+        q[3] = 1.0f;
+    }
+}
+
+void NormQuatCopy(const float in[4], float out[4]) {
+    out[0] = in[0];
+    out[1] = in[1];
+    out[2] = in[2];
+    out[3] = in[3];
+    NormQuat4(out);
+}
+
+// Shortest-path slerp between unit quats; falls back to nlerp for tiny
+// angles (|dot| > 0.9995) to avoid division by ~0. Deterministic.
+void SlerpQuat(const float a[4], const float b[4], float t, float out[4]) {
+    float dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+    float bx = b[0];
+    float by = b[1];
+    float bz = b[2];
+    float bw = b[3];
+    if (dot < 0.0f) {
+        dot = -dot;
+        bx = -bx;
+        by = -by;
+        bz = -bz;
+        bw = -bw;
+    }
+    if (dot > 0.9995f) {
+        out[0] = a[0] + t * (bx - a[0]);
+        out[1] = a[1] + t * (by - a[1]);
+        out[2] = a[2] + t * (bz - a[2]);
+        out[3] = a[3] + t * (bw - a[3]);
+        NormQuat4(out);
+        return;
+    }
+    float theta = std::acos(dot > 1.0f ? 1.0f : dot);
+    float s = std::sin(theta);
+    float wa = std::sin((1.0f - t) * theta) / s;
+    float wb = std::sin(t * theta) / s;
+    out[0] = wa * a[0] + wb * bx;
+    out[1] = wa * a[1] + wb * by;
+    out[2] = wa * a[2] + wb * bz;
+    out[3] = wa * a[3] + wb * bw;
+}
+
+float QuatAngle(const float a[4], const float b[4]) {
+    float dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+    if (dot < 0.0f) {
+        dot = -dot;
+    }
+    if (dot > 1.0f) {
+        dot = 1.0f;
+    }
+    return 2.0f * std::acos(dot);
+}
+
 std::vector<rw::TexDictionary*> s_txds;
 
 } // namespace
@@ -716,7 +783,8 @@ bool IfpAnim_List(const char* gameDir, std::vector<std::string>& names, char* ba
 }
 
 bool IfpAnim_Init(const char* gameDir, const char* model, const char* animName, double timeFrac,
-                  WorldShotScene& scene, IfpAnimStats& stats, char* err, std::size_t errSize) {
+                  WorldShotScene& scene, IfpAnimStats& stats, char* err, std::size_t errSize,
+                  bool interp) {
     stats = IfpAnimStats{};
     scene.meshes.clear();
     scene.images.clear();
@@ -984,14 +1052,25 @@ bool IfpAnim_Init(const char* gameDir, const char* model, const char* animName, 
     stats.animTotal = anim->total;
     stats.timeAbs = timeFrac * anim->total;
 
-    // --- 5. Single-sample per sequence at T_abs (NO interpolation) ---
+    // --- 5. Sample per sequence at T_abs: legacy single key (interp=false,
+    // R6j etalon) or lerp+slerp between bracketing IFP keys (interp=true) ---
     struct Sampled {
         float q[4];
         float t[3];
         bool hasT = false;
-        int frame = 0;
+        int frame = 0; // lower bracket k0 (legacy: picked key)
         int frames = 0;
         bool valid = false;
+        // Bracketing keys from IFP bytes (keyaudit source).
+        int k0 = -1;
+        int k1 = -1;
+        float t0 = 0.0f;
+        float t1 = 0.0f;
+        float alpha = 0.0f;
+        float q0[4];
+        float q1[4];
+        float p0[3];
+        float p1[3];
     };
     std::vector<Sampled> sampled(anim->seqs.size());
     for (std::size_t s = 0; s < anim->seqs.size(); ++s) {
@@ -1002,42 +1081,146 @@ bool IfpAnim_Init(const char* gameDir, const char* model, const char* animName, 
             sampled[s] = sm;
             continue;
         }
-        std::size_t pick = 0;
         if (sq.frames.size() == 1) {
-            pick = 0;
-        } else {
-            pick = sq.frames.size() - 1;
+            const IfpFrame& fr = sq.frames[0];
+            float nq[4] = { fr.q[0], fr.q[1], fr.q[2], fr.q[3] };
+            NormQuat4(nq);
+            sm.q[0] = nq[0];
+            sm.q[1] = nq[1];
+            sm.q[2] = nq[2];
+            sm.q[3] = nq[3];
+            sm.hasT = fr.hasT;
+            sm.t[0] = fr.t[0];
+            sm.t[1] = fr.t[1];
+            sm.t[2] = fr.t[2];
+            sm.frame = 0;
+            sm.k0 = sm.k1 = 0;
+            sm.t0 = sm.t1 = fr.absTime;
+            sm.alpha = 0.0f;
+            sm.q0[0] = sm.q1[0] = nq[0];
+            sm.q0[1] = sm.q1[1] = nq[1];
+            sm.q0[2] = sm.q1[2] = nq[2];
+            sm.q0[3] = sm.q1[3] = nq[3];
+            sm.p0[0] = sm.p1[0] = fr.t[0];
+            sm.p0[1] = sm.p1[1] = fr.t[1];
+            sm.p0[2] = sm.p1[2] = fr.t[2];
+            sm.valid = true;
+            sampled[s] = sm;
+            continue;
+        }
+        float tAbs = static_cast<float>(stats.timeAbs);
+        if (!interp) {
+            std::size_t pick = sq.frames.size() - 1;
             for (std::size_t k = 0; k < sq.frames.size(); ++k) {
-                if (sq.frames[k].absTime >= static_cast<float>(stats.timeAbs)) {
+                if (sq.frames[k].absTime >= tAbs) {
                     pick = k;
                     break;
                 }
             }
+            const IfpFrame& fr = sq.frames[pick];
+            float nq[4] = { fr.q[0], fr.q[1], fr.q[2], fr.q[3] };
+            NormQuat4(nq);
+            sm.q[0] = nq[0];
+            sm.q[1] = nq[1];
+            sm.q[2] = nq[2];
+            sm.q[3] = nq[3];
+            sm.hasT = fr.hasT;
+            sm.t[0] = fr.t[0];
+            sm.t[1] = fr.t[1];
+            sm.t[2] = fr.t[2];
+            sm.frame = static_cast<int>(pick);
+            sm.k0 = sm.k1 = static_cast<int>(pick);
+            sm.t0 = sm.t1 = fr.absTime;
+            sm.alpha = 0.0f;
+            sm.q0[0] = sm.q1[0] = nq[0];
+            sm.q0[1] = sm.q1[1] = nq[1];
+            sm.q0[2] = sm.q1[2] = nq[2];
+            sm.q0[3] = sm.q1[3] = nq[3];
+            sm.p0[0] = sm.p1[0] = fr.t[0];
+            sm.p0[1] = sm.p1[1] = fr.t[1];
+            sm.p0[2] = sm.p1[2] = fr.t[2];
+            sm.valid = true;
+            sampled[s] = sm;
+            continue;
         }
-        const IfpFrame& fr = sq.frames[pick];
-        sm.q[0] = fr.q[0];
-        sm.q[1] = fr.q[1];
-        sm.q[2] = fr.q[2];
-        sm.q[3] = fr.q[3];
-        // Normalise the raw IFP quat (quantised i16/4096 path).
-        {
-            float l = std::sqrt(sm.q[0] * sm.q[0] + sm.q[1] * sm.q[1] + sm.q[2] * sm.q[2] +
-                                sm.q[3] * sm.q[3]);
-            if (l > 1e-9f) {
-                sm.q[0] /= l;
-                sm.q[1] /= l;
-                sm.q[2] /= l;
-                sm.q[3] /= l;
-            } else {
-                sm.q[0] = sm.q[1] = sm.q[2] = 0.0f;
-                sm.q[3] = 1.0f;
+        // interp=true: bracket T_abs between neighbouring IFP keys.
+        std::size_t k0 = 0;
+        std::size_t k1 = 0;
+        float alpha = 0.0f;
+        if (tAbs <= sq.frames.front().absTime) {
+            k0 = k1 = 0;
+            alpha = 0.0f;
+        } else if (tAbs >= sq.frames.back().absTime) {
+            k0 = k1 = sq.frames.size() - 1;
+            alpha = 0.0f;
+        } else {
+            k0 = 0;
+            k1 = sq.frames.size() - 1;
+            for (std::size_t k = 0; k + 1 < sq.frames.size(); ++k) {
+                float a = sq.frames[k].absTime;
+                float b = sq.frames[k + 1].absTime;
+                if (a <= tAbs && tAbs <= b) {
+                    k0 = k;
+                    k1 = k + 1;
+                    sm.t0 = a;
+                    sm.t1 = b;
+                    if (b > a) {
+                        alpha = (tAbs - a) / (b - a);
+                    } else {
+                        alpha = 0.0f;
+                    }
+                    break;
+                }
             }
         }
-        sm.hasT = fr.hasT;
-        sm.t[0] = fr.t[0];
-        sm.t[1] = fr.t[1];
-        sm.t[2] = fr.t[2];
-        sm.frame = static_cast<int>(pick);
+        const IfpFrame& f0 = sq.frames[k0];
+        const IfpFrame& f1 = sq.frames[k1];
+        float n0[4] = { f0.q[0], f0.q[1], f0.q[2], f0.q[3] };
+        float n1[4] = { f1.q[0], f1.q[1], f1.q[2], f1.q[3] };
+        NormQuat4(n0);
+        NormQuat4(n1);
+        float qi[4];
+        if (k0 == k1 || alpha == 0.0f) {
+            qi[0] = n0[0];
+            qi[1] = n0[1];
+            qi[2] = n0[2];
+            qi[3] = n0[3];
+        } else {
+            SlerpQuat(n0, n1, alpha, qi);
+        }
+        NormQuat4(qi);
+        sm.q[0] = qi[0];
+        sm.q[1] = qi[1];
+        sm.q[2] = qi[2];
+        sm.q[3] = qi[3];
+        sm.hasT = f0.hasT || f1.hasT;
+        if (sm.hasT) {
+            sm.t[0] = f0.t[0] + alpha * (f1.t[0] - f0.t[0]);
+            sm.t[1] = f0.t[1] + alpha * (f1.t[1] - f0.t[1]);
+            sm.t[2] = f0.t[2] + alpha * (f1.t[2] - f0.t[2]);
+        } else {
+            sm.t[0] = sm.t[1] = sm.t[2] = 0.0f;
+        }
+        sm.frame = static_cast<int>(k0);
+        sm.k0 = static_cast<int>(k0);
+        sm.k1 = static_cast<int>(k1);
+        sm.t0 = f0.absTime;
+        sm.t1 = f1.absTime;
+        sm.alpha = (k0 == k1) ? 0.0f : alpha;
+        sm.q0[0] = n0[0];
+        sm.q0[1] = n0[1];
+        sm.q0[2] = n0[2];
+        sm.q0[3] = n0[3];
+        sm.q1[0] = n1[0];
+        sm.q1[1] = n1[1];
+        sm.q1[2] = n1[2];
+        sm.q1[3] = n1[3];
+        sm.p0[0] = f0.t[0];
+        sm.p0[1] = f0.t[1];
+        sm.p0[2] = f0.t[2];
+        sm.p1[0] = f1.t[0];
+        sm.p1[1] = f1.t[1];
+        sm.p1[2] = f1.t[2];
         sm.valid = true;
         sampled[s] = sm;
     }
@@ -1195,6 +1378,72 @@ bool IfpAnim_Init(const char* gameDir, const char* model, const char* animName, 
             stats.boneFrames = sm.frames;
         }
     }
+    stats.interp = interp ? 1 : 0;
+
+    // Keyaudit (R6k proof of real interpolation): ONE bone with its two
+    // bracketing IFP keys and the lerp+slerp value between them. Prefer the
+    // Root sequence (tag 0, carries translation so both lerp and slerp are
+    // visible), else the first multi-key sequence, else the first valid one.
+    // All quats/trans are IFP bytes (normalised for quats); no synthesis.
+    {
+        int audit = -1;
+        for (std::size_t s = 0; s < anim->seqs.size(); ++s) {
+            if (EffectiveTag(anim->seqs[s]) == 0 && sampled[s].valid) {
+                audit = static_cast<int>(s);
+                break;
+            }
+        }
+        if (audit < 0) {
+            for (std::size_t s = 0; s < anim->seqs.size(); ++s) {
+                if (sampled[s].valid && sampled[s].frames > 1) {
+                    audit = static_cast<int>(s);
+                    break;
+                }
+            }
+        }
+        if (audit < 0) {
+            for (std::size_t s = 0; s < anim->seqs.size(); ++s) {
+                if (sampled[s].valid) {
+                    audit = static_cast<int>(s);
+                    break;
+                }
+            }
+        }
+        if (audit >= 0) {
+            const Sampled& sm = sampled[static_cast<size_t>(audit)];
+            const IfpSeq& sq = anim->seqs[static_cast<size_t>(audit)];
+            (void)std::snprintf(stats.keyBone, sizeof(stats.keyBone), "%s", sq.name);
+            stats.keyTag = EffectiveTag(sq);
+            stats.keyK0 = sm.k0;
+            stats.keyK1 = sm.k1;
+            stats.keyT0 = sm.t0;
+            stats.keyT1 = sm.t1;
+            stats.keyAlpha = sm.alpha;
+            stats.keyTimeAbs = static_cast<float>(stats.timeAbs);
+            stats.keyQ0[0] = sm.q0[0];
+            stats.keyQ0[1] = sm.q0[1];
+            stats.keyQ0[2] = sm.q0[2];
+            stats.keyQ0[3] = sm.q0[3];
+            stats.keyQ1[0] = sm.q1[0];
+            stats.keyQ1[1] = sm.q1[1];
+            stats.keyQ1[2] = sm.q1[2];
+            stats.keyQ1[3] = sm.q1[3];
+            stats.keyQI[0] = sm.q[0];
+            stats.keyQI[1] = sm.q[1];
+            stats.keyQI[2] = sm.q[2];
+            stats.keyQI[3] = sm.q[3];
+            stats.keyP0[0] = sm.p0[0];
+            stats.keyP0[1] = sm.p0[1];
+            stats.keyP0[2] = sm.p0[2];
+            stats.keyP1[0] = sm.p1[0];
+            stats.keyP1[1] = sm.p1[1];
+            stats.keyP1[2] = sm.p1[2];
+            stats.keyPI[0] = sm.t[0];
+            stats.keyPI[1] = sm.t[1];
+            stats.keyPI[2] = sm.t[2];
+            stats.keyHasT = sm.hasT ? 1 : 0;
+        }
+    }
 
     // Bind skin matrices S_i = IB_i * (Wbind_i * invA).
     std::vector<rw::Matrix> bindSkinMats(static_cast<size_t>(numBones));
@@ -1312,6 +1561,9 @@ bool IfpAnim_Init(const char* gameDir, const char* model, const char* animName, 
         float dy = animWorld[static_cast<size_t>(ridx)].pos.y - bindWorld[static_cast<size_t>(ridx)].pos.y;
         float dz = animWorld[static_cast<size_t>(ridx)].pos.z - bindWorld[static_cast<size_t>(ridx)].pos.z;
         stats.rootDelta = std::sqrt(dx * dx + dy * dy + dz * dz);
+        stats.rootWorld[0] = animWorld[static_cast<size_t>(ridx)].pos.x;
+        stats.rootWorld[1] = animWorld[static_cast<size_t>(ridx)].pos.y;
+        stats.rootWorld[2] = animWorld[static_cast<size_t>(ridx)].pos.z;
     }
 
     // Model placement A (current atomic-frame LTM, DFF file bytes): the
@@ -1575,4 +1827,201 @@ void IfpAnim_Shutdown() {
         }
     }
     s_txds.clear();
+}
+
+double IfpAnim_SeqTimeFrac(int idx, int count) {
+    if (count <= 1) {
+        return 0.0;
+    }
+    if (idx < 0) {
+        idx = 0;
+    }
+    if (idx >= count) {
+        idx = count - 1;
+    }
+    return static_cast<double>(idx) / static_cast<double>(count - 1);
+}
+
+bool IfpAnim_Seq(const char* gameDir, const char* model, const char* animName, int frames,
+                 std::vector<IfpAnimSeqFrame>& out, char* err, std::size_t errSize) {
+    out.clear();
+    if (!gameDir || !gameDir[0]) {
+        SetErr(err, errSize, "no game dir");
+        return false;
+    }
+    if (frames <= 0 || frames > 64) {
+        SetErr(err, errSize, "bad --frames (want 1..64)");
+        return false;
+    }
+    out.reserve(static_cast<size_t>(frames));
+    for (int i = 0; i < frames; ++i) {
+        double tf = IfpAnim_SeqTimeFrac(i, frames);
+        IfpAnimSeqFrame fr;
+        char lerr[256] = {};
+        if (!IfpAnim_Init(gameDir, model, animName, tf, fr.scene, fr.stats, lerr, sizeof(lerr),
+                           true /*interp=lerp+slerp*/)) {
+            SetErr(err, errSize, lerr[0] ? lerr : "seq frame init failed");
+            out.clear();
+            return false;
+        }
+        out.push_back(std::move(fr));
+    }
+    return true;
+}
+
+// Joint-space loop gap from IFP bytes only: samples the named animation at
+// T=0 and T=1 with the same lerp+slerp bracketing as IfpAnim_Init(interp)
+// and averages per-sequence (trans distance in metres + quat angle in
+// radians). Rotation-only sequences contribute angle only (their BonePos
+// cancels); translation-carrying sequences (Root) contribute both. Pure
+// function of the bank bytes; deterministic.
+bool IfpAnim_LoopGap(const char* gameDir, const char* animName, float* gapOut, int* mappedOut,
+                     char* err, std::size_t errSize) {
+    if (!gameDir || !gameDir[0]) {
+        SetErr(err, errSize, "no game dir");
+        return false;
+    }
+    if (!gapOut) {
+        SetErr(err, errSize, "no gap output");
+        return false;
+    }
+    std::string game(gameDir);
+    OS_SetFilePathOffset(game.c_str());
+    s_gameAbs = game;
+    std::vector<uint8> bankBytes;
+    std::string srcLabel;
+    {
+        char lerr[256] = {};
+        if (!LoadBankBytes(gameDir, "ped", bankBytes, srcLabel, lerr, sizeof(lerr))) {
+            SetErr(err, errSize, lerr);
+            return false;
+        }
+    }
+    std::string bankName;
+    std::vector<IfpAnimData> bank;
+    if (!ParseIfpBank(bankBytes, bankName, bank, err, errSize)) {
+        return false;
+    }
+    std::string want = animName && animName[0] ? animName : "WALK_civi";
+    std::string wantLower = ToLowerCopy(want.c_str());
+    const IfpAnimData* anim = nil;
+    for (const auto& a : bank) {
+        if (ToLowerCopy(a.name) == wantLower) {
+            anim = &a;
+            break;
+        }
+    }
+    if (!anim) {
+        char msg[192];
+        (void)std::snprintf(msg, sizeof(msg), "animation '%s' not in ped bank (%d anims)", want.c_str(),
+                             static_cast<int>(bank.size()));
+        SetErr(err, errSize, msg);
+        return false;
+    }
+    auto sampleAt = [&](double tAbs, std::vector<std::array<float, 4>>& qs,
+                        std::vector<std::array<float, 3>>& ps, std::vector<char>& hasT) {
+        qs.resize(anim->seqs.size());
+        ps.resize(anim->seqs.size());
+        hasT.resize(anim->seqs.size());
+        for (std::size_t s = 0; s < anim->seqs.size(); ++s) {
+            const IfpSeq& sq = anim->seqs[s];
+            float tq = static_cast<float>(tAbs);
+            if (sq.frames.empty()) {
+                qs[s] = { 0.0f, 0.0f, 0.0f, 1.0f };
+                ps[s] = { 0.0f, 0.0f, 0.0f };
+                hasT[s] = 0;
+                continue;
+            }
+            if (sq.frames.size() == 1) {
+                float nq[4] = { sq.frames[0].q[0], sq.frames[0].q[1], sq.frames[0].q[2],
+                                sq.frames[0].q[3] };
+                NormQuat4(nq);
+                qs[s] = { nq[0], nq[1], nq[2], nq[3] };
+                ps[s] = { sq.frames[0].t[0], sq.frames[0].t[1], sq.frames[0].t[2] };
+                hasT[s] = sq.frames[0].hasT ? 1 : 0;
+                continue;
+            }
+            std::size_t k0 = 0;
+            std::size_t k1 = 0;
+            float alpha = 0.0f;
+            if (tq <= sq.frames.front().absTime) {
+                k0 = k1 = 0;
+            } else if (tq >= sq.frames.back().absTime) {
+                k0 = k1 = sq.frames.size() - 1;
+            } else {
+                for (std::size_t k = 0; k + 1 < sq.frames.size(); ++k) {
+                    float a = sq.frames[k].absTime;
+                    float b = sq.frames[k + 1].absTime;
+                    if (a <= tq && tq <= b) {
+                        k0 = k;
+                        k1 = k + 1;
+                        alpha = (b > a) ? (tq - a) / (b - a) : 0.0f;
+                        break;
+                    }
+                }
+            }
+            const IfpFrame& f0 = sq.frames[k0];
+            const IfpFrame& f1 = sq.frames[k1];
+            float n0[4] = { f0.q[0], f0.q[1], f0.q[2], f0.q[3] };
+            float n1[4] = { f1.q[0], f1.q[1], f1.q[2], f1.q[3] };
+            NormQuat4(n0);
+            NormQuat4(n1);
+            float qi[4];
+            if (k0 == k1 || alpha == 0.0f) {
+                qi[0] = n0[0];
+                qi[1] = n0[1];
+                qi[2] = n0[2];
+                qi[3] = n0[3];
+            } else {
+                SlerpQuat(n0, n1, alpha, qi);
+            }
+            NormQuat4(qi);
+            qs[s] = { qi[0], qi[1], qi[2], qi[3] };
+            bool ht = f0.hasT || f1.hasT;
+            hasT[s] = ht ? 1 : 0;
+            if (ht) {
+                ps[s] = { f0.t[0] + alpha * (f1.t[0] - f0.t[0]),
+                          f0.t[1] + alpha * (f1.t[1] - f0.t[1]),
+                          f0.t[2] + alpha * (f1.t[2] - f0.t[2]) };
+            } else {
+                ps[s] = { 0.0f, 0.0f, 0.0f };
+            }
+        }
+    };
+    std::vector<std::array<float, 4>> q0;
+    std::vector<std::array<float, 3>> p0;
+    std::vector<char> h0;
+    std::vector<std::array<float, 4>> q1;
+    std::vector<std::array<float, 3>> p1;
+    std::vector<char> h1;
+    sampleAt(0.0, q0, p0, h0);
+    sampleAt(anim->total, q1, p1, h1);
+    double acc = 0.0;
+    int n = 0;
+    for (std::size_t s = 0; s < anim->seqs.size(); ++s) {
+        if (anim->seqs[s].frames.empty()) {
+            continue;
+        }
+        float a[4] = { q0[s][0], q0[s][1], q0[s][2], q0[s][3] };
+        float b[4] = { q1[s][0], q1[s][1], q1[s][2], q1[s][3] };
+        float ang = QuatAngle(a, b);
+        double td = 0.0;
+        if (h0[s] || h1[s]) {
+            double dx = static_cast<double>(p1[s][0]) - p0[s][0];
+            double dy = static_cast<double>(p1[s][1]) - p0[s][1];
+            double dz = static_cast<double>(p1[s][2]) - p0[s][2];
+            td = std::sqrt(dx * dx + dy * dy + dz * dz);
+        }
+        acc += td + static_cast<double>(ang);
+        ++n;
+    }
+    if (n <= 0) {
+        SetErr(err, errSize, "no sequences for loop gap");
+        return false;
+    }
+    *gapOut = static_cast<float>(acc / n);
+    if (mappedOut) {
+        *mappedOut = n;
+    }
+    return true;
 }

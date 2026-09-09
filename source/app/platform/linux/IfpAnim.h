@@ -75,12 +75,57 @@ struct IfpAnimStats {
     int boneHasTrans = 0;
     int boneFrame = 0; // sampled keyframe index within its sequence
     int boneFrames = 0; // sequence length
+    float rootWorld[3]; // world pos of the tag-0 bone at the sampled time
+    // Keyaudit for the interpolation round (R6k): ONE bone sampled with
+    // lerp (trans) + slerp (quat) between its two bracketing IFP keys.
+    // k0==k1 && alpha==0 means the sample landed exactly on a key (or the
+    // sequence has a single key); a fractional alpha proves real interp.
+    char keyBone[40];
+    int keyTag = -9999;
+    int keyK0 = -1;
+    int keyK1 = -1;
+    float keyT0 = 0.0f;
+    float keyT1 = 0.0f;
+    float keyAlpha = 0.0f;
+    float keyTimeAbs = 0.0f;
+    float keyQ0[4];
+    float keyQ1[4];
+    float keyQI[4]; // interpolated quat (slerp, normalised)
+    float keyP0[3];
+    float keyP1[3];
+    float keyPI[3]; // interpolated trans (lerp)
+    int keyHasT = 0;
+    int interp = 0; // 1 when this sample used lerp+slerp between keys
 };
 
-// Loads + poses. On failure returns false with message in err.
+// Loads + poses. When interp is false the sample is the legacy single key
+// (first key with absTime >= T_abs, R6j behaviour, etalon-preserving); when
+// true, every sequence is sampled with lerp (trans) + slerp (quat) between
+// its two bracketing IFP keys (R6k walk-cycle interpolation). keyaudit and
+// rootWorld are filled in both modes (alpha==0 without interp).
 bool IfpAnim_Init(const char* gameDir, const char* model, const char* animName, double timeFrac,
-                  WorldShotScene& scene, IfpAnimStats& stats, char* err, std::size_t errSize);
+                  WorldShotScene& scene, IfpAnimStats& stats, char* err, std::size_t errSize,
+                  bool interp = false);
 // Lists bank animation names (for --list-anims). Names are stored-case.
 bool IfpAnim_List(const char* gameDir, std::vector<std::string>& names, char* bankSrcOut,
                   std::size_t bankSrcSize, char* err, std::size_t errSize);
+// R6k sequencer (walk-cycle interpolation): K evenly spaced fractional
+// times across the clip, inclusive endpoints T_i = i/(K-1) (K<=1 gives 0).
+// IfpAnim_SeqTimeFrac is the schedule (pure function, no assets); IfpAnim_Seq
+// poses every frame with lerp+slerp (interp=true) and returns one scene per
+// frame; IfpAnim_LoopGap is the honest joint-space loop-closure metric:
+// mean over mapped sequences of (local trans distance + quat angle in
+// radians) between the T=0 and T=1 interpolated poses, from IFP bytes only
+// (BonePos cancels for rotation-only seqs, so only IFP-carried translation
+// such as Root travel contributes). Root travel itself is NOT averaged: it
+// is reported separately as rootTravel (world distance of the tag-0 bone).
+double IfpAnim_SeqTimeFrac(int idx, int count);
+struct IfpAnimSeqFrame {
+    WorldShotScene scene;
+    IfpAnimStats stats;
+};
+bool IfpAnim_Seq(const char* gameDir, const char* model, const char* animName, int frames,
+                 std::vector<IfpAnimSeqFrame>& out, char* err, std::size_t errSize);
+bool IfpAnim_LoopGap(const char* gameDir, const char* animName, float* gapOut, int* mappedOut,
+                     char* err, std::size_t errSize);
 void IfpAnim_Shutdown();
