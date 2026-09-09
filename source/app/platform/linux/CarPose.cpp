@@ -940,6 +940,7 @@ bool CarPose_Init(const char* gameDir, const char* model, double steerDeg, doubl
     std::array<int, 4> paintIndices{};
     const bool hasPaint = LoadPaint(wantLower, paint, paintIndices);
     std::map<const rw::Texture*, int> imgCache;
+    std::vector<bool> imageAlpha;
     auto emitTris = [&](rw::Geometry* geo, const rw::Matrix& m, int& meshTris, bool& ok) {
         ok = true;
         const int numVerts = geo->numVertices;
@@ -984,6 +985,11 @@ bool CarPose_Init(const char* gameDir, const char* model, double steerDeg, doubl
                             TexImage decoded;
                             if (TexSample_Decode(real, decoded)) {
                                 decoded.filter = rit->second.filter;
+                                bool alpha = false;
+                                for (size_t p = 3; p < decoded.rgba.size(); p += 4) {
+                                    alpha |= decoded.rgba[p] != 255;
+                                }
+                                imageAlpha.push_back(alpha);
                                 imgIdx = static_cast<int>(scene.images.size());
                                 scene.images.push_back(std::move(decoded));
                                 imgCache[real] = imgIdx;
@@ -1029,6 +1035,14 @@ bool CarPose_Init(const char* gameDir, const char* model, double steerDeg, doubl
                     lit ? rw::RGBA{0, 0, 0, 255} : rw::RGBA{255, 255, 255, 255};
                 const uint8 rgba[]{day.red, day.green, day.blue, day.alpha};
                 mesh.dayColors.insert(mesh.dayColors.end(), rgba, rgba + 4);
+                // CustomCarEnvMapPipeline::CustomPipeRenderCB enables vertex
+                // alpha for mesh vertexAlpha || material alpha != 255; RW also
+                // enables blending for alpha rasters. Keep this GPU-only and
+                // scoped to realtime cars, not world foliage or offline scenes.
+                if (textures == CarPoseTextures::RealtimeVehicle) {
+                    mesh.surfaces.back().vehicleAlpha |= surface.color[3] != 1.0f ||
+                        day.alpha != 255 || (imgIdx >= 0 && imageAlpha[imgIdx]);
+                }
                 mesh.pos.push_back(pp[kk]->x);
                 mesh.pos.push_back(pp[kk]->y);
                 mesh.pos.push_back(pp[kk]->z);

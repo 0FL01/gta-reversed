@@ -204,6 +204,55 @@ struct GpuScene {
         }
     }
 
+    enum class ActorPass { All, Opaque, Alpha };
+
+    // CRenderer::RenderOneNonRoad renders the opaque vehicle first, then
+    // CVisibilityPlugins::RenderAlphaAtomics; CustomCarEnvMapPipeline enables
+    // source-alpha blending per material. The native flattened scene has no
+    // visibility-plugin component flags: use stable eye-depth triangle order,
+    // not the original atomic distance/dot-product heuristic. This is a bounded
+    // transparency slice, not that heuristic or the env/specular pipeline.
+    void DrawActors(const WorldShotScene& scene, ActorPass pass = ActorPass::All) const {
+        assert(owner == std::this_thread::get_id());
+        struct AlphaTriangle { size_t mesh; int triangle; float depth; };
+        std::vector<AlphaTriangle> alpha;
+        GLfloat view[16];
+        glGetFloatv(GL_MODELVIEW_MATRIX, view);
+        glPushAttrib(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_ENABLE_BIT);
+        glEnable(GL_DEPTH_TEST);
+        glDepthMask(GL_TRUE);
+        glDisable(GL_BLEND);
+        for (size_t m = 0; m < scene.meshes.size(); ++m) {
+            const auto& mesh = scene.meshes[m];
+            const bool hasSurfaces = mesh.surfaces.size() == static_cast<size_t>(mesh.tris);
+            int begin = 0;
+            for (int t = 0; t <= mesh.tris; ++t) {
+                const bool blend = t < mesh.tris && hasSurfaces && mesh.surfaces[t].vehicleAlpha;
+                if (t == mesh.tris || blend) {
+                    if (pass != ActorPass::Alpha && t > begin) Draw(scene, m, begin, t - begin);
+                    begin = t + 1;
+                }
+                if (!blend || pass == ActorPass::Opaque) continue;
+                float depth = 0.0f;
+                for (int k = 0; k < 3; ++k) {
+                    const auto* p = &mesh.pos[t * 9 + k * 3];
+                    depth -= view[2] * p[0] + view[6] * p[1] + view[10] * p[2] + view[14];
+                }
+                alpha.push_back({m, t, depth / 3.0f});
+            }
+        }
+        std::stable_sort(alpha.begin(), alpha.end(), [](const auto& a, const auto& b) { return a.depth > b.depth; });
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        // RenderAlphaAtomics does not disable ZWRITE. Keep testing/writing depth
+        // as upstream, drawing far-to-near. Reject zero-alpha texels so holes
+        // never occlude later geometry; do not inherit the world's cutout ref.
+        glEnable(GL_ALPHA_TEST);
+        glAlphaFunc(GL_GREATER, 0.0f);
+        for (const auto& triangle : alpha) Draw(scene, triangle.mesh, triangle.triangle, 1);
+        glPopAttrib();
+    }
+
     // Dynamic actors retain textures; only posed vertices change each tick.
     void Draw(const WorldShotScene& scene, size_t firstMesh = 0, int firstTriangle = 0,
               int remaining = std::numeric_limits<int>::max()) const {
@@ -681,10 +730,15 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
         environment.EndWorld();
         if (gameplayEnabled) {
             environment.BeginObjects();
-            actorGpu.Draw(gameplay.Actors());
+            actorGpu.DrawActors(gameplay.Actors(), GpuScene::ActorPass::Opaque);
             environment.EndWorld();
         }
         environment.DrawWater();
+        if (gameplayEnabled) {
+            environment.BeginObjects();
+            actorGpu.DrawActors(gameplay.Actors(), GpuScene::ActorPass::Alpha);
+            environment.EndWorld();
+        }
         RealtimeHudView hudView;
         hudView.cameraYaw = camera.yaw;
         hudView.radar = gameplayEnabled;
