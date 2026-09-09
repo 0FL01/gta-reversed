@@ -111,8 +111,17 @@ void TexSample_RenderOrbitTC(const WorldShotScene& scene, int width, int height,
                              const float* eyeOverrideOrNull, const TexTimeEnv& env,
                              std::vector<uint8_t>& outRGBA, TexFrameStats& stats);
 void TexSample_RenderPath(const WorldShotScene& scene, int width, int height, const float eye[3],
-                          const float target[3], std::vector<uint8_t>& outRGBA,
-                          TexFrameStats& stats);
+                           const float target[3], std::vector<uint8_t>& outRGBA,
+                           TexFrameStats& stats);
+
+// Round 55 (R6ba): Path render with a timecyc env (same scene --hour path).
+// Identical to TexSample_RenderPath except the background is the vertical
+// SkyBot->SkyTop gradient and per-channel light is ambient+sun*NdotL from
+// the timecyc row bytes (fog off). TexSample_RenderPath above keeps the
+// legacy look bit-for-bit (null env).
+void TexSample_RenderPathTC(const WorldShotScene& scene, int width, int height, const float eye[3],
+                            const float target[3], const TexTimeEnv& env,
+                            std::vector<uint8_t>& outRGBA, TexFrameStats& stats);
 
 // Duo render (R6t, round 22): ONE shared-depth CPU frame over a merged
 // car+ped scene. The first `carMeshes` meshes belong to the car (actor 0),

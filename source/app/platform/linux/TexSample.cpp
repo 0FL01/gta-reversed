@@ -1001,6 +1001,23 @@ void TexSample_RenderPath(const WorldShotScene& scene, int width, int height, co
     RenderScene(scene, width, height, mvp, false, 0.0f, origin, nullptr, outRGBA, stats);
 }
 
+void TexSample_RenderPathTC(const WorldShotScene& scene, int width, int height, const float eye[3],
+                            const float target[3], const TexTimeEnv& env,
+                            std::vector<uint8_t>& outRGBA, TexFrameStats& stats) {
+    float aspect = static_cast<float>(width) / static_cast<float>(height);
+    const float nearPlane = 1.0f;
+    const float farPlane = 6000.0f;
+    const float halfH = nearPlane * 0.57735027f; // tan(30deg)
+    float proj[16];
+    BuildFrustum(-halfH * aspect, halfH * aspect, -halfH, halfH, nearPlane, farPlane, proj);
+    float view[16];
+    BuildView(eye, target, view);
+    float mvp[16];
+    Mul44(proj, view, mvp);
+    float origin[3] = { 0.0f, 0.0f, 0.0f };
+    RenderScene(scene, width, height, mvp, false, 0.0f, origin, &env, outRGBA, stats);
+}
+
 // --- Duo render (R6t): shared-depth car+ped frame with actor accounting ---
 // Duplicates the legacy shading math exactly (same light, same background,
 // same wrap/alpha/depth rules); the ONLY additions are the per-pixel
