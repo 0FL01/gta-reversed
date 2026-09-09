@@ -212,6 +212,211 @@ bool DriveSim_Sample(const std::vector<std::pair<double, double>>& ctrl, int way
     return true;
 }
 
+// R6p handling-mode integrator (see DriveSim.h). Fractional last step hits
+// L exactly via the quadratic (accel/2)*h^2 + v*h - rem = 0 when the ramp
+// does not clamp inside the step, else h = rem/((v+VMAX)/2).
+bool DriveSim_SampleHandling(const std::vector<std::pair<double, double>>& ctrl, int waypoints,
+                             double wheelbase, double wheelR, double vmaxMs, double accelSi,
+                             double dt, std::vector<DriveWaypoint>& out,
+                             std::vector<DriveSimTrace>& traceOut, double& totalTimeOut, char* err,
+                             std::size_t errSize) {
+    out.clear();
+    traceOut.clear();
+    totalTimeOut = 0.0;
+    auto fail = [&](const char* m) {
+        if (err && errSize) {
+            (void)std::snprintf(err, errSize, "%s", m);
+        }
+        return false;
+    };
+    if (ctrl.size() < 2) {
+        return fail("need >= 2 control points");
+    }
+    if (waypoints < 1 || waypoints > 64) {
+        return fail("waypoints out of range 1..64");
+    }
+    if (!(wheelbase > 0.0 && wheelR > 0.0)) {
+        return fail("bad wheelbase/wheelR");
+    }
+    if (!(vmaxMs > 0.0 && accelSi > 0.0 && dt > 0.0)) {
+        return fail("bad vmax/accel/dt");
+    }
+    const size_t p = ctrl.size();
+    std::vector<double> cum(p, 0.0);
+    for (size_t i = 1; i < p; ++i) {
+        double dx = ctrl[i].first - ctrl[i - 1].first;
+        double dy = ctrl[i].second - ctrl[i - 1].second;
+        cum[i] = cum[i - 1] + std::sqrt(dx * dx + dy * dy);
+    }
+    double total = cum.back();
+    if (!(total > 1e-6)) {
+        return fail("degenerate zero-length path");
+    }
+    std::vector<double> segYaw;
+    segYaw.reserve(p > 0 ? p - 1 : 0);
+    for (size_t i = 0; i + 1 < p; ++i) {
+        double dx = ctrl[i + 1].first - ctrl[i].first;
+        double dy = ctrl[i + 1].second - ctrl[i].second;
+        if (dx == 0.0 && dy == 0.0) {
+            return fail("duplicate control points");
+        }
+        segYaw.push_back(std::atan2(dy, dx));
+    }
+    // Fixed-step launch from rest.
+    std::vector<DriveSimTrace> tr;
+    tr.reserve(4096);
+    tr.push_back(DriveSimTrace{ 0.0, 0.0, 0.0 });
+    double v = 0.0, s = 0.0, t = 0.0;
+    const int kMaxSteps = 100000;
+    for (int step = 0; step < kMaxSteps; ++step) {
+        if (s >= total) {
+            break;
+        }
+        double vFull = v + accelSi * dt;
+        if (vFull > vmaxMs) {
+            vFull = vmaxMs;
+        }
+        double sFull = s + (v + vFull) * 0.5 * dt;
+        if (sFull >= total) {
+            double rem = total - s;
+            double tToVmax = (v < vmaxMs) ? (vmaxMs - v) / accelSi : 0.0;
+            double h = dt;
+            double vEnd = vFull;
+            // Try unclamped quadratic.
+            bool useUnclamped = false;
+            if (tToVmax >= dt) {
+                double disc = v * v + 2.0 * accelSi * rem;
+                if (disc >= 0.0) {
+                    double hq = (-v + std::sqrt(disc)) / accelSi;
+                    if (hq > 0.0 && hq <= dt) {
+                        h = hq;
+                        vEnd = v + accelSi * h;
+                        useUnclamped = true;
+                    }
+                }
+            }
+            if (!useUnclamped) {
+                // Clamped (or already at VMAX): constant-mean-velocity step.
+                double vMean = (v + vmaxMs) * 0.5;
+                if (!(vMean > 1e-9)) {
+                    return fail("cannot reach path end at rest");
+                }
+                h = rem / vMean;
+                if (!(h > 0.0) || h > dt) {
+                    h = dt;
+                }
+                vEnd = (v + accelSi * h >= vmaxMs) ? vmaxMs : v + accelSi * h;
+                // Recompute s exactly for this h (guard rounding).
+                double sCheck = s + (v + vEnd) * 0.5 * h;
+                if (std::fabs(sCheck - total) > 1e-6 && vEnd >= vmaxMs - 1e-9) {
+                    // Clamp-consistent: adjust h once more to hit L.
+                    h = rem / ((v + vEnd) * 0.5);
+                    vEnd = (v + accelSi * h >= vmaxMs) ? vmaxMs : v + accelSi * h;
+                }
+            }
+            t += h;
+            v = vEnd;
+            s = total;
+            tr.push_back(DriveSimTrace{ t, v, s });
+            break;
+        }
+        t += dt;
+        v = vFull;
+        s = sFull;
+        tr.push_back(DriveSimTrace{ t, v, s });
+        if (s >= total) {
+            break;
+        }
+    }
+    if (!(s >= total - 1e-9)) {
+        return fail("sim did not reach path end");
+    }
+    double T = tr.back().t;
+    totalTimeOut = T;
+    traceOut = tr;
+    // Uniform-in-time waypoints -> arc positions s(t_j).
+    out.reserve(static_cast<size_t>(waypoints));
+    size_t k = 0;
+    for (int j = 0; j < waypoints; ++j) {
+        double tj = (waypoints == 1) ? 0.0 : T * static_cast<double>(j) / (waypoints - 1);
+        if (tj < 0.0) {
+            tj = 0.0;
+        }
+        if (tj > T) {
+            tj = T;
+        }
+        while (k + 1 < tr.size() - 1 && tr[k + 1].t < tj) {
+            ++k;
+        }
+        if (k >= tr.size() - 1) {
+            k = tr.size() - 2;
+        }
+        double t0 = tr[k].t, v0 = tr[k].v, s0 = tr[k].s;
+        double t1 = tr[k + 1].t, v1 = tr[k + 1].v, s1 = tr[k + 1].s;
+        double span = t1 - t0;
+        double aEff = (span > 1e-12) ? (v1 - v0) / span : 0.0;
+        double d = tj - t0;
+        if (d < 0.0) {
+            d = 0.0;
+        }
+        if (d > span) {
+            d = span;
+        }
+        double vj = v0 + aEff * d;
+        double sj = s0 + v0 * d + 0.5 * aEff * d * d;
+        if (j == 0) {
+            vj = 0.0;
+            sj = 0.0;
+            tj = 0.0;
+        }
+        if (j == waypoints - 1) {
+            vj = tr.back().v;
+            sj = total;
+            tj = T;
+        }
+        // Arc-length lookup of sj on the control polyline.
+        size_t seg = 0;
+        while (seg + 1 < cum.size() - 1 && cum[seg + 1] < sj) {
+            ++seg;
+        }
+        if (seg >= segYaw.size()) {
+            seg = segYaw.size() - 1;
+        }
+        double c0 = cum[seg];
+        double c1 = cum[seg + 1];
+        double f = (c1 > c0) ? (sj - c0) / (c1 - c0) : 0.0;
+        if (f < 0.0) {
+            f = 0.0;
+        }
+        if (f > 1.0) {
+            f = 1.0;
+        }
+        DriveWaypoint w;
+        w.x = ctrl[seg].first + (ctrl[seg + 1].first - ctrl[seg].first) * f;
+        w.y = ctrl[seg].second + (ctrl[seg + 1].second - ctrl[seg].second) * f;
+        w.dist = sj;
+        double yaw = segYaw[seg];
+        w.yawPath = yaw;
+        w.yawBody = yaw - kPi * 0.5;
+        double steer = 0.0;
+        if (j > 0) {
+            double dyaw = WrapPi(w.yawPath - out[static_cast<size_t>(j - 1)].yawPath);
+            double ds = w.dist - out[static_cast<size_t>(j - 1)].dist;
+            if (ds > 1e-9) {
+                steer = std::atan(wheelbase * dyaw / ds);
+            }
+        }
+        w.steerDeg = steer * 180.0 / kPi;
+        w.spinRad = w.dist / wheelR;
+        w.spinDeg = w.spinRad * 180.0 / kPi;
+        w.vel = vj;
+        w.time = tj;
+        (void)s1;
+        out.push_back(w);
+    }
+    return true;
+}
+
 double DriveSim_MaxTurnDeg(const std::vector<std::pair<double, double>>& ctrl) {
     if (ctrl.size() < 3) {
         return 0.0;

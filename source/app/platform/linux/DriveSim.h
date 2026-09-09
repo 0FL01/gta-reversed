@@ -44,6 +44,15 @@ struct DriveWaypoint {
     double spinRad = 0.0; // cumulative wheel spin, radians
     double spinDeg = 0.0; // same, degrees (for CarPose)
     double dist = 0.0; // cumulative XY distance, meters
+    double vel = 0.0; // R6p handling mode: sim speed at this waypoint, m/s
+    double time = 0.0; // R6p handling mode: sim time at this waypoint, s
+};
+
+// R6p handling-mode sim trace sample (fixed dt=1/30 integration).
+struct DriveSimTrace {
+    double t = 0.0; // sim time, s
+    double v = 0.0; // speed, m/s
+    double s = 0.0; // arc position, m
 };
 
 // DFF-derived measurement (wheelR/wheelbase/clearance). False => err.
@@ -80,6 +89,24 @@ bool DriveSim_Sample(const std::vector<std::pair<double, double>>& ctrl, int way
 
 // Max turn angle (degrees) over the control polyline (for the >= 20 deg gate).
 double DriveSim_MaxTurnDeg(const std::vector<std::pair<double, double>>& ctrl);
+
+// R6p handling-mode sample: constant-acceleration launch from rest along
+// the same control polyline, integrated at fixed dt (1/30):
+//   v(t+dt) = min(v(t) + A*dt, VMAX), v(0) = 0,
+//   s(t) = integral of v (trapezoid per step, exact for the linear ramp).
+// The sim runs until s reaches the geometric path length L (last step
+// shortened fractionally to hit L exactly), total time T = trace.back().t.
+// Waypoints are uniform in TIME (t_j = T*j/(W-1)) mapped back to arc
+// positions s(t_j) — NOT uniform in distance, so the launch shows as
+// v0=0.00 -> v1 -> v2 with short first legs. spin = s/wheelR (same honest
+// link as the kinematic mode). vel/time are filled; groundH/carZ left for
+// the caller (COL probe). trace holds every dt step (for driveok-sim and
+// speedIntegralCheck). Returns false on degenerate input.
+bool DriveSim_SampleHandling(const std::vector<std::pair<double, double>>& ctrl, int waypoints,
+                             double wheelbase, double wheelR, double vmaxMs, double accelSi,
+                             double dt, std::vector<DriveWaypoint>& out,
+                             std::vector<DriveSimTrace>& traceOut, double& totalTimeOut, char* err,
+                             std::size_t errSize);
 
 // Merge: world soup + car soup transformed by (carX,carY,carZ,yawBodyRad).
 // Car images are appended with re-indexed triImg. Deterministic order
