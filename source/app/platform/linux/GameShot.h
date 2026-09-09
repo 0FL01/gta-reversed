@@ -160,6 +160,18 @@ constexpr int kZoneLabelCellH = 40;
 bool GameShot_ApplyZoneLabel(const char* gameDir, std::vector<uint8_t>& gamePixels,
                              ZoneLabelStats& out, char* err, std::size_t errSize);
 
+// Round 51 (R6aw): waypoint-parameterized variant for the drive-hud path.
+// Identical to GameShot_ApplyZoneLabel except the zone lookup uses the
+// caller-supplied world XY (e.g. the car XY of a drive waypoint) instead of
+// the fixed pier center. Same smallest-zone rule (ZoneInfo_FindSmallest),
+// same GXT MAIN display string, same fixed game-layout zonePos=320,360
+// cellH=40 font2 centered blit (white ink + black shadow, integer math).
+// No hardcoded district string anywhere on this path. Without this call the
+// frame stays bit-identical.
+bool GameShot_ApplyZoneLabelAt(const char* gameDir, std::vector<uint8_t>& gamePixels, double x,
+                               double y, ZoneLabelStats& out, char* err,
+                               std::size_t errSize);
+
 // Round 37 (R6ai): wanted stars over the game frame (--wanted N).
 // There is NO star sprite in any shipped TXD: models/hud.txd holds 69
 // textures (radardisc/skipicon/siterocket/siteM16/radarRingPlane/fist/arrow +

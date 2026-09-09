@@ -209,6 +209,11 @@ void GameShot_Shutdown() {
 
 bool GameShot_ApplyZoneLabel(const char* gameDir, std::vector<uint8_t>& gamePixels,
                              ZoneLabelStats& out, char* err, std::size_t errSize) {
+    return GameShot_ApplyZoneLabelAt(gameDir, gamePixels, kPierX, kPierY, out, err, errSize);
+}
+
+bool GameShot_ApplyZoneLabelAt(const char* gameDir, std::vector<uint8_t>& gamePixels, double x,
+                               double y, ZoneLabelStats& out, char* err, std::size_t errSize) {
     out = ZoneLabelStats{};
     if (!gameDir || !gameDir[0]) {
         SetErr(err, errSize, "no game dir");
@@ -229,7 +234,7 @@ bool GameShot_ApplyZoneLabel(const char* gameDir, std::vector<uint8_t>& gamePixe
             return false;
         }
     }
-    const int best = ZoneInfo_FindSmallest(zones, kPierX, kPierY);
+    const int best = ZoneInfo_FindSmallest(zones, x, y);
     if (best < 0) {
         SetErr(err, errSize, "no zone at frame center");
         return false;
