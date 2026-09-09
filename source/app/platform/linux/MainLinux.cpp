@@ -1590,6 +1590,12 @@ int RunShotGame(int argc, char** argv) {
     ZoneLabelStats zoneStats{};
     WantedStats wantedStats{};
     MoneyStats moneyStats{};
+    // R6ak (round 39): per-stage snapshots isolating each overlay's
+    // changed-pixel mask (applied order wanted->money->zone, same as below;
+    // an absent overlay leaves its mask empty).
+    std::vector<uint8> snapPre = gamePixels;
+    std::vector<uint8> snapPostWanted;
+    std::vector<uint8> snapPostMoney;
     if (wanted >= 0) {
         char werr[1024] = {};
         if (!GameShot_ApplyWanted(gameDir.c_str(), gamePixels, wanted, wantedStats, werr,
@@ -1606,6 +1612,7 @@ int RunShotGame(int argc, char** argv) {
         (void)std::printf("wanted stars=%d starPixels=%ld\n", wantedStats.wanted,
                           wantedStats.starPixels);
     }
+    snapPostWanted = gamePixels;
     if (hasMoney) {
         char merr[1024] = {};
         if (!GameShot_ApplyMoney(gameDir.c_str(), gamePixels, money, moneyStats, merr,
@@ -1623,6 +1630,7 @@ int RunShotGame(int argc, char** argv) {
         (void)std::printf("moneyColor=%d,%d,%d spec=HudColours(GREEN ge0/RED lt0)\n",
                           moneyStats.inkR, moneyStats.inkG, moneyStats.inkB);
     }
+    snapPostMoney = gamePixels;
     if (showZone) {
         char zerr[1024] = {};
         if (!GameShot_ApplyZoneLabel(gameDir.c_str(), gamePixels, zoneStats, zerr,
@@ -1639,6 +1647,49 @@ int RunShotGame(int argc, char** argv) {
                           zoneStats.cellH, zoneStats.inkDrawn);
         (void)std::printf("zone-ok x=836 y=-1866 key=%s text=\"%s\" level=%d\n",
                           zoneStats.key, zoneStats.text, zoneStats.level);
+    }
+    // R6ak: disjointness gate for the overlay combination. Each mask is the
+    // RGB-diff vs the previous stage (W=snapPostWanted-vs-snapPre,
+    // M=snapPostMoney-vs-snapPostWanted, Z=final-vs-snapPostMoney), so the
+    // three pairwise intersections must all be 0: overlapping overlays would
+    // overwrite each other's texels. Logged (and gated) whenever two or more
+    // overlay flags are present; a single overlay keeps the legacy log.
+    {
+        const int nOverlayFlags =
+            (showZone ? 1 : 0) + (wanted >= 0 ? 1 : 0) + (hasMoney ? 1 : 0);
+        if (nOverlayFlags >= 2) {
+            long overlapWZ = 0, overlapWM = 0, overlapZM = 0;
+            const std::size_t n = gamePixels.size();
+            for (std::size_t i = 0; i + 4 <= n; i += 4) {
+                const bool w = snapPostWanted[i] != snapPre[i] ||
+                               snapPostWanted[i + 1] != snapPre[i + 1] ||
+                               snapPostWanted[i + 2] != snapPre[i + 2];
+                const bool m = snapPostMoney[i] != snapPostWanted[i] ||
+                               snapPostMoney[i + 1] != snapPostWanted[i + 1] ||
+                               snapPostMoney[i + 2] != snapPostWanted[i + 2];
+                const bool z = gamePixels[i] != snapPostMoney[i] ||
+                               gamePixels[i + 1] != snapPostMoney[i + 1] ||
+                               gamePixels[i + 2] != snapPostMoney[i + 2];
+                if (w && m) {
+                    ++overlapWM;
+                }
+                if (w && z) {
+                    ++overlapWZ;
+                }
+                if (m && z) {
+                    ++overlapZM;
+                }
+            }
+            (void)std::printf("overlap overlapWZ=%ld overlapWM=%ld overlapZM=%ld\n",
+                              overlapWZ, overlapWM, overlapZM);
+            if (overlapWZ != 0 || overlapWM != 0 || overlapZM != 0) {
+                (void)std::printf("game-fail overlapping overlays overlapWZ=%ld "
+                                  "overlapWM=%ld overlapZM=%ld\n",
+                                  overlapWZ, overlapWM, overlapZM);
+                GameShot_Shutdown();
+                return 1;
+            }
+        }
     }
     uint64_t checksum = PixelsChecksum(gamePixels, gR, gG, gB, gN);
     if (hasMoney && moneyStats.moneyPixels <= 200) {
