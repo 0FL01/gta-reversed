@@ -43,13 +43,15 @@ std::string TrimRight(const std::string& s) {
     return s.substr(0, e);
 }
 
-// Parses one water.dat data line: 3-4 vertices of 7 floats each
+// Parses one water data line: 3-4 vertices of 7 floats each
 // (x y z flowX flowY bigWaves smallWaves, the game's ReadNextVertex order)
 // plus an optional trailing flag. Mirrors the game's stream logic: a
 // vertex either parses fully or the scan stops before it; fewer than 3
-// vertices means the line is skipped.
-bool ParseWaterLine(const char* line, WaterPoly& poly) {
+// vertices means the line is skipped. hasFlag reports whether a trailing
+// flag token was present (water.dat: always; water1.dat: never).
+bool ParseWaterLine(const char* line, WaterPoly& poly, bool& hasFlag) {
     poly = WaterPoly{};
+    hasFlag = false;
     const char* p = line;
     float verts[4][7];
     int nverts = 0;
@@ -96,11 +98,13 @@ bool ParseWaterLine(const char* line, WaterPoly& poly) {
             const unsigned long f = std::strtoul(q, &end, 10);
             if (end != q) {
                 flags = static_cast<uint32_t>(f);
+                hasFlag = true;
             }
         }
     }
     poly.nverts = nverts;
     poly.flags = flags;
+    poly.hasFlag = hasFlag;
     for (int i = 0; i < nverts; ++i) {
         poly.v[i].x = verts[i][0];
         poly.v[i].y = verts[i][1];
@@ -111,30 +115,45 @@ bool ParseWaterLine(const char* line, WaterPoly& poly) {
 
 } // namespace
 
-bool WaterLevel_Load(const char* gameDir, WaterLevelData& out, char* err, std::size_t errSize) {
+bool WaterLevel_Load(const char* gameDir, const char* waterFile, WaterLevelData& out,
+                       char* err, std::size_t errSize) {
     out = WaterLevelData{};
     if (!gameDir || !gameDir[0]) {
         SetErr(err, errSize, "no game dir");
         return false;
     }
+    // Only the two shipped water files are allowed (no path traversal:
+    // the value is matched exactly, never concatenated from user input).
+    const bool isWater1 = waterFile && std::strcmp(waterFile, "data/water1.dat") == 0;
+    const bool isWater = waterFile && std::strcmp(waterFile, "data/water.dat") == 0;
+    if (!isWater && !isWater1) {
+        SetErr(err, errSize, "bad water file (want data/water.dat|data/water1.dat)");
+        return false;
+    }
     OS_SetFilePathOffset(gameDir);
     void* file = nullptr;
-    if (OS_FileOpen(FILE_DATA_AREA_DEFAULT, &file, "data/water.dat", FILE_ACCESS_READ) != 0 ||
+    if (OS_FileOpen(FILE_DATA_AREA_DEFAULT, &file, waterFile, FILE_ACCESS_READ) != 0 ||
         !file) {
-        SetErr(err, errSize, "cannot open data/water.dat");
+        char msg[128] = {};
+        (void)std::snprintf(msg, sizeof(msg), "cannot open %s", waterFile);
+        SetErr(err, errSize, msg);
         return false;
     }
     int32 size = OS_FileSize(file);
     if (size <= 0) {
         OS_FileClose(file);
-        SetErr(err, errSize, "empty data/water.dat");
+        char msg[128] = {};
+        (void)std::snprintf(msg, sizeof(msg), "empty %s", waterFile);
+        SetErr(err, errSize, msg);
         return false;
     }
     std::vector<char> buf(static_cast<size_t>(size));
     int32 rc = OS_FileRead(file, buf.data(), size);
     OS_FileClose(file);
     if (rc != 0) {
-        SetErr(err, errSize, "cannot read data/water.dat");
+        char msg[128] = {};
+        (void)std::snprintf(msg, sizeof(msg), "cannot read %s", waterFile);
+        SetErr(err, errSize, msg);
         return false;
     }
     std::vector<std::string> lines;
@@ -150,9 +169,12 @@ bool WaterLevel_Load(const char* gameDir, WaterLevelData& out, char* err, std::s
         }
     }
     if (lines.empty() || TrimRight(lines[0]) != "processed") {
-        SetErr(err, errSize, "data/water.dat missing 'processed' header");
+        char msg[128] = {};
+        (void)std::snprintf(msg, sizeof(msg), "%s missing 'processed' header", waterFile);
+        SetErr(err, errSize, msg);
         return false;
     }
+    (void)std::snprintf(out.file, sizeof(out.file), "%s", waterFile);
     bool haveBox = false;
     for (size_t i = 1; i < lines.size(); ++i) {
         const std::string ln = TrimRight(lines[i]);
@@ -160,9 +182,19 @@ bool WaterLevel_Load(const char* gameDir, WaterLevelData& out, char* err, std::s
             continue;
         }
         WaterPoly poly{};
-        if (!ParseWaterLine(ln.c_str(), poly)) {
+        bool hasFlag = false;
+        if (!ParseWaterLine(ln.c_str(), poly, hasFlag)) {
             ++out.skipped;
             continue;
+        }
+        if (!hasFlag) {
+            // The shipped water.dat always carries the flag (307/307), so
+            // this default never fires there; water1.dat omits the column
+            // file-wide and its rows count as visible water (see header).
+            ++out.noflag;
+            if (isWater1) {
+                poly.flags = 1u;
+            }
         }
         ++out.rows;
         if (poly.nverts == 4) {
@@ -194,7 +226,9 @@ bool WaterLevel_Load(const char* gameDir, WaterLevelData& out, char* err, std::s
         out.polys.push_back(poly);
     }
     if (out.rows == 0) {
-        SetErr(err, errSize, "data/water.dat has no water rows");
+        char msg[128] = {};
+        (void)std::snprintf(msg, sizeof(msg), "%s has no water rows", waterFile);
+        SetErr(err, errSize, msg);
         return false;
     }
     return true;
@@ -290,7 +324,7 @@ bool WaterLevel_BuildScene(const WaterLevelData& data, const uint8_t waterRGBA[4
     }
     scene.meshes.push_back(std::move(mesh));
     (void)std::snprintf(scene.stats.dffName, sizeof(scene.stats.dffName), "%s",
-                        "data/water.dat");
+                        data.file[0] ? data.file : "data/water.dat");
     (void)std::snprintf(scene.stats.txdName, sizeof(scene.stats.txdName), "%s",
                         "data/timecyc.dat:WaterRGBA");
     scene.stats.atomics = 0;
