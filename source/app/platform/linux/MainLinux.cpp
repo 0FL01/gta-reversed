@@ -55,6 +55,7 @@ using uint64 = uint64_t;
 #include "app/platform/linux/ShoreShot.h"
 #include "app/platform/linux/HudShot.h"
 #include "app/platform/linux/RadarMap.h"
+#include "app/platform/linux/GameShot.h"
 #include "app/platform/linux/DriveSim.h"
 #include "app/platform/linux/Handling.h"
 #include "app/platform/linux/WalkSim.h"
@@ -64,7 +65,7 @@ using uint64 = uint64_t;
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --shot-cs-duo <out.tga> | --shot-water <out.tga> [--hour H] [--water-file water1.dat] | --shot-shore <out.tga> [--hour H] | --shot-hud <out.tga> [--health H] [--armor A] | --shot-radar <out.tga> [--x X] [--y Y] | --csanim-seq <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--frames 5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --shot-cs-duo <out.tga> | --shot-water <out.tga> [--hour H] [--water-file water1.dat] | --shot-shore <out.tga> [--hour H] | --shot-hud <out.tga> [--health H] [--armor A] | --shot-radar <out.tga> [--x X] [--y Y] | --shot-game <out.tga> [--health H] [--armor A] | --csanim-seq <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--frames 5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -1280,6 +1281,188 @@ int RunShotRadar(int argc, char** argv) {
                        wx, wy, rst.tiles, rst.tilePx, rst.markerPixels,
                        static_cast<unsigned long long>(checksum));
     RadarMap_Shutdown();
+    return 0;
+}
+
+// R6af: game screen — world + HUD bars + minimap in one frame (round 34).
+// Composition goes THROUGH the existing paths (no copy-paste): HudShot_Render
+// renders the fixed pier shore base (hour 12) + bars/digits/clock, then
+// RadarMap_Render renders the same pier-center disc, then GameShot blits the
+// disc 1:1 into the left-bottom corner (game layout: minimap bottom-left per
+// CHud::DrawRadar / TransformRadarPointToScreenSpace -> radarPos=87,409).
+// Pure CPU 2D, no EGL. game-ok requires baseMatchesShore=1, Rp>20000, and at
+// the default 137/60 also hudMatchesHud=1 + radarMatchesRadar=1.
+int RunShotGame(int argc, char** argv) {
+    const char* outPath = ArgValue(argc, argv, "--shot-game", "game.tga");
+    if (!outPath || outPath[0] == '\0') {
+        (void)std::printf("game-fail bad args shot-game='%s'\n",
+                           outPath ? outPath : "(null)");
+        return 1;
+    }
+    int health = 137;
+    int armor = 60;
+    {
+        const char* hArg = ArgValue(argc, argv, "--health", "137");
+        const char* aArg = ArgValue(argc, argv, "--armor", "60");
+        auto parse0255 = [](const char* s, int& v) {
+            if (!s || !s[0]) {
+                return false;
+            }
+            size_t len = std::strlen(s);
+            if (len == 0 || len > 3) {
+                return false;
+            }
+            for (size_t i = 0; i < len; ++i) {
+                if (s[i] < '0' || s[i] > '9') {
+                    return false;
+                }
+            }
+            v = std::atoi(s);
+            return v >= 0 && v <= 255;
+        };
+        if (!parse0255(hArg, health) || !parse0255(aArg, armor)) {
+            (void)std::printf("game-fail bad --health '%s' / --armor '%s' (want 0-255)\n",
+                               hArg ? hArg : "(null)", aArg ? aArg : "(null)");
+            return 1;
+        }
+    }
+    std::string gameDir = ResolveGameDir(argc, argv);
+    std::vector<uint8> basePixels;
+    std::vector<uint8> hudPixels;
+    std::vector<uint8> radarFull;
+    std::vector<uint8> gamePixels;
+    GameShotStats gst{};
+    char gameErr[1024] = {};
+    if (!GameShot_Render(gameDir.c_str(), health, armor, basePixels, hudPixels, radarFull,
+                         gamePixels, gst, gameErr, sizeof(gameErr))) {
+        (void)std::printf("game-fail load %s (game=%s)\n", gameErr, gameDir.c_str());
+        GameShot_Shutdown();
+        return 1;
+    }
+    const ShoreShotStats& sst = gst.hud.shore;
+    (void)std::printf(
+        "shore-load center=%.0f,%.0f models=%d mtris=%d waterRows=%d waterQuads=%d waterTris=%d "
+        "file=%s iplTotal=%d kept=%d bbox=[%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f]\n",
+        static_cast<double>(sst.centerX), static_cast<double>(sst.centerY), sst.models,
+        sst.mtris, sst.waterRows, sst.waterQuads, sst.waterTris, sst.waterFile,
+        gst.hud.loadInfo.iplTotal, gst.hud.loadInfo.iplKept, sst.bboxMin[0], sst.bboxMin[1],
+        sst.bboxMin[2], sst.bboxMax[0], sst.bboxMax[1], sst.bboxMax[2]);
+    (void)std::printf("shore-water hour=%d waterColor=%d,%d,%d,%d\n", sst.hour,
+                       sst.waterRGBA[0], sst.waterRGBA[1], sst.waterRGBA[2],
+                       sst.waterRGBA[3]);
+    (void)std::printf("shore-cam eye=%.1f,%.1f,%.1f target=%.1f,%.1f,%.1f fov=60\n",
+                       sst.eye[0], sst.eye[1], sst.eye[2], sst.target[0], sst.target[1],
+                       sst.target[2]);
+    (void)std::printf(
+        "texshore-ok tris=%d sampledTri=%d texelFetch=%ld greyFallback=%d flatTri=%d "
+        "texPixels=%ld flatPixels=%ld firstTex=%s render=cpu shared-z=1\n",
+        gst.hud.texStats.tris, gst.hud.texStats.sampledTri, gst.hud.texStats.texelFetch,
+        gst.hud.texStats.fallbackTri, gst.hud.texStats.flatTri, gst.hud.texStats.texPixels,
+        gst.hud.texStats.flatPixels,
+        gst.hud.texStats.haveFirst ? gst.hud.texStats.firstTex : "-");
+    (void)std::printf("shoreduo-ok worldMeshes=%d worldPixels=%ld waterPixelsDuo=%ld overlap=%ld\n",
+                       sst.worldMeshes, gst.hud.duo.carPixels, gst.hud.duo.pedPixels,
+                       gst.hud.duo.overlap);
+    for (const HudTexInfo& ti : gst.hud.sprites) {
+        (void)std::printf("hudtex name=%s %dx%d\n", ti.name, ti.w, ti.h);
+    }
+    (void)std::printf("hud-load sprites=%d barTex=%s fontTex=%s\n",
+                       static_cast<int>(gst.hud.sprites.size()), gst.hud.barTex,
+                       gst.hud.fontTex);
+    (void)std::printf("hud-clock text=\"%s\" glyphs=%d\n", gst.hud.clockText,
+                       gst.hud.digits);
+    uint64_t bR = 0, bG = 0, bB = 0, bN = 0;
+    uint64_t hR = 0, hG = 0, hB = 0, hN = 0;
+    uint64_t rR = 0, rG = 0, rB = 0, rN = 0;
+    uint64_t gR = 0, gG = 0, gB = 0, gN = 0;
+    uint64_t baseChecksum = PixelsChecksum(basePixels, bR, bG, bB, bN);
+    uint64_t hudChecksum = PixelsChecksum(hudPixels, hR, hG, hB, hN);
+    uint64_t radarChecksum = PixelsChecksum(radarFull, rR, rG, rB, rN);
+    const int baseMatchesShore = (baseChecksum == kGameShoreEtalon) ? 1 : 0;
+    const int hudMatchesHud = (hudChecksum == kGameHudEtalon) ? 1 : 0;
+    const int radarMatchesRadar = (radarChecksum == kGameRadarEtalon) ? 1 : 0;
+    (void)std::printf("hud-base baseChecksum=%llu shoreEtalon=%llu baseMatchesShore=%d\n",
+                       static_cast<unsigned long long>(baseChecksum),
+                       static_cast<unsigned long long>(kGameShoreEtalon), baseMatchesShore);
+    (void)std::printf("radarSrc=%s\n", gst.radar.radarSrc);
+    (void)std::printf("tileName=%s x=floor((X+3000)/500) y=ceil(11-(Y+3000)/500)\n",
+                       gst.radar.tileFmt);
+    (void)std::printf("radartile center=%d,%d centerTex=%s tileSize=%dx%d\n", gst.radar.tileX,
+                       gst.radar.tileY, gst.radar.firstTile, gst.radar.tileW,
+                       gst.radar.tileH);
+    (void)std::printf("radartiles row0=%s,%s,%s row1=%s,%s,%s row2=%s,%s,%s\n",
+                       gst.radar.tileNames[0], gst.radar.tileNames[1], gst.radar.tileNames[2],
+                       gst.radar.tileNames[3], gst.radar.tileNames[4], gst.radar.tileNames[5],
+                       gst.radar.tileNames[6], gst.radar.tileNames[7], gst.radar.tileNames[8]);
+    (void)std::printf("radar-disc r=%d range=%d mask=circle marker=arrow-fixed "
+                       "arrow=%dx%d glyphs=%d discPixels=%ld oob=%ld\n",
+                       gst.radar.discR, gst.radar.discRange, gst.radar.arrowW,
+                       gst.radar.arrowH, gst.radar.glyphs, gst.radar.discPixels,
+                       gst.radar.oob);
+    (void)std::printf("radarPos=%d,%d layout=bottom-left origin=CHud::DrawRadar/TransformRadarPointToScreenSpace\n",
+                       gst.radarDstCx, gst.radarDstCy);
+    (void)std::printf("hudMatchesHud=%d hudChecksum=%llu hudEtalon=%llu\n", hudMatchesHud,
+                       static_cast<unsigned long long>(hudChecksum),
+                       static_cast<unsigned long long>(kGameHudEtalon));
+    (void)std::printf("radarMatchesRadar=%d radarChecksum=%llu radarEtalon=%llu\n",
+                       radarMatchesRadar, static_cast<unsigned long long>(radarChecksum),
+                       static_cast<unsigned long long>(kGameRadarEtalon));
+    if (!baseMatchesShore) {
+        (void)std::printf("game-fail base disturbed baseChecksum=%llu (want %llu)\n",
+                           static_cast<unsigned long long>(baseChecksum),
+                           static_cast<unsigned long long>(kGameShoreEtalon));
+        GameShot_Shutdown();
+        return 1;
+    }
+    if (gst.hud.hudPixels <= 2000) {
+        (void)std::printf("game-fail empty hud overlay hudPixels=%ld (want >2000)\n",
+                           gst.hud.hudPixels);
+        GameShot_Shutdown();
+        return 1;
+    }
+    if (gst.radarPixels <= 20000) {
+        (void)std::printf("game-fail empty radar overlay radarPixels=%ld (want >20000)\n",
+                           gst.radarPixels);
+        GameShot_Shutdown();
+        return 1;
+    }
+    if (health == 137 && armor == 60 && !hudMatchesHud) {
+        (void)std::printf("game-fail hud disturbed hudChecksum=%llu (want %llu)\n",
+                           static_cast<unsigned long long>(hudChecksum),
+                           static_cast<unsigned long long>(kGameHudEtalon));
+        GameShot_Shutdown();
+        return 1;
+    }
+    if (!radarMatchesRadar) {
+        (void)std::printf("game-fail radar disturbed radarChecksum=%llu (want %llu)\n",
+                           static_cast<unsigned long long>(radarChecksum),
+                           static_cast<unsigned long long>(kGameRadarEtalon));
+        GameShot_Shutdown();
+        return 1;
+    }
+    uint64_t checksum = PixelsChecksum(gamePixels, gR, gG, gB, gN);
+    if (!WriteTga24(outPath, 640, 480, gamePixels)) {
+        (void)std::printf("game-fail write '%s'\n", outPath);
+        GameShot_Shutdown();
+        return 1;
+    }
+    OS_DebugOut("mad-sa-linux game shot");
+    (void)std::printf(
+        "game-ok health=%d armor=%d hudPixels=%ld radarPixels=%ld baseChecksum=%llu "
+        "hudChecksum=%llu radarChecksum=%llu checksum=%llu\n",
+        gst.hud.health, gst.hud.armor, gst.hud.hudPixels, gst.radarPixels,
+        static_cast<unsigned long long>(baseChecksum),
+        static_cast<unsigned long long>(hudChecksum),
+        static_cast<unsigned long long>(radarChecksum),
+        static_cast<unsigned long long>(checksum));
+    (void)std::printf("gameshot-ok out=%s nonblack=%llu/%llu avg=%llu,%llu,%llu checksum=%llu\n",
+                       outPath, static_cast<unsigned long long>(gN),
+                       static_cast<unsigned long long>(640ULL * 480ULL),
+                       static_cast<unsigned long long>(gR / (640ULL * 480ULL)),
+                       static_cast<unsigned long long>(gG / (640ULL * 480ULL)),
+                       static_cast<unsigned long long>(gB / (640ULL * 480ULL)),
+                       static_cast<unsigned long long>(checksum));
+    GameShot_Shutdown();
     return 0;
 }
 
@@ -5770,6 +5953,9 @@ int main(int argc, char** argv) {
     }
     if (HasArg(argc, argv, "--shot-radar")) {
         return RunShotRadar(argc, argv);
+    }
+    if (HasArg(argc, argv, "--shot-game")) {
+        return RunShotGame(argc, argv);
     }
     if (HasArg(argc, argv, "--shot-hud")) {
         return RunShotHud(argc, argv);
