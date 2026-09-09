@@ -4,6 +4,9 @@
 // native-track precedent (no refactors of verified slices in-round).
 
 #include "app/platform/linux/IfpAnim.h"
+#ifdef REALTIME_GAMEPLAY_POSE_AUDIT
+#include "app/platform/linux/RealtimeGameplayPoseAudit.h"
+#endif
 
 #include <cstdint>
 #include <cstdio>
@@ -34,6 +37,10 @@ using uint64 = uint64_t;
 #include <rw.h>
 
 namespace {
+
+#ifdef REALTIME_GAMEPLAY_POSE_AUDIT
+static RealtimeGameplayPoseAudit* s_RealtimePoseAudit = nullptr;
+#endif
 
 void SetErr(char* err, std::size_t errSize, const char* msg) {
     if (!err || errSize == 0) {
@@ -112,16 +119,30 @@ struct ImgIndex {
 };
 
 bool BuildImgIndex(const char* imgRel, ImgIndex& idx) {
-    std::vector<uint8> head;
-    if (!ReadWholeFileOS(imgRel, head) || head.size() < 8) {
+    void* file = nullptr;
+    if (OS_FileOpen(FILE_DATA_AREA_DEFAULT, &file, imgRel, FILE_ACCESS_READ) != 0 || !file) {
         return false;
     }
-    if (std::memcmp(head.data(), "VER2", 4) != 0) {
+    const int32 fileSize = OS_FileSize(file);
+    std::array<uint8, 8> head{};
+    OS_FileSetPosition(file, 0);
+    if (fileSize < 8 || OS_FileRead(file, head.data(), 8) != 0 ||
+        std::memcmp(head.data(), "VER2", 4) != 0) {
+        OS_FileClose(file);
         return false;
     }
     uint32 count = 0;
     std::memcpy(&count, head.data() + 4, 4);
-    if (count == 0 || count > 300000 || head.size() < 8 + static_cast<size_t>(count) * 32) {
+    if (count == 0 || count > 300000 || count > static_cast<uint32>(fileSize - 8) / 32u) {
+        OS_FileClose(file);
+        return false;
+    }
+    // Only the VER2 directory is needed; never load the archive body here.
+    const int32 dirSize = static_cast<int32>(count * 32u);
+    std::vector<uint8> directory(static_cast<size_t>(dirSize));
+    const bool ok = OS_FileRead(file, directory.data(), dirSize) == 0;
+    OS_FileClose(file);
+    if (!ok) {
         return false;
     }
     idx.rel = imgRel;
@@ -134,7 +155,7 @@ bool BuildImgIndex(const char* imgRel, ImgIndex& idx) {
     }
     idx.entries.reserve(count);
     for (uint32 i = 0; i < count; ++i) {
-        const uint8* e = head.data() + 8 + static_cast<size_t>(i) * 32;
+        const uint8* e = directory.data() + static_cast<size_t>(i) * 32;
         ImgEntry en;
         std::memcpy(&en.off, e, 4);
         std::memcpy(&en.size, e + 4, 4);
@@ -1579,7 +1600,7 @@ bool IfpAnim_Init(const char* gameDir, const char* model, const char* animName, 
     // atomic is attached to the Pelvis frame, which the pose above moved,
     // so A is re-read post-sync (retail RW evaluates both the skin upload
     // and the world matrix from the live frames at render time).
-    // Final render verts = A * S * stored, exactly like librw's
+    // Final render verts = stored * S * A (RW row vectors), like librw's
     // skinRenderCB (setWorldMatrix(atomic->getFrame()->getLTM())).
     // A is file data (andre: cyclic X->Y, Y->Z, Z->X placement); zero
     // manual constants. The bind AABB stays in skin space on purpose so it
@@ -1595,7 +1616,10 @@ bool IfpAnim_Init(const char* gameDir, const char* model, const char* animName, 
     rw::Matrix::invert(&invAtomicCur, &atomicCur);
 
     // Animated skin matrices S_i = IB_i * (Wanim_i * invAcur), composed
-    // with the model matrix: MW_i = Acur * S_i (one rigid per bone).
+    // with the model matrix: MW_i = S_i * Acur (RW row-vector convention).
+    // notsa::bugfixes: gl3skin applies world AFTER skin. Prepending Acur
+    // rotates/translates stored vertices into the wrong inverse-bind space,
+    // tearing weighted joints (especially hands) even at exact IFP keys.
     std::vector<rw::Matrix> animSkinMats(static_cast<size_t>(numBones));
     {
         rw::Skin* skin0 = rw::Skin::get(geoms[0].geo);
@@ -1606,11 +1630,55 @@ bool IfpAnim_Init(const char* gameDir, const char* model, const char* animName, 
             rw::Matrix t1, t2;
             rw::Matrix::mult(&t1, &animWorld[static_cast<size_t>(i)], &invAtomicCur);
             rw::Matrix::mult(&t2, &ib, &t1);
-            rw::Matrix::mult(&animSkinMats[static_cast<size_t>(i)], &atomicCur, &t2);
+            rw::Matrix::mult(&animSkinMats[static_cast<size_t>(i)], &t2, &atomicCur);
         }
     }
 
     // --- 8. Flatten with ANIMATED matrices into the scene (rendered) ---
+#ifdef REALTIME_GAMEPLAY_POSE_AUDIT
+    if (auto* audit = s_RealtimePoseAudit) {
+        audit->Bones = numBones;
+        std::vector<int> parents;
+        int parent = -1;
+        for (int i = 0; i < numBones; ++i) {
+            const auto* frame = boneFrames[i];
+            if (parent >= 0 && (!frame || frame->getParent() != boneFrames[parent])) ++audit->ParentMismatches;
+            if (hh->nodeInfo[i].flags & rw::HAnimHierarchy::PUSH) parents.push_back(parent);
+            parent = i;
+            if (hh->nodeInfo[i].flags & rw::HAnimHierarchy::POP) {
+                parent = parents.empty() ? -1 : parents.back();
+                if (!parents.empty()) parents.pop_back();
+            }
+            const int sequence = boneSeqIdx[i];
+            if (frame && sequence >= 0 && sampled[sequence].valid) {
+                const auto& sm = sampled[sequence];
+                rw::Matrix rotation;
+                rotation.rotate(rw::makeQuat(sm.q[3],sm.q[0],sm.q[1],sm.q[2]),rw::COMBINEREPLACE);
+                for (const auto axis : {rw::makeV3d(1,0,0),rw::makeV3d(0,1,0),rw::makeV3d(0,0,1)}) {
+                    rw::V3d a,b;
+                    rw::V3d::transformVectors(&a,&axis,1,&rotation);
+                    rw::V3d::transformVectors(&b,&axis,1,&frame->matrix);
+                    audit->MaxQuaternionError=std::max(audit->MaxQuaternionError,std::sqrt(rw::dot(rw::sub(a,b),rw::sub(a,b))));
+                }
+            }
+            rw::Matrix ib, bind, local, skin, legacy;
+            std::memcpy(&ib,rw::Skin::get(geoms[0].geo)->inverseMatrices+static_cast<size_t>(i)*16,64);
+            ib.flags=0; rw::Matrix::invert(&bind,&ib);
+            rw::V3d joint;
+            rw::V3d::transformPoints(&joint,&bind.pos,1,&animSkinMats[i]);
+            const auto delta=rw::sub(joint,animWorld[i].pos);
+            audit->MaxJointError=std::max(audit->MaxJointError,std::sqrt(rw::dot(delta,delta)));
+            // Deliberately retain the old expression as a rejecting negative
+            // control, NOT a rendering path or an alternate output.
+            rw::Matrix::mult(&local,&animWorld[i],&invAtomicCur);
+            rw::Matrix::mult(&skin,&ib,&local);
+            rw::Matrix::mult(&legacy,&atomicCur,&skin);
+            rw::V3d::transformPoints(&joint,&bind.pos,1,&legacy);
+            const auto oldDelta=rw::sub(joint,animWorld[i].pos);
+            audit->MaxLegacyJointError=std::max(audit->MaxLegacyJointError,std::sqrt(rw::dot(oldDelta,oldDelta)));
+        }
+    }
+#endif
     int meshIndex = 0;
     bool first = true;
     int totalTris = 0;
@@ -1632,14 +1700,37 @@ bool IfpAnim_Init(const char* gameDir, const char* model, const char* animName, 
             const float* wgt = skin->weights + static_cast<size_t>(v) * 4;
             double wsum = 0.0;
             rw::V3d p = { 0.0f, 0.0f, 0.0f };
-            rw::V3d n = { 0.0f, 0.0f, 1.0f };
+            // notsa::bugfixes: weighted normal accumulation starts at zero,
+            // like gl3skin; adding a world +Z vector biases every normal.
+            rw::V3d n = { 0.0f, 0.0f, 0.0f };
+#ifdef REALTIME_GAMEPLAY_POSE_AUDIT
+            rw::V3d referencePos = {}, referenceNormal = {};
+#endif
             for (int k = 0; k < 4; ++k) {
                 int b = idx[k];
                 float w = wgt[k];
                 wsum += w;
                 if (w == 0.0f || b < 0 || b >= numBones) {
+#ifdef REALTIME_GAMEPLAY_POSE_AUDIT
+                    if (s_RealtimePoseAudit && w != 0.0f) ++s_RealtimePoseAudit->InvalidInfluences;
+#endif
                     continue;
                 }
+#ifdef REALTIME_GAMEPLAY_POSE_AUDIT
+                if (s_RealtimePoseAudit) {
+                    rw::Matrix ib;
+                    std::memcpy(&ib,skin->inverseMatrices+static_cast<size_t>(b)*16,64); ib.flags=0;
+                    rw::V3d local, world;
+                    rw::V3d::transformPoints(&local,&verts[v],1,&ib);
+                    rw::V3d::transformPoints(&world,&local,1,&animWorld[b]);
+                    referencePos=rw::add(referencePos,rw::scale(world,w));
+                    if (norms) {
+                        rw::V3d::transformVectors(&local,&norms[v],1,&ib);
+                        rw::V3d::transformVectors(&world,&local,1,&animWorld[b]);
+                        referenceNormal=rw::add(referenceNormal,rw::scale(world,w));
+                    }
+                }
+#endif
                 rw::V3d tp;
                 rw::V3d::transformPoints(&tp, &verts[v], 1, &animSkinMats[static_cast<size_t>(b)]);
                 p.x += w * tp.x;
@@ -1669,6 +1760,18 @@ bool IfpAnim_Init(const char* gameDir, const char* model, const char* animName, 
                 }
                 skinnedNrm[static_cast<size_t>(v)] = n;
             }
+#ifdef REALTIME_GAMEPLAY_POSE_AUDIT
+            if (auto* audit=s_RealtimePoseAudit) {
+                ++audit->Vertices;
+                auto delta=rw::sub(p,referencePos);
+                audit->MaxVertexError=std::max(audit->MaxVertexError,std::sqrt(rw::dot(delta,delta)));
+                if (norms && rw::dot(referenceNormal,referenceNormal)>1e-12f) {
+                    referenceNormal=rw::scale(referenceNormal,1.0f/std::sqrt(rw::dot(referenceNormal,referenceNormal)));
+                    delta=rw::sub(n,referenceNormal);
+                    audit->MaxNormalError=std::max(audit->MaxNormalError,std::sqrt(rw::dot(delta,delta)));
+                }
+            }
+#endif
         }
         std::map<const rw::Texture*, int> imgCache;
         WorldShotMesh mesh;
@@ -2186,7 +2289,7 @@ void FlattenWithMats(const std::vector<BlendGeom>& geoms, const std::vector<rw::
             const float* wgt = skin->weights + static_cast<size_t>(v) * 4;
             double wsum = 0.0;
             rw::V3d p = { 0.0f, 0.0f, 0.0f };
-            rw::V3d n = { 0.0f, 0.0f, 1.0f };
+            rw::V3d n = { 0.0f, 0.0f, 0.0f }; // same zero-based weighted normal as Init
             for (int k = 0; k < 4; ++k) {
                 int b = idx[k];
                 float w = wgt[k];
@@ -3000,7 +3103,7 @@ bool IfpAnim_Blend(const char* gameDir, const char* model, const char* fromAnim,
                 rw::Matrix t1, t2;
                 rw::Matrix::mult(&t1, &animWorld[static_cast<size_t>(i)], &invAtomicCur);
                 rw::Matrix::mult(&t2, &ib, &t1);
-                rw::Matrix::mult(&skinMats[static_cast<size_t>(i)], &atomicCur, &t2);
+                rw::Matrix::mult(&skinMats[static_cast<size_t>(i)], &t2, &atomicCur);
             }
         }
         IfpAnimBlendFrame fr;
@@ -3152,3 +3255,16 @@ bool IfpAnim_Blend(const char* gameDir, const char* model, const char* fromAnim,
     out.morphMono = numBones > 0 ? static_cast<double>(passed) / numBones : 0.0;
     return true;
 }
+
+#ifdef REALTIME_GAMEPLAY_POSE_AUDIT
+bool RealtimeGameplay_AuditPose(const char* gameDir, const char* anim, double phase,
+    WorldShotScene& scene, IfpAnimStats& stats, RealtimeGameplayPoseAudit& audit,
+    char* error, std::size_t errorSize) {
+    audit = {};
+    struct Scope {
+        ~Scope() { s_RealtimePoseAudit = nullptr; }
+    } scope;
+    s_RealtimePoseAudit = &audit;
+    return IfpAnim_Init(gameDir,"andre",anim,phase,scene,stats,error,errorSize,true);
+}
+#endif

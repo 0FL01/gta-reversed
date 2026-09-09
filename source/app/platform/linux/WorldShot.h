@@ -9,6 +9,15 @@
 #include <cstddef>
 #include <cstdint>
 #include <vector>
+#include <array>
+
+// Optional native GPU metadata. Offline renderers continue using triCol.
+struct WorldShotSurface {
+    std::array<float, 4> color{1, 1, 1, 1};
+    float ambient = 1.0f;
+    float diffuse = 1.0f;
+    int vehicleColorIndex = -1; // carcols index when a paint marker was resolved
+};
 
 struct WorldShotStats {
     char dffName[128];
@@ -35,6 +44,11 @@ struct WorldShotMesh {
     std::vector<float> triCol;
     float color[3];
     int tris;
+    // Triangle-soup RGBA8, 12 bytes/triangle; night empty means use day.
+    // Missing prelight is black for lit geometry, white for unlit geometry
+    // (RenderWare semantics), never a replacement authored color.
+    std::vector<uint8_t> dayColors, nightColors;
+    std::vector<WorldShotSurface> surfaces; // one per triangle, or empty
 };
 
 // One decoded TXD texture: RGBA8 bytes straight from TXD raster bytes.

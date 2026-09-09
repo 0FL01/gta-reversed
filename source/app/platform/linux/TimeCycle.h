@@ -21,6 +21,9 @@ struct TimeCycleParams {
     uint8_t water[4] = {}; // WaterRGBA (R6aa: water R,G,B + alpha, timecyc bytes only)
     float farClp = 0.0f; // FarClp (tokens[27] per header, timecyc bytes only)
     float fogSt = 0.0f; // FogSt (tokens[28] per header, timecyc bytes only)
+    uint8_t ambObjects[3] = {}; // Amb_Obj, additive GPU-facing fields
+    float directionalMult = 0.0f; // final timecyc column (51), not legacy Dir RGB
+    bool hasDirectionalMult = false;
 };
 
 // Loads the `weather` row for `hour` (0-23) relative to gameDir (sets the

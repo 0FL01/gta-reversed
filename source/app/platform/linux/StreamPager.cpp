@@ -549,15 +549,113 @@ struct CachedModel {
     std::vector<float> triCol; // 3 floats per triangle
     std::vector<WorldShotImage> images; // decoded TXD texels for this model
     int tris = 0;
+    std::vector<uint8> dayColors, nightColors;
+    std::vector<WorldShotSurface> surfaces;
 };
 
-bool FlattenClumpStatic(rw::Clump* clump, const LinkedClump& lc, CachedModel& out) {
+// librw skips Rockstar's 0x253F2F9 plugin. Read only that bounded extension,
+// without registering process-global plugins after another parser starts RW.
+// Original layout: uint32 present, then numVertices RGBA (NightColors).
+static bool ReadNightColors(const std::vector<uint8>& bytes, rw::Clump* clump,
+                            std::map<const rw::Geometry*, std::vector<uint8>>& out) {
+    struct Chunk { uint32 type; size_t begin, end; };
+    auto children = [&](size_t begin, size_t end, std::vector<Chunk>& chunks) {
+        if (end > bytes.size()) {
+            return false;
+        }
+        while (begin < end) {
+            if (end - begin < 12) {
+                return false;
+            }
+            const auto size = ReadU32(bytes.data() + begin + 4);
+            if (size > end - begin - 12) {
+                return false;
+            }
+            chunks.push_back({ReadU32(bytes.data() + begin), begin + 12, begin + 12 + size});
+            begin += 12 + size;
+        }
+        return true;
+    };
+    if (bytes.size() < 12 || ReadU32(bytes.data()) != 0x10) {
+        return false;
+    }
+    std::vector<Chunk> root;
+    if (!children(12, 12ull + ReadU32(bytes.data() + 4), root)) {
+        return false;
+    }
+    std::vector<std::vector<uint8>> colors;
+    std::vector<uint32> atomicGeometry;
+    for (const auto& chunk : root) {
+        if (chunk.type == 0x1A) {
+            std::vector<Chunk> geometries;
+            if (!children(chunk.begin, chunk.end, geometries)) {
+                return false;
+            }
+            for (const auto& geometry : geometries) {
+                if (geometry.type != 0xF) {
+                    continue;
+                }
+                colors.emplace_back();
+                std::vector<Chunk> parts;
+                if (!children(geometry.begin, geometry.end, parts)) {
+                    return false;
+                }
+                for (const auto& part : parts) {
+                    if (part.type != 3) {
+                        continue;
+                    }
+                    std::vector<Chunk> plugins;
+                    if (!children(part.begin, part.end, plugins)) {
+                        return false;
+                    }
+                    for (const auto& plugin : plugins) {
+                        if (plugin.type == 0x253F2F9) {
+                            if (plugin.end - plugin.begin < 4) {
+                                return false;
+                            }
+                            if (ReadU32(bytes.data() + plugin.begin)) {
+                                colors.back().assign(bytes.begin() + plugin.begin + 4, bytes.begin() + plugin.end);
+                            }
+                        }
+                    }
+                }
+            }
+        } else if (chunk.type == 0x14) {
+            std::vector<Chunk> parts;
+            if (!children(chunk.begin, chunk.end, parts) || parts.empty() ||
+                parts[0].type != 1 || parts[0].end - parts[0].begin < 16) {
+                return false;
+            }
+            atomicGeometry.push_back(ReadU32(bytes.data() + parts[0].begin + 4));
+        }
+    }
+    // Clump::streamRead/addAtomic appends atomics in file order.
+    size_t index = 0;
+    FORLIST(link, clump->atomics) {
+        const auto* geo = rw::Atomic::fromClump(link)->geometry;
+        if (index >= atomicGeometry.size() || atomicGeometry[index] >= colors.size()) {
+            return false;
+        }
+        const auto& night = colors[atomicGeometry[index++]];
+        if (!night.empty() && (!geo || night.size() != static_cast<size_t>(geo->numVertices) * 4)) {
+            return false;
+        }
+        out[geo] = night;
+    }
+    return index == atomicGeometry.size();
+}
+
+bool FlattenClumpStatic(rw::Clump* clump, const LinkedClump& lc, CachedModel& out,
+                        const std::map<const rw::Geometry*, std::vector<uint8>>& nightColors) {
     out.pos.clear();
     out.nrm.clear();
     out.uv.clear();
     out.triImg.clear();
     out.triCol.clear();
     out.images.clear();
+    out.dayColors.clear();
+    out.nightColors.clear();
+    out.surfaces.clear();
     out.tris = 0;
     std::map<const rw::Texture*, int> imgCache;
     FORLIST(link, clump->atomics) {
@@ -642,6 +740,26 @@ bool FlattenClumpStatic(rw::Clump* clump, const LinkedClump& lc, CachedModel& ou
                 }
             }
             const rw::V3d* p[3] = { &objVerts[tri.v[0]], &objVerts[tri.v[1]], &objVerts[tri.v[2]] };
+            if (s_options.includeStreamed) {
+                WorldShotSurface surface;
+                const bool lit = geo->flags & rw::Geometry::LIGHT;
+                surface.ambient = lit && mat ? mat->surfaceProps.ambient : 0.0f;
+                surface.diffuse = lit && norms && mat ? mat->surfaceProps.diffuse : 0.0f;
+                if (mat && (geo->flags & rw::Geometry::MODULATE)) {
+                    surface.color = {matCol[0], matCol[1], matCol[2], mat->color.alpha / 255.0f};
+                }
+                out.surfaces.push_back(surface);
+                const auto night = nightColors.find(geo);
+                for (int k = 0; k < 3; ++k) {
+                    const rw::RGBA day = geo->colors ? geo->colors[tri.v[k]] :
+                        lit ? rw::RGBA{0, 0, 0, 255} : rw::RGBA{255, 255, 255, 255};
+                    const uint8 rgba[]{day.red, day.green, day.blue, day.alpha};
+                    out.dayColors.insert(out.dayColors.end(), rgba, rgba + 4);
+                    const uint8* nc = night != nightColors.end() && !night->second.empty() ?
+                        &night->second[static_cast<size_t>(tri.v[k]) * 4] : rgba;
+                    out.nightColors.insert(out.nightColors.end(), nc, nc + 4);
+                }
+            }
             float face[3];
             {
                 float a[3] = { p[0]->x, p[0]->y, p[0]->z };
@@ -1184,7 +1302,9 @@ bool StreamPager_Update(float camX, float camY, float camZ, WorldShotScene& scen
             continue;
         }
         CachedModel cached;
-        bool ok = FlattenClumpStatic(lc.clump, lc, cached);
+        std::map<const rw::Geometry*, std::vector<uint8>> nightColors;
+        bool ok = !s_options.includeStreamed || ReadNightColors(dffBytes, lc.clump, nightColors);
+        ok = ok && FlattenClumpStatic(lc.clump, lc, cached, nightColors);
         TexSample_FreeLinked(lc);
         if (!ok) {
             s_failed.insert(kv.first); // skinned or GPU-only: honestly skipped
@@ -1263,6 +1383,11 @@ bool StreamPager_Update(float camX, float camY, float camZ, WorldShotScene& scen
         mesh.uv.resize(cached.uv.size());
         mesh.triImg.resize(cached.triImg.size());
         mesh.triCol.resize(cached.triCol.size());
+        if (s_options.includeStreamed) {
+            mesh.dayColors = cached.dayColors;
+            mesh.nightColors = cached.nightColors;
+            mesh.surfaces = cached.surfaces;
+        }
         for (size_t ti = 0; ti < cached.triImg.size(); ++ti) {
             int local = cached.triImg[ti];
             if (local >= 0 && local < static_cast<int>(cached.images.size())) {

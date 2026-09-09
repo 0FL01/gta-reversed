@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cmath>
+#include <array>
 #include <string>
 #include <vector>
 #include <map>
@@ -54,25 +55,6 @@ void ToLowerInPlace(std::string& s) {
     }
 }
 
-bool ReadWholeFileOS(const char* path, std::vector<uint8>& out) {
-    void* file = nullptr;
-    if (OS_FileOpen(FILE_DATA_AREA_DEFAULT, &file, path, FILE_ACCESS_READ) != 0 || !file) {
-        return false;
-    }
-    int32 size = OS_FileSize(file);
-    if (size < 0) {
-        OS_FileClose(file);
-        return false;
-    }
-    out.resize(static_cast<size_t>(size));
-    bool ok = true;
-    if (size > 0) {
-        ok = OS_FileRead(file, out.data(), size) == 0;
-    }
-    OS_FileClose(file);
-    return ok;
-}
-
 struct ImgEntry {
     std::string name; // as stored
     std::string nameLower;
@@ -87,16 +69,30 @@ struct ImgIndex {
 };
 
 bool BuildImgIndex(const char* imgRel, ImgIndex& idx) {
-    std::vector<uint8> head;
-    if (!ReadWholeFileOS(imgRel, head) || head.size() < 8) {
+    void* file = nullptr;
+    if (OS_FileOpen(FILE_DATA_AREA_DEFAULT, &file, imgRel, FILE_ACCESS_READ) != 0 || !file) {
         return false;
     }
-    if (std::memcmp(head.data(), "VER2", 4) != 0) {
+    const int32 fileSize = OS_FileSize(file);
+    std::array<uint8, 8> head{};
+    OS_FileSetPosition(file, 0);
+    if (fileSize < 8 || OS_FileRead(file, head.data(), 8) != 0 ||
+        std::memcmp(head.data(), "VER2", 4) != 0) {
+        OS_FileClose(file);
         return false;
     }
     uint32 count = 0;
     std::memcpy(&count, head.data() + 4, 4);
-    if (count == 0 || count > 300000 || head.size() < 8 + static_cast<size_t>(count) * 32) {
+    if (count == 0 || count > 300000 || count > static_cast<uint32>(fileSize - 8) / 32u) {
+        OS_FileClose(file);
+        return false;
+    }
+    // Only the VER2 directory is needed; never load the archive body here.
+    const int32 dirSize = static_cast<int32>(count * 32u);
+    std::vector<uint8> directory(static_cast<size_t>(dirSize));
+    const bool ok = OS_FileRead(file, directory.data(), dirSize) == 0;
+    OS_FileClose(file);
+    if (!ok) {
         return false;
     }
     idx.rel = imgRel;
@@ -109,7 +105,7 @@ bool BuildImgIndex(const char* imgRel, ImgIndex& idx) {
     }
     idx.entries.reserve(count);
     for (uint32 i = 0; i < count; ++i) {
-        const uint8* e = head.data() + 8 + static_cast<size_t>(i) * 32;
+        const uint8* e = directory.data() + static_cast<size_t>(i) * 32;
         ImgEntry en;
         std::memcpy(&en.off, e, 4);
         std::memcpy(&en.size, e + 4, 4);
@@ -242,6 +238,75 @@ void MeshColor(int index, float* rgb) {
     rgb[0] = kPalette[pick][0];
     rgb[1] = kPalette[pick][1];
     rgb[2] = kPalette[pick][2];
+}
+
+// GPU-only paint metadata. First authored car/car4 scheme is deterministic;
+// legacy triCol stays exactly as stored in the DFF for offline fixtures.
+static bool LoadPaint(const std::string& model, std::array<rw::RGBA, 4>& paint,
+                      std::array<int, 4>& indices) {
+    indices.fill(-1);
+    void* file = nullptr;
+    if (OS_FileOpen(FILE_DATA_AREA_DEFAULT, &file, "data/carcols.dat", FILE_ACCESS_READ) != 0 || !file) {
+        return false;
+    }
+    const int32 size = OS_FileSize(file);
+    std::string text(size > 0 ? static_cast<size_t>(size) : 0, '\0');
+    const bool ok = size > 0 && OS_FileRead(file, text.data(), size) == 0;
+    OS_FileClose(file);
+    if (!ok) {
+        return false;
+    }
+    std::vector<rw::RGBA> table;
+    int section = 0, count = 0;
+    for (size_t pos = 0; pos < text.size();) {
+        const size_t end = text.find('\n', pos);
+        std::string line = text.substr(pos, end == std::string::npos ? end : end - pos);
+        pos = end == std::string::npos ? text.size() : end + 1;
+        line.resize(line.find('#') == std::string::npos ? line.size() : line.find('#'));
+        for (char& c : line) {
+            if (c == ',' || c == '\r' || c == '\t') {
+                c = ' ';
+            }
+        }
+        char name[64]{};
+        if (std::sscanf(line.c_str(), "%63s", name) != 1) {
+            continue;
+        }
+        if (!std::strcmp(name, "col")) { section = 1; continue; }
+        if (!std::strcmp(name, "car")) { section = 2; continue; }
+        if (!std::strcmp(name, "car4")) { section = 4; continue; }
+        if (!std::strcmp(name, "end")) { section = 0; continue; }
+        if (section == 1) {
+            int r, g, b;
+            // CVehicleModelInfo::LoadVehicleColours FIX_BUGS handles the
+            // original palette row 98 typo "77.93,96" the same way.
+            if (std::sscanf(line.c_str(), "%d %d %d", &r, &g, &b) != 3 &&
+                std::sscanf(line.c_str(), "%d.%d %d", &r, &g, &b) != 3) {
+                return false;
+            }
+            if (r < 0 || r > 255 || g < 0 || g > 255 || b < 0 || b > 255) {
+                return false;
+            }
+            table.push_back({static_cast<uint8>(r), static_cast<uint8>(g), static_cast<uint8>(b), 255});
+        } else if ((section == 2 || section == 4) && model == name) {
+            const int parsed = std::sscanf(line.c_str(), "%63s %d %d %d %d", name,
+                &indices[0], &indices[1], &indices[2], &indices[3]);
+            if (parsed < section + 1) {
+                return false;
+            }
+            count = section;
+            if (count == 2) {
+                indices[2] = indices[3] = -1;
+            }
+        }
+    }
+    for (int i = 0; i < count; ++i) {
+        if (indices[i] < 0 || indices[i] >= static_cast<int>(table.size())) {
+            return false;
+        }
+        paint[i] = table[indices[i]];
+    }
+    return count != 0;
 }
 
 // --- Raw DFF framelist walk (librw keeps no frame names) ---
@@ -772,6 +837,9 @@ bool CarPose_Init(const char* gameDir, const char* model, double steerDeg, doubl
     bool first = true;
     int totalTris = 0;
     int bodyTris = 0;
+    std::array<rw::RGBA, 4> paint{};
+    std::array<int, 4> paintIndices{};
+    const bool hasPaint = LoadPaint(wantLower, paint, paintIndices);
     std::map<const rw::Texture*, int> imgCache;
     auto emitTris = [&](rw::Geometry* geo, const rw::Matrix& m, int& meshTris, bool& ok) {
         ok = true;
@@ -830,6 +898,26 @@ bool CarPose_Init(const char* gameDir, const char* model, double steerDeg, doubl
                 }
             }
             const rw::V3d* pp[3] = { &wv[tri.v[0]], &wv[tri.v[1]], &wv[tri.v[2]] };
+            WorldShotSurface surface;
+            const bool lit = geo->flags & rw::Geometry::LIGHT;
+            surface.ambient = lit && mat ? mat->surfaceProps.ambient : 0.0f;
+            surface.diffuse = lit && norms && mat ? mat->surfaceProps.diffuse : 0.0f;
+            if (mat) {
+                auto color = mat->color;
+                // CVehicleModelInfo::SetEditableMaterialsCB, RGB markers.
+                const uint32 rgb = uint32(color.red) | (uint32(color.green) << 8) | (uint32(color.blue) << 16);
+                const int slot = rgb == 0x00FF3C ? 0 : rgb == 0xAF00FF ? 1 :
+                                 rgb == 0xFFFF00 ? 2 : rgb == 0xFF00FF ? 3 : -1;
+                if (slot >= 0 && hasPaint && paintIndices[slot] >= 0) {
+                    color.red = paint[slot].red;
+                    color.green = paint[slot].green;
+                    color.blue = paint[slot].blue;
+                    surface.vehicleColorIndex = paintIndices[slot];
+                }
+                surface.color = {color.red / 255.0f, color.green / 255.0f,
+                                 color.blue / 255.0f, color.alpha / 255.0f};
+            }
+            mesh.surfaces.push_back(surface);
             float face[3];
             {
                 float a[3] = { pp[0]->x, pp[0]->y, pp[0]->z };
@@ -838,6 +926,10 @@ bool CarPose_Init(const char* gameDir, const char* model, double steerDeg, doubl
                 CrossSub(a, b, c, face);
             }
             for (int kk = 0; kk < 3; ++kk) {
+                const rw::RGBA day = geo->colors ? geo->colors[tri.v[kk]] :
+                    lit ? rw::RGBA{0, 0, 0, 255} : rw::RGBA{255, 255, 255, 255};
+                const uint8 rgba[]{day.red, day.green, day.blue, day.alpha};
+                mesh.dayColors.insert(mesh.dayColors.end(), rgba, rgba + 4);
                 mesh.pos.push_back(pp[kk]->x);
                 mesh.pos.push_back(pp[kk]->y);
                 mesh.pos.push_back(pp[kk]->z);

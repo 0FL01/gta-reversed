@@ -167,6 +167,8 @@ bool TimeCycle_LoadWeatherHour(const char* gameDir, const char* weather, int hou
         float farClp = 0.0f; // tokens[27] (FarClp per the header comment)
         float fogSt = 0.0f; // tokens[28] (FogSt per the header comment)
         uint8_t water[4] = {}; // tokens[36..39] (WaterRGBA per header)
+        float directionalMult = 0.0f;
+        bool hasDirectionalMult = false;
     };
     std::vector<Row> rows;
     for (size_t i = sec + 1; i < lines.size(); ++i) {
@@ -233,6 +235,15 @@ bool TimeCycle_LoadWeatherHour(const char* gameDir, const char* weather, int hou
             }
             if (toks.size() < 29) {
                 continue;
+            }
+            if (toks.size() > 51) {
+                char* end = nullptr;
+                const float value = std::strtof(toks[51].c_str(), &end);
+                row.hasDirectionalMult = end != toks[51].c_str() && !*end &&
+                                         std::isfinite(value) && value >= 0 && value <= 2.55f;
+                if (row.hasDirectionalMult) {
+                    row.directionalMult = value;
+                }
             }
             char* endFar = nullptr;
             char* endFog = nullptr;
@@ -301,12 +312,15 @@ bool TimeCycle_LoadWeatherHour(const char* gameDir, const char* weather, int hou
     // Dir(6-8), SkyTop(9-11), SkyBot(12-14), SunCore(15-17).
     for (int k = 0; k < 3; ++k) {
         out.amb[k] = static_cast<uint8_t>(row.v[k]);
+        out.ambObjects[k] = static_cast<uint8_t>(row.v[3 + k]);
         out.dir[k] = static_cast<uint8_t>(row.v[6 + k]);
         out.skyTop[k] = static_cast<uint8_t>(row.v[9 + k]);
         out.skyBot[k] = static_cast<uint8_t>(row.v[12 + k]);
         out.sunCore[k] = static_cast<uint8_t>(row.v[15 + k]);
     }
     out.farClp = row.farClp;
+    out.directionalMult = row.directionalMult;
+    out.hasDirectionalMult = row.hasDirectionalMult;
     out.fogSt = row.fogSt;
     for (int k = 0; k < 4; ++k) {
         out.water[k] = row.water[k];

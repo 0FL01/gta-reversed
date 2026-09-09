@@ -47,8 +47,10 @@ bool CrowdShot_Init(const char* gameDir, WorldShotScene& scene, CrowdShotStats& 
     // between the eye and actors 1/2 and partially occludes them in the
     // shared z-buffer. Slight off-axis angle keeps slivers of the back
     // actors visible (each Pi>500) while guaranteeing overlap>0.
-    stats.eye[0] = -9.0f;
-    stats.eye[1] = 2.4f;
+    // Correct skinning no longer stretches hands/limbs into the silhouettes.
+    // Frame the actual narrower bodies closer; retain all pixel/overlap gates.
+    stats.eye[0] = -8.0f;
+    stats.eye[1] = 3.0f;
     stats.eye[2] = 2.0f;
     stats.target[0] = 0.0f;
     stats.target[1] = 0.0f;

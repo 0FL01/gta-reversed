@@ -66,8 +66,11 @@ using uint64 = uint64_t;
 
 namespace {
 void PrintUsage(const char* prog) {
-    (void)std::printf("interactive: %s --play [--game-dir PATH] [--seconds N] [--demo]\n"
-                      "  WASD move, Q/E descend/ascend, arrows look, Shift fast, Esc quit.\n",
+    (void)std::printf("interactive: %s --play [--game-dir PATH] [--seconds N] [--demo] [--freecam]\n"
+                      "  [--cam x,y,z] [--hour H] [--weather W] [--freeze-time]\n"
+                      "  --demo-curb: real street curb walk/sprint up/down regression replay.\n"
+                      "  WASD move/drive, arrows orbit, Shift sprint, Space jump/handbrake, Ctrl brake,\n"
+                      "  F enter/exit, Tab free camera (Q/E descend/ascend), Esc quit.\n",
                       prog ? prog : "mad-sa-linux");
     (void)std::printf(
         "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --shot-cs-duo <out.tga> | --shot-water <out.tga> [--hour H] [--water-file water1.dat] | --shot-shore <out.tga> [--hour H] | --shot-hud <out.tga> [--health H] [--armor A] | --shot-radar <out.tga> [--x X] [--y Y] | --zone-at X,Y | --shot-game <out.tga> [--health H] [--armor A] [--show-zone] [--wanted N] [--money M] [--hour H] [--weather W] | --csanim-seq <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--frames 5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] [--hud] [--wanted N] [--money M] [--radar] [--show-zone] [--hour H] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] [--hud] [--show-zone] [--hour H] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
@@ -3762,9 +3765,29 @@ int RunAnimBlend(int argc, char** argv) {
                              static_cast<unsigned long long>(checksums[static_cast<size_t>(i)]));
         cs += cell;
     }
-    constexpr uint64_t kR6j = 4444196192875791124ULL;
+    // Compare against the actual direct endpoint, not the old checksum of a
+    // distorted skinning transform. The pose audit independently checks the
+    // source DFF hierarchy, inverse binds and weighted vertices (including a
+    // negative control with the old multiplication order).
+    WorldShotScene referenceScene{};
+    IfpAnimStats referenceStats{};
+    if (!IfpAnim_Init(gameDir.c_str(), model, fromReq, 0.5, referenceScene, referenceStats,
+                      blendErr, sizeof(blendErr))) {
+        (void)std::printf("blend-fail direct reference: %s\n", blendErr);
+        IfpAnim_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    std::vector<uint8_t> referencePixels;
+    TexFrameStats referenceTex{};
+    DrawWorldFrame(referenceScene, width, height, 60.0f, nullptr, referencePixels, referenceTex);
+    uint64_t refR = 0, refG = 0, refB = 0, refNonBlack = 0;
+    const uint64_t kR6j = PixelsChecksum(referencePixels, refR, refG, refB, refNonBlack);
     constexpr uint64_t kBind = 8661044579928738921ULL;
-    bool c0match = !checksums.empty() && checksums[0] == kR6j;
+    bool c0match = refNonBlack > 0 && !checksums.empty() && checksums[0] == kR6j;
     bool gateDistinct = true;
     for (int i = 0; i < frames && gateDistinct; ++i) {
         for (int j = i + 1; j < frames; ++j) {
