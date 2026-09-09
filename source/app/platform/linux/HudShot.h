@@ -76,4 +76,12 @@ constexpr uint64_t kHudShoreEtalon = 3518993618115791197ULL;
 bool HudShot_Render(const char* gameDir, int health, int armor, std::vector<uint8_t>& basePixels,
                     std::vector<uint8_t>& hudPixels, HudShotStats& stats, char* err,
                     std::size_t errSize);
+// Round 40 (R6al): hour-parameterized variant. Identical to HudShot_Render
+// except the shore base is ShoreShot_Init(gameDir, hour) (same TimeCycle
+// waterColor path as --shot-shore --hour H) and the clock text is
+// "%02d:00" of hour via the same font2 path. hour must be 0-23; hour=12 is
+// bit-identical to HudShot_Render. No hardcoded colors/digits on this path.
+bool HudShot_RenderHour(const char* gameDir, int health, int armor, int hour,
+                        std::vector<uint8_t>& basePixels, std::vector<uint8_t>& hudPixels,
+                        HudShotStats& stats, char* err, std::size_t errSize);
 void HudShot_Shutdown();

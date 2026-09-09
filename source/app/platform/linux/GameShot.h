@@ -66,6 +66,15 @@ bool GameShot_Render(const char* gameDir, int health, int armor, std::vector<uin
                      std::vector<uint8_t>& hudPixels, std::vector<uint8_t>& radarFull,
                      std::vector<uint8_t>& gamePixels, GameShotStats& stats, char* err,
                      std::size_t errSize);
+// Round 40 (R6al): hour-parameterized variant. Identical to GameShot_Render
+// except the HudShot base uses HudShot_RenderHour(gameDir,H,A,hour) (same
+// ShoreShot/TimeCycle waterColor path as --shot-shore --hour H, same font2
+// clock "%02d:00" of hour). hour must be 0-23; hour=12 is bit-identical to
+// GameShot_Render. Without this call GameShot_Render output is untouched.
+bool GameShot_RenderHour(const char* gameDir, int health, int armor, int hour,
+                         std::vector<uint8_t>& basePixels, std::vector<uint8_t>& hudPixels,
+                         std::vector<uint8_t>& radarFull, std::vector<uint8_t>& gamePixels,
+                         GameShotStats& stats, char* err, std::size_t errSize);
 void GameShot_Shutdown();
 
 // Round 36 (R6ah): zone label over the game frame (--show-zone).

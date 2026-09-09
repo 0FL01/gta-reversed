@@ -199,6 +199,13 @@ void BlitBar(std::vector<uint8>& px, const TexImage& bar, int x0, int y0, int ma
 bool HudShot_Render(const char* gameDir, int health, int armor, std::vector<uint8_t>& basePixels,
                     std::vector<uint8_t>& hudPixels, HudShotStats& stats, char* err,
                     std::size_t errSize) {
+    return HudShot_RenderHour(gameDir, health, armor, kHour, basePixels, hudPixels, stats, err,
+                              errSize);
+}
+
+bool HudShot_RenderHour(const char* gameDir, int health, int armor, int hour,
+                        std::vector<uint8_t>& basePixels, std::vector<uint8_t>& hudPixels,
+                        HudShotStats& stats, char* err, std::size_t errSize) {
     stats = HudShotStats{};
     basePixels.clear();
     hudPixels.clear();
@@ -226,10 +233,15 @@ bool HudShot_Render(const char* gameDir, int health, int armor, std::vector<uint
     (void)std::snprintf(stats.fontTex, sizeof(stats.fontTex), "font2");
 
     // 1. Base: the existing shore composition, same inputs as --shot-shore.
+    // R6al: hour selects the timecyc row (same path as --shot-shore --hour).
+    if (hour < 0 || hour > 23) {
+        SetErr(err, errSize, "bad hour (want 0-23)");
+        return false;
+    }
     WorldShotScene scene{};
     {
         char serr[640] = {};
-        if (!ShoreShot_Init(gameDir, kHour, scene, stats.shore, stats.loadInfo, stats.pagerFrame,
+        if (!ShoreShot_Init(gameDir, hour, scene, stats.shore, stats.loadInfo, stats.pagerFrame,
                              serr, sizeof(serr))) {
             char msg[768];
             (void)std::snprintf(msg, sizeof(msg), "shore-init: %s", serr);
@@ -381,7 +393,7 @@ bool HudShot_Render(const char* gameDir, int health, int armor, std::vector<uint
     char clockText[16] = {};
     (void)std::snprintf(hText, sizeof(hText), "%d", health);
     (void)std::snprintf(aText, sizeof(aText), "%d", armor);
-    (void)std::snprintf(clockText, sizeof(clockText), "%02d:00", kHour);
+    (void)std::snprintf(clockText, sizeof(clockText), "%02d:00", hour);
     (void)std::snprintf(stats.clockText, sizeof(stats.clockText), "%s", clockText);
     (void)MenuShot_DrawTextRight(hudPixels, kFbW, kFbH, font, hText, kHealthX0 - kDigitGap,
                                  kHealthY0 - 6, kDigitH, 0, 0, 0);

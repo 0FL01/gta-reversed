@@ -40,6 +40,14 @@ bool GameShot_Render(const char* gameDir, int health, int armor, std::vector<uin
                      std::vector<uint8_t>& hudPixels, std::vector<uint8_t>& radarFull,
                      std::vector<uint8_t>& gamePixels, GameShotStats& stats, char* err,
                      std::size_t errSize) {
+    return GameShot_RenderHour(gameDir, health, armor, 12, basePixels, hudPixels, radarFull,
+                               gamePixels, stats, err, errSize);
+}
+
+bool GameShot_RenderHour(const char* gameDir, int health, int armor, int hour,
+                         std::vector<uint8_t>& basePixels, std::vector<uint8_t>& hudPixels,
+                         std::vector<uint8_t>& radarFull, std::vector<uint8_t>& gamePixels,
+                         GameShotStats& stats, char* err, std::size_t errSize) {
     stats = GameShotStats{};
     basePixels.clear();
     hudPixels.clear();
@@ -53,12 +61,17 @@ bool GameShot_Render(const char* gameDir, int health, int armor, std::vector<uin
         SetErr(err, errSize, "bad health/armor (want 0-255)");
         return false;
     }
+    if (hour < 0 || hour > 23) {
+        SetErr(err, errSize, "bad hour (want 0-23)");
+        return false;
+    }
 
     // 1. Shore base + HUD overlay, through the existing HudShot path.
+    // R6al: hour selects the timecyc row (same path as --shot-shore --hour).
     {
         char herr[768] = {};
-        if (!HudShot_Render(gameDir, health, armor, basePixels, hudPixels, stats.hud, herr,
-                            sizeof(herr))) {
+        if (!HudShot_RenderHour(gameDir, health, armor, hour, basePixels, hudPixels, stats.hud,
+                                herr, sizeof(herr))) {
             char msg[896];
             (void)std::snprintf(msg, sizeof(msg), "hud-path: %s", herr);
             SetErr(err, errSize, msg);
