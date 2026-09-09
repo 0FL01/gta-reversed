@@ -40,6 +40,7 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
         app/platform/linux/SkinPed.cpp
         app/platform/linux/IfpAnim.cpp
         app/platform/linux/CarPose.cpp
+        app/platform/linux/DuoShot.cpp
         app/platform/linux/TimeCycle.cpp
         app/platform/linux/DriveSim.cpp
         app/platform/linux/Handling.cpp

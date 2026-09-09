@@ -46,6 +46,7 @@ using uint64 = uint64_t;
 #include "app/platform/linux/SkinPed.h"
 #include "app/platform/linux/IfpAnim.h"
 #include "app/platform/linux/CarPose.h"
+#include "app/platform/linux/DuoShot.h"
 #include "app/platform/linux/TimeCycle.h"
 #include "app/platform/linux/DriveSim.h"
 #include "app/platform/linux/Handling.h"
@@ -56,7 +57,7 @@ using uint64 = uint64_t;
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -2584,6 +2585,195 @@ int RunShotCar(int argc, char** argv) {
     return 0;
 }
 
+// Round 22 (R6t): meeting — ped beside the car in ONE shared-depth frame.
+// Loads the car DFF (landstal, steer=spin=0, origin yaw=0) via CarPose_Init
+// and the ped DFF (andre, IDLE_stance@0.5 legacy single key) via
+// IfpAnim_Init, offsets the ped by pedOffset=(-2.2,0.5,0) in car space,
+// both Z on the flat z=0 plane (ground=flat, no raycast this round), and
+// renders both mesh sets in ONE TexSample_RenderDuo call with a common
+// z-buffer. pedPixels/carPixels count depth winners; overlap counts pixels
+// where BOTH actors projected and the shared z-test picked the nearer one
+// (anti-montage proof). No stitched TGAs, no procedural meshes.
+int RunShotDuo(int argc, char** argv) {
+    const char* outPath = ArgValue(argc, argv, "--shot-duo", "duo.tga");
+    const char* carModel = ArgValue(argc, argv, "--car", "landstal");
+    const char* pedModel = ArgValue(argc, argv, "--ped", "andre");
+    if (!outPath || outPath[0] == '\0' || !carModel || carModel[0] == '\0' || !pedModel ||
+        pedModel[0] == '\0') {
+        (void)std::printf("duo-fail bad args shot-duo='%s' car='%s' ped='%s'\n",
+                           outPath ? outPath : "(null)", carModel ? carModel : "(null)",
+                           pedModel ? pedModel : "(null)");
+        return 1;
+    }
+    const int width = 640;
+    const int height = 480;
+    auto getPlatformDisplay = reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(
+        eglGetProcAddress("eglGetPlatformDisplayEXT")
+    );
+    if (!getPlatformDisplay) {
+        (void)std::printf("duo-fail no eglGetPlatformDisplayEXT\n");
+        return 1;
+    }
+#ifndef EGL_PLATFORM_SURFACELESS_MESA
+#define EGL_PLATFORM_SURFACELESS_MESA 0x31DD
+#endif
+    EGLDisplay display = getPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
+    if (display == EGL_NO_DISPLAY) {
+        (void)std::printf("duo-fail no surfaceless display 0x%x\n", eglGetError());
+        return 1;
+    }
+    if (!eglInitialize(display, nullptr, nullptr)) {
+        (void)std::printf("duo-fail egl init 0x%x\n", eglGetError());
+        return 1;
+    }
+    const EGLint configAttrs[] = {
+        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
+        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+        EGL_DEPTH_SIZE, 24,
+        EGL_NONE
+    };
+    EGLConfig config = nullptr;
+    EGLint configCount = 0;
+    if (!eglChooseConfig(display, configAttrs, &config, 1, &configCount) || configCount < 1) {
+        (void)std::printf("duo-fail choose config 0x%x\n", eglGetError());
+        eglTerminate(display);
+        return 1;
+    }
+    const EGLint pbufferAttrs[] = { EGL_WIDTH, width, EGL_HEIGHT, height, EGL_NONE };
+    EGLSurface surface = eglCreatePbufferSurface(display, config, pbufferAttrs);
+    if (surface == EGL_NO_SURFACE) {
+        (void)std::printf("duo-fail pbuffer 0x%x\n", eglGetError());
+        eglTerminate(display);
+        return 1;
+    }
+    (void)eglBindAPI(EGL_OPENGL_API);
+    EGLContext context = eglCreateContext(display, config, EGL_NO_CONTEXT, nullptr);
+    if (context == EGL_NO_CONTEXT) {
+        (void)std::printf("duo-fail context 0x%x\n", eglGetError());
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    if (!eglMakeCurrent(display, surface, surface, context)) {
+        (void)std::printf("duo-fail make current 0x%x\n", eglGetError());
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    const char* glVersion = reinterpret_cast<const char*>(glGetString(GL_VERSION));
+    (void)std::printf("duo-gl %s\n", glVersion ? glVersion : "(null)");
+    std::string gameDir = ResolveGameDir(argc, argv);
+    WorldShotScene scene{};
+    DuoShotStats dst{};
+    CarPoseStats cst{};
+    IfpAnimStats ast{};
+    char duoErr[640] = {};
+    if (!DuoShot_Init(gameDir.c_str(), carModel, pedModel, scene, dst, cst, ast, duoErr,
+                       sizeof(duoErr))) {
+        (void)std::printf("duo-fail load %s (game=%s car=%s ped=%s)\n", duoErr,
+                           gameDir.c_str(), carModel, pedModel);
+        DuoShot_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    (void)std::printf(
+        "duo-load car=%s src=%s txd=%s bodyTris=%d wheelTris=%d carTris=%d "
+        "ped=%s src=%s anim=IDLE_stance time=0.5 mapped=%d pedTris=%d carMeshes=%d "
+        "bbox=[%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f]\n",
+        dst.car, cst.src, cst.txd, cst.bodyTris, cst.wheelTris, dst.carTris, dst.ped,
+        ast.src, ast.mapped, dst.pedTris, dst.carMeshes, scene.bboxMin[0], scene.bboxMin[1],
+        scene.bboxMin[2], scene.bboxMax[0], scene.bboxMax[1], scene.bboxMax[2]);
+    (void)std::printf("pedOffset=%.1f,%.1f,%.1f ground=flat carYaw=0\n", dst.pedOffset[0],
+                       dst.pedOffset[1], dst.pedOffset[2]);
+    (void)std::printf("duo-cam eye=%.1f,%.1f,%.1f target=%.1f,%.1f,%.1f fov=60\n", dst.eye[0],
+                       dst.eye[1], dst.eye[2], dst.target[0], dst.target[1], dst.target[2]);
+    if (dst.carTris != 3613) {
+        (void)std::printf("duo-fail gate carTris=%d(need 3613=3049+4x141)\n", dst.carTris);
+        DuoShot_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    if (dst.pedTris != 1544) {
+        (void)std::printf("duo-fail gate pedTris=%d(need 1544)\n", dst.pedTris);
+        DuoShot_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    std::vector<uint8> pixels;
+    TexFrameStats texStats{};
+    TexDuoStats duo{};
+    TexSample_RenderDuo(scene, dst.carMeshes, width, height, dst.eye, dst.target, pixels,
+                        texStats, duo);
+    uint64_t sumR = 0;
+    uint64_t sumG = 0;
+    uint64_t sumB = 0;
+    uint64_t nonBlack = 0;
+    uint64_t checksum = PixelsChecksum(pixels, sumR, sumG, sumB, nonBlack);
+    uint64_t total = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
+    if (nonBlack == 0) {
+        (void)std::printf("duo-fail black frame\n");
+        DuoShot_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    if (duo.pedPixels <= 1000 || duo.carPixels <= 1000 || duo.overlap <= 0) {
+        (void)std::printf("duo-fail gate pedPixels=%ld(>1000) carPixels=%ld(>1000) overlap=%ld(>0)\n",
+                           duo.pedPixels, duo.carPixels, duo.overlap);
+        DuoShot_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    if (!WriteTga24(outPath, width, height, pixels)) {
+        (void)std::printf("duo-fail write '%s'\n", outPath);
+        DuoShot_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    eglDestroyContext(display, context);
+    eglDestroySurface(display, surface);
+    eglTerminate(display);
+    OS_DebugOut("mad-sa-linux duo shot");
+    (void)std::printf(
+        "texduo-ok tris=%d sampledTri=%d texelFetch=%ld greyFallback=%d flatTri=%d texPixels=%ld "
+        "render=cpu shared-z=1\n",
+        texStats.tris, texStats.sampledTri, texStats.texelFetch, texStats.fallbackTri,
+        texStats.flatTri, texStats.texPixels);
+    (void)std::printf(
+        "duo-ok car=%s ped=%s carTris=%d pedTris=%d pedPixels=%ld carPixels=%ld overlap=%ld "
+        "checksum=%llu\n",
+        dst.car, dst.ped, dst.carTris, dst.pedTris, duo.pedPixels, duo.carPixels, duo.overlap,
+        static_cast<unsigned long long>(checksum));
+    (void)std::printf(
+        "duoshot-ok out=%s nonblack=%llu/%llu avg=%llu,%llu,%llu checksum=%llu\n", outPath,
+        static_cast<unsigned long long>(nonBlack), static_cast<unsigned long long>(total),
+        static_cast<unsigned long long>(sumR / total),
+        static_cast<unsigned long long>(sumG / total),
+        static_cast<unsigned long long>(sumB / total), static_cast<unsigned long long>(checksum));
+    DuoShot_Shutdown();
+    return 0;
+}
+
 // Round 16 (R6n): kinematic drive. Car (CarPose DFF/TXD, steer+spin) rides a
 // caller-supplied XY polyline; Z comes only from the COL raycast
 // (carZ = groundH + clearance), yaw from the segment, front steer from
@@ -3804,6 +3994,9 @@ int main(int argc, char** argv) {
     }
     if (HasArg(argc, argv, "--shot-car")) {
         return RunShotCar(argc, argv);
+    }
+    if (HasArg(argc, argv, "--shot-duo")) {
+        return RunShotDuo(argc, argv);
     }
     if (HasArg(argc, argv, "--drive")) {
         return RunDrive(argc, argv);
