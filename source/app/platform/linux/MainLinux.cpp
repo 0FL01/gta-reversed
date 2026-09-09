@@ -66,7 +66,7 @@ using uint64 = uint64_t;
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --shot-cs-duo <out.tga> | --shot-water <out.tga> [--hour H] [--water-file water1.dat] | --shot-shore <out.tga> [--hour H] | --shot-hud <out.tga> [--health H] [--armor A] | --shot-radar <out.tga> [--x X] [--y Y] | --zone-at X,Y | --shot-game <out.tga> [--health H] [--armor A] [--show-zone] [--wanted N] [--money M] [--hour H] | --csanim-seq <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--frames 5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --shot-cs-duo <out.tga> | --shot-water <out.tga> [--hour H] [--water-file water1.dat] | --shot-shore <out.tga> [--hour H] | --shot-hud <out.tga> [--health H] [--armor A] | --shot-radar <out.tga> [--x X] [--y Y] | --zone-at X,Y | --shot-game <out.tga> [--health H] [--armor A] [--show-zone] [--wanted N] [--money M] [--hour H] [--weather W] | --csanim-seq <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--frames 5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -1384,6 +1384,11 @@ int RunShotRadar(int argc, char** argv) {
 // and shows the HUD clock as "%02d:00" of H via the same font2 path.
 // Without the flag the pixels and the game-ok line are bit-identical to
 // R6af; out-of-range input fails honestly like --shot-scene.
+// R6am (round 41): optional --weather W (only with --hour, like
+// --shot-scene) renders the shore base from section W row H (same
+// TimeCycle_LoadWeatherHour exact-token path); the timecyc-load and
+// game-ok lines carry weather=W hour=H. Without the flag the pixels and
+// the game-ok line are bit-identical to R6al/R6af.
 int RunShotGame(int argc, char** argv) {
     const char* outPath = ArgValue(argc, argv, "--shot-game", "game.tga");
     if (!outPath || outPath[0] == '\0') {
@@ -1503,6 +1508,37 @@ int RunShotGame(int argc, char** argv) {
             hasHour = true;
         }
     }
+    // R6am (round 41): optional weather section. Only with --hour (like
+    // --shot-scene: bare --weather fails honestly); the token must be a
+    // valid section name (A-Z0-9_), matched exactly in TimeCycle (so
+    // SUNNY_LA never hits EXTRASUNNY_LA). Without the flag the legacy
+    // EXTRASUNNY_LA path stays bit-for-bit.
+    char weatherName[64] = {};
+    const char* weather = "EXTRASUNNY_LA";
+    bool hasWeather = false;
+    {
+        const char* weatherArg = ArgValue(argc, argv, "--weather", nullptr);
+        if (weatherArg) {
+            size_t wlen = std::strlen(weatherArg);
+            bool wok = wlen > 0 && wlen < sizeof(weatherName);
+            for (size_t i = 0; wok && i < wlen; ++i) {
+                const char c = weatherArg[i];
+                wok = (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+            }
+            if (!wok) {
+                (void)std::printf("game-fail bad --weather '%s' (want SECTION like CLOUDY_LA)\n",
+                                   weatherArg);
+                return 1;
+            }
+            (void)std::snprintf(weatherName, sizeof(weatherName), "%s", weatherArg);
+            weather = weatherName;
+            hasWeather = true;
+        }
+    }
+    if (hasWeather && !hasHour) {
+        (void)std::printf("game-fail --weather needs --hour H (0-23)\n");
+        return 1;
+    }
     std::string gameDir = ResolveGameDir(argc, argv);
     std::vector<uint8> basePixels;
     std::vector<uint8> hudPixels;
@@ -1512,7 +1548,11 @@ int RunShotGame(int argc, char** argv) {
     GameShotStats gst{};
     char gameErr[1024] = {};
     bool gameRenderOk = false;
-    if (hasHour) {
+    if (hasHour && hasWeather) {
+        gameRenderOk = GameShot_RenderWeatherHour(gameDir.c_str(), health, armor, weather, hour,
+                                                  basePixels, hudPixels, radarFull, gamePixels,
+                                                  gst, gameErr, sizeof(gameErr));
+    } else if (hasHour) {
         gameRenderOk = GameShot_RenderHour(gameDir.c_str(), health, armor, hour, basePixels,
                                            hudPixels, radarFull, gamePixels, gst, gameErr,
                                            sizeof(gameErr));
@@ -1539,24 +1579,28 @@ int RunShotGame(int argc, char** argv) {
     (void)std::printf("shore-cam eye=%.1f,%.1f,%.1f target=%.1f,%.1f,%.1f fov=60\n",
                        sst.eye[0], sst.eye[1], sst.eye[2], sst.target[0], sst.target[1],
                        sst.target[2]);
-    // R6al: with --hour the same EXTRASUNNY_LA row drives the base (water via
+    // R6al: with --hour the same timecyc row drives the base (water via
     // ShoreShot_Init above) and the clock below. Log the full row from
     // timecyc bytes (no hardcoded colors), same format as --shot-scene.
+    // R6am: with --weather the row comes from the named section instead
+    // (same exact-token path as --shot-scene --weather W --hour H).
     if (hasHour) {
         TimeCycleParams tcp{};
         char tcErr[256] = {};
-        if (!TimeCycle_LoadHour(gameDir.c_str(), hour, tcp, tcErr, sizeof(tcErr))) {
-            (void)std::printf("game-fail timecyc %s (game=%s hour=%d)\n", tcErr,
-                              gameDir.c_str(), hour);
+        if (!TimeCycle_LoadWeatherHour(gameDir.c_str(), weather, hour, tcp, tcErr,
+                                       sizeof(tcErr))) {
+            (void)std::printf("game-fail timecyc %s (game=%s weather=%s hour=%d)\n", tcErr,
+                              gameDir.c_str(), weather, hour);
             GameShot_Shutdown();
             return 1;
         }
         (void)std::printf(
-            "timecyc-load weather=EXTRASUNNY_LA hour=%d amb=%d,%d,%d dir=%d,%d,%d "
+            "timecyc-load weather=%s hour=%d amb=%d,%d,%d dir=%d,%d,%d "
             "skytop=%d,%d,%d skybot=%d,%d,%d suncore=%d,%d,%d sample=%s sunDir=fixed spec=off\n",
-            hour, tcp.amb[0], tcp.amb[1], tcp.amb[2], tcp.dir[0], tcp.dir[1], tcp.dir[2],
-            tcp.skyTop[0], tcp.skyTop[1], tcp.skyTop[2], tcp.skyBot[0], tcp.skyBot[1],
-            tcp.skyBot[2], tcp.sunCore[0], tcp.sunCore[1], tcp.sunCore[2], tcp.sampleName);
+            weather, hour, tcp.amb[0], tcp.amb[1], tcp.amb[2], tcp.dir[0], tcp.dir[1],
+            tcp.dir[2], tcp.skyTop[0], tcp.skyTop[1], tcp.skyTop[2], tcp.skyBot[0],
+            tcp.skyBot[1], tcp.skyBot[2], tcp.sunCore[0], tcp.sunCore[1], tcp.sunCore[2],
+            tcp.sampleName);
     }
     (void)std::printf(
         "texshore-ok tris=%d sampledTri=%d texelFetch=%ld greyFallback=%d flatTri=%d "
@@ -1755,6 +1799,13 @@ int RunShotGame(int argc, char** argv) {
         }
     }
     uint64_t checksum = PixelsChecksum(gamePixels, gR, gG, gB, gN);
+    // R6am (round 41): weather prefix for the game-ok line. Empty without
+    // --weather (legacy logs stay byte-identical: " %shour" collapses to
+    // " hour"); "weather=W " with the flag (=> " weather=W hour=H").
+    char weatherPrefix[80] = {};
+    if (hasWeather) {
+        (void)std::snprintf(weatherPrefix, sizeof(weatherPrefix), "weather=%s ", weather);
+    }
     if (hasMoney && moneyStats.moneyPixels <= 200) {
         (void)std::printf("game-fail thin money overlay moneyPixels=%ld (want >200)\n",
                           moneyStats.moneyPixels);
@@ -1774,84 +1825,84 @@ int RunShotGame(int argc, char** argv) {
         if (showZone && wanted >= 0 && hasMoney) {
             (void)std::printf(
                 "game-ok health=%d armor=%d hudPixels=%ld radarPixels=%ld baseChecksum=%llu "
-                "hudChecksum=%llu radarChecksum=%llu zoneLabel=1 wanted=%d money=%d hour=%d "
+                "hudChecksum=%llu radarChecksum=%llu zoneLabel=1 wanted=%d money=%d %shour=%d "
                 "checksum=%llu\n",
                 gst.hud.health, gst.hud.armor, gst.hud.hudPixels, gst.radarPixels,
                 static_cast<unsigned long long>(baseChecksum),
                 static_cast<unsigned long long>(hudChecksum),
-                static_cast<unsigned long long>(radarChecksum), wanted, money, hour,
+                static_cast<unsigned long long>(radarChecksum), wanted, money, weatherPrefix, hour,
                 static_cast<unsigned long long>(checksum));
         } else if (showZone && wanted >= 0) {
             (void)std::printf(
                 "game-ok health=%d armor=%d hudPixels=%ld radarPixels=%ld baseChecksum=%llu "
-                "hudChecksum=%llu radarChecksum=%llu zoneLabel=1 wanted=%d hour=%d checksum=%llu\n",
+                "hudChecksum=%llu radarChecksum=%llu zoneLabel=1 wanted=%d %shour=%d checksum=%llu\n",
                 gst.hud.health, gst.hud.armor, gst.hud.hudPixels, gst.radarPixels,
                 static_cast<unsigned long long>(baseChecksum),
                 static_cast<unsigned long long>(hudChecksum),
-                static_cast<unsigned long long>(radarChecksum), wanted, hour,
+                static_cast<unsigned long long>(radarChecksum), wanted, weatherPrefix, hour,
                 static_cast<unsigned long long>(checksum));
         } else if (showZone && hasMoney) {
             (void)std::printf(
                 "game-ok health=%d armor=%d hudPixels=%ld radarPixels=%ld baseChecksum=%llu "
-                "hudChecksum=%llu radarChecksum=%llu zoneLabel=1 money=%d hour=%d checksum=%llu\n",
+                "hudChecksum=%llu radarChecksum=%llu zoneLabel=1 money=%d %shour=%d checksum=%llu\n",
                 gst.hud.health, gst.hud.armor, gst.hud.hudPixels, gst.radarPixels,
                 static_cast<unsigned long long>(baseChecksum),
                 static_cast<unsigned long long>(hudChecksum),
-                static_cast<unsigned long long>(radarChecksum), money, hour,
+                static_cast<unsigned long long>(radarChecksum), money, weatherPrefix, hour,
                 static_cast<unsigned long long>(checksum));
         } else if (wanted >= 0 && hasMoney) {
             (void)std::printf(
                 "game-ok health=%d armor=%d hudPixels=%ld radarPixels=%ld baseChecksum=%llu "
-                "hudChecksum=%llu radarChecksum=%llu wanted=%d money=%d hour=%d checksum=%llu\n",
+                "hudChecksum=%llu radarChecksum=%llu wanted=%d money=%d %shour=%d checksum=%llu\n",
                 gst.hud.health, gst.hud.armor, gst.hud.hudPixels, gst.radarPixels,
                 static_cast<unsigned long long>(baseChecksum),
                 static_cast<unsigned long long>(hudChecksum),
-                static_cast<unsigned long long>(radarChecksum), wanted, money, hour,
+                static_cast<unsigned long long>(radarChecksum), wanted, money, weatherPrefix, hour,
                 static_cast<unsigned long long>(checksum));
         } else if (hasMoney) {
             (void)std::printf(
                 "game-ok health=%d armor=%d hudPixels=%ld radarPixels=%ld baseChecksum=%llu "
-                "hudChecksum=%llu radarChecksum=%llu money=%d hour=%d checksum=%llu\n",
+                "hudChecksum=%llu radarChecksum=%llu money=%d %shour=%d checksum=%llu\n",
                 gst.hud.health, gst.hud.armor, gst.hud.hudPixels, gst.radarPixels,
                 static_cast<unsigned long long>(baseChecksum),
                 static_cast<unsigned long long>(hudChecksum),
-                static_cast<unsigned long long>(radarChecksum), money, hour,
+                static_cast<unsigned long long>(radarChecksum), money, weatherPrefix, hour,
                 static_cast<unsigned long long>(checksum));
         } else if (showZone && wanted >= 0) {
             (void)std::printf(
                 "game-ok health=%d armor=%d hudPixels=%ld radarPixels=%ld baseChecksum=%llu "
-                "hudChecksum=%llu radarChecksum=%llu zoneLabel=1 wanted=%d hour=%d checksum=%llu\n",
+                "hudChecksum=%llu radarChecksum=%llu zoneLabel=1 wanted=%d %shour=%d checksum=%llu\n",
                 gst.hud.health, gst.hud.armor, gst.hud.hudPixels, gst.radarPixels,
                 static_cast<unsigned long long>(baseChecksum),
                 static_cast<unsigned long long>(hudChecksum),
-                static_cast<unsigned long long>(radarChecksum), wanted, hour,
+                static_cast<unsigned long long>(radarChecksum), wanted, weatherPrefix, hour,
                 static_cast<unsigned long long>(checksum));
         } else if (showZone) {
             (void)std::printf(
                 "game-ok health=%d armor=%d hudPixels=%ld radarPixels=%ld baseChecksum=%llu "
-                "hudChecksum=%llu radarChecksum=%llu zoneLabel=1 hour=%d checksum=%llu\n",
+                "hudChecksum=%llu radarChecksum=%llu zoneLabel=1 %shour=%d checksum=%llu\n",
                 gst.hud.health, gst.hud.armor, gst.hud.hudPixels, gst.radarPixels,
                 static_cast<unsigned long long>(baseChecksum),
                 static_cast<unsigned long long>(hudChecksum),
-                static_cast<unsigned long long>(radarChecksum), hour,
+                static_cast<unsigned long long>(radarChecksum), weatherPrefix, hour,
                 static_cast<unsigned long long>(checksum));
         } else if (wanted >= 0) {
             (void)std::printf(
                 "game-ok health=%d armor=%d hudPixels=%ld radarPixels=%ld baseChecksum=%llu "
-                "hudChecksum=%llu radarChecksum=%llu wanted=%d hour=%d checksum=%llu\n",
+                "hudChecksum=%llu radarChecksum=%llu wanted=%d %shour=%d checksum=%llu\n",
                 gst.hud.health, gst.hud.armor, gst.hud.hudPixels, gst.radarPixels,
                 static_cast<unsigned long long>(baseChecksum),
                 static_cast<unsigned long long>(hudChecksum),
-                static_cast<unsigned long long>(radarChecksum), wanted, hour,
+                static_cast<unsigned long long>(radarChecksum), wanted, weatherPrefix, hour,
                 static_cast<unsigned long long>(checksum));
         } else {
             (void)std::printf(
                 "game-ok health=%d armor=%d hudPixels=%ld radarPixels=%ld baseChecksum=%llu "
-                "hudChecksum=%llu radarChecksum=%llu hour=%d checksum=%llu\n",
+                "hudChecksum=%llu radarChecksum=%llu %shour=%d checksum=%llu\n",
                 gst.hud.health, gst.hud.armor, gst.hud.hudPixels, gst.radarPixels,
                 static_cast<unsigned long long>(baseChecksum),
                 static_cast<unsigned long long>(hudChecksum),
-                static_cast<unsigned long long>(radarChecksum), hour,
+                static_cast<unsigned long long>(radarChecksum), weatherPrefix, hour,
                 static_cast<unsigned long long>(checksum));
         }
     } else if (showZone && wanted >= 0 && hasMoney) {
