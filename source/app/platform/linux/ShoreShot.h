@@ -40,6 +40,14 @@ struct ShoreShotStats {
     char waterFile[64] = {}; // always "data/water.dat" this round
     int hour = 12; // requested clock hour 0-23 (water color only)
     uint8_t waterRGBA[4] = {}; // WaterRGBA bytes of the timecyc row
+    // Full timecyc row backing the base (round 42, R6an): the fog/game path
+    // builds its TexTimeEnv from these bytes (no hardcoded F/S/colors).
+    uint8_t tcAmb[3] = {}; // Amb RGB of the timecyc row
+    uint8_t tcDir[3] = {}; // Dir RGB of the timecyc row
+    uint8_t tcSkyTop[3] = {}; // SkyTop RGB of the timecyc row
+    uint8_t tcSkyBot[3] = {}; // SkyBot RGB (= fog color) of the timecyc row
+    float tcFarClp = 0.0f; // FarClp of the timecyc row
+    float tcFogSt = 0.0f; // FogSt of the timecyc row
     float bboxMin[3] = {};
     float bboxMax[3] = {};
 };

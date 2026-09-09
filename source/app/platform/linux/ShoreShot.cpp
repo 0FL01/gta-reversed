@@ -109,6 +109,16 @@ bool ShoreShot_InitWeather(const char* gameDir, const char* weather, int hour,
     for (int c = 0; c < 4; ++c) {
         stats.waterRGBA[c] = tcp.water[c];
     }
+    // Round 42 (R6an): keep the whole row for the fog env (timecyc bytes
+    // only; the render call sites build TexTimeEnv from here).
+    for (int c = 0; c < 3; ++c) {
+        stats.tcAmb[c] = tcp.amb[c];
+        stats.tcDir[c] = tcp.dir[c];
+        stats.tcSkyTop[c] = tcp.skyTop[c];
+        stats.tcSkyBot[c] = tcp.skyBot[c];
+    }
+    stats.tcFarClp = tcp.farClp;
+    stats.tcFogSt = tcp.fogSt;
 
     // 3. Water geometry: existing WaterLevel path (water.dat only).
     WaterLevelData water{};

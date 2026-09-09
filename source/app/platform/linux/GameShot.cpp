@@ -53,10 +53,19 @@ bool GameShot_RenderHour(const char* gameDir, int health, int armor, int hour,
 }
 
 bool GameShot_RenderWeatherHour(const char* gameDir, int health, int armor, const char* weather,
-                                int hour, std::vector<uint8_t>& basePixels,
-                                std::vector<uint8_t>& hudPixels, std::vector<uint8_t>& radarFull,
-                                std::vector<uint8_t>& gamePixels, GameShotStats& stats, char* err,
-                                std::size_t errSize) {
+                                 int hour, std::vector<uint8_t>& basePixels,
+                                 std::vector<uint8_t>& hudPixels, std::vector<uint8_t>& radarFull,
+                                 std::vector<uint8_t>& gamePixels, GameShotStats& stats, char* err,
+                                 std::size_t errSize) {
+    return GameShot_RenderWeatherHourFog(gameDir, health, armor, weather, hour, false, basePixels,
+                                         hudPixels, radarFull, gamePixels, stats, err, errSize);
+}
+
+bool GameShot_RenderWeatherHourFog(const char* gameDir, int health, int armor, const char* weather,
+                                   int hour, bool wantFog, std::vector<uint8_t>& basePixels,
+                                   std::vector<uint8_t>& hudPixels, std::vector<uint8_t>& radarFull,
+                                   std::vector<uint8_t>& gamePixels, GameShotStats& stats, char* err,
+                                   std::size_t errSize) {
     stats = GameShotStats{};
     basePixels.clear();
     hudPixels.clear();
@@ -79,11 +88,13 @@ bool GameShot_RenderWeatherHour(const char* gameDir, int health, int armor, cons
     // R6al: hour selects the timecyc row (same path as --shot-shore --hour).
     // R6am: weather selects the timecyc section (same exact-token path as
     // --shot-scene --weather W --hour H).
+    // R6an: wantFog renders the base through the scene --fog rasterizer
+    // path (HUD/radar overlays below stay unfogged: base-only order).
     {
         char herr[768] = {};
-        if (!HudShot_RenderWeatherHour(gameDir, health, armor, weather ? weather : "EXTRASUNNY_LA",
-                                       hour, basePixels, hudPixels, stats.hud, herr,
-                                       sizeof(herr))) {
+        if (!HudShot_RenderWeatherHourFog(gameDir, health, armor, weather ? weather : "EXTRASUNNY_LA",
+                                          hour, wantFog, basePixels, hudPixels, stats.hud, herr,
+                                          sizeof(herr))) {
             char msg[896];
             (void)std::snprintf(msg, sizeof(msg), "hud-path: %s", herr);
             SetErr(err, errSize, msg);

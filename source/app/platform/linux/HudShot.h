@@ -94,4 +94,15 @@ bool HudShot_RenderWeatherHour(const char* gameDir, int health, int armor, const
                                int hour, std::vector<uint8_t>& basePixels,
                                std::vector<uint8_t>& hudPixels, HudShotStats& stats, char* err,
                                std::size_t errSize);
+// Round 42 (R6an): fog variant. Identical to HudShot_RenderWeatherHour
+// except that with wantFog=true the shore base renders through
+// TexSample_RenderDuoTC with the TexTimeEnv built from the same timecyc row
+// (ambient+sun+sky from the row bytes, fog blend toward SkyBot by
+// clamp((dist-FogSt)/(FarClp-FogSt),0,1) — the scene --fog path). The HUD
+// overlay on top is unfogged (base-only order). wantFog=false is
+// bit-identical to HudShot_RenderWeatherHour.
+bool HudShot_RenderWeatherHourFog(const char* gameDir, int health, int armor, const char* weather,
+                                  int hour, bool wantFog, std::vector<uint8_t>& basePixels,
+                                  std::vector<uint8_t>& hudPixels, HudShotStats& stats, char* err,
+                                  std::size_t errSize);
 void HudShot_Shutdown();

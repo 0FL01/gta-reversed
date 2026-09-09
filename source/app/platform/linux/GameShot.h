@@ -83,10 +83,19 @@ bool GameShot_RenderHour(const char* gameDir, int health, int armor, int hour,
 // to GameShot_RenderHour. Without this call GameShot_Render output is
 // untouched.
 bool GameShot_RenderWeatherHour(const char* gameDir, int health, int armor, const char* weather,
-                                int hour, std::vector<uint8_t>& basePixels,
-                                std::vector<uint8_t>& hudPixels, std::vector<uint8_t>& radarFull,
-                                std::vector<uint8_t>& gamePixels, GameShotStats& stats, char* err,
-                                std::size_t errSize);
+                                 int hour, std::vector<uint8_t>& basePixels,
+                                 std::vector<uint8_t>& hudPixels, std::vector<uint8_t>& radarFull,
+                                 std::vector<uint8_t>& gamePixels, GameShotStats& stats, char* err,
+                                 std::size_t errSize);
+// Round 42 (R6an): fog variant. Identical to GameShot_RenderWeatherHour
+// except the HudShot base uses HudShot_RenderWeatherHourFog(..., wantFog)
+// (scene --fog rasterizer path on the base only; HUD/radar overlays stay
+// unfogged). wantFog=false is bit-identical to GameShot_RenderWeatherHour.
+bool GameShot_RenderWeatherHourFog(const char* gameDir, int health, int armor, const char* weather,
+                                   int hour, bool wantFog, std::vector<uint8_t>& basePixels,
+                                   std::vector<uint8_t>& hudPixels, std::vector<uint8_t>& radarFull,
+                                   std::vector<uint8_t>& gamePixels, GameShotStats& stats, char* err,
+                                   std::size_t errSize);
 void GameShot_Shutdown();
 
 // Round 36 (R6ah): zone label over the game frame (--show-zone).

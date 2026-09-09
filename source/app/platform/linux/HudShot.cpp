@@ -214,6 +214,14 @@ bool HudShot_RenderWeatherHour(const char* gameDir, int health, int armor, const
                                int hour, std::vector<uint8_t>& basePixels,
                                std::vector<uint8_t>& hudPixels, HudShotStats& stats, char* err,
                                std::size_t errSize) {
+    return HudShot_RenderWeatherHourFog(gameDir, health, armor, weather, hour, false, basePixels,
+                                        hudPixels, stats, err, errSize);
+}
+
+bool HudShot_RenderWeatherHourFog(const char* gameDir, int health, int armor, const char* weather,
+                                  int hour, bool wantFog, std::vector<uint8_t>& basePixels,
+                                  std::vector<uint8_t>& hudPixels, HudShotStats& stats, char* err,
+                                  std::size_t errSize) {
     stats = HudShotStats{};
     basePixels.clear();
     hudPixels.clear();
@@ -261,8 +269,27 @@ bool HudShot_RenderWeatherHour(const char* gameDir, int health, int armor, const
             return false;
         }
     }
-    TexSample_RenderDuo(scene, stats.shore.worldMeshes, kFbW, kFbH, stats.shore.eye,
-                        stats.shore.target, basePixels, stats.texStats, stats.duo);
+    // Round 42 (R6an): with wantFog the base renders through the scene
+    // --fog path (TexTimeEnv from the same timecyc row bytes carried in
+    // stats.shore); otherwise the legacy Duo look stays bit-for-bit.
+    if (wantFog) {
+        TexTimeEnv fogEnv{};
+        for (int c = 0; c < 3; ++c) {
+            fogEnv.amb[c] = stats.shore.tcAmb[c] / 255.0f;
+            fogEnv.sun[c] = stats.shore.tcDir[c] / 255.0f;
+            fogEnv.skyTop[c] = stats.shore.tcSkyTop[c];
+            fogEnv.skyBot[c] = stats.shore.tcSkyBot[c];
+            fogEnv.fogColor[c] = stats.shore.tcSkyBot[c];
+        }
+        fogEnv.fog = true;
+        fogEnv.farClp = stats.shore.tcFarClp;
+        fogEnv.fogSt = stats.shore.tcFogSt;
+        TexSample_RenderDuoTC(scene, stats.shore.worldMeshes, kFbW, kFbH, stats.shore.eye,
+                              stats.shore.target, fogEnv, basePixels, stats.texStats, stats.duo);
+    } else {
+        TexSample_RenderDuo(scene, stats.shore.worldMeshes, kFbW, kFbH, stats.shore.eye,
+                            stats.shore.target, basePixels, stats.texStats, stats.duo);
+    }
     if (basePixels.size() != static_cast<std::size_t>(kFbW) * kFbH * 4) {
         SetErr(err, errSize, "shore frame has bad size");
         ShoreShot_Shutdown();
