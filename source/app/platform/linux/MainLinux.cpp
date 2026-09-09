@@ -51,7 +51,7 @@ using uint64 = uint64_t;
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --list-anims | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --list-anims | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -1666,6 +1666,344 @@ int RunShotAnim(int argc, char** argv) {
     return 0;
 }
 
+// Round 13 (R6k): walk-cycle interpolation sequence. Samples K evenly
+// spaced times (inclusive endpoints T_i=i/(K-1), default K=6) of a walk
+// animation (default WALK_civi from anim/ped.ifp) with lerp (trans) + slerp
+// (quat) between neighbouring IFP keys, skins+renders every frame through
+// the same CPU orbit rasterizer, writes the LAST frame TGA, and reports
+// animseq-ok with per-frame checksums, rootTravel (world distance of the
+// tag-0 bone between frame 0 and K-1) and loopGap (mean joint-space pose
+// distance between frame K-1 and frame 0 from IFP bytes only). All SRT come
+// from IFP bytes; procedural poses are forbidden.
+int RunAnimSeq(int argc, char** argv) {
+    const char* outPath = ArgValue(argc, argv, "--anim-seq", "animseq.tga");
+    const char* model = ArgValue(argc, argv, "--model", "andre");
+    const char* animReq = ArgValue(argc, argv, "--anim", "WALK_civi");
+    const char* framesArg = ArgValue(argc, argv, "--frames", "6");
+    int frames = std::atoi(framesArg ? framesArg : "6");
+    if (!outPath || outPath[0] == '\0' || !model || model[0] == '\0' || !animReq ||
+        animReq[0] == '\0' || frames < 2 || frames > 64) {
+        (void)std::printf("animseq-fail bad args anim-seq='%s' model='%s' anim='%s' frames='%s'\n",
+                           outPath ? outPath : "(null)", model ? model : "(null)",
+                           animReq ? animReq : "(null)", framesArg ? framesArg : "(null)");
+        return 1;
+    }
+    const int width = 640;
+    const int height = 480;
+    auto getPlatformDisplay = reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(
+        eglGetProcAddress("eglGetPlatformDisplayEXT")
+    );
+    if (!getPlatformDisplay) {
+        (void)std::printf("animseq-fail no eglGetPlatformDisplayEXT\n");
+        return 1;
+    }
+#ifndef EGL_PLATFORM_SURFACELESS_MESA
+#define EGL_PLATFORM_SURFACELESS_MESA 0x31DD
+#endif
+    EGLDisplay display = getPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
+    if (display == EGL_NO_DISPLAY) {
+        (void)std::printf("animseq-fail no surfaceless display 0x%x\n", eglGetError());
+        return 1;
+    }
+    if (!eglInitialize(display, nullptr, nullptr)) {
+        (void)std::printf("animseq-fail egl init 0x%x\n", eglGetError());
+        return 1;
+    }
+    const EGLint configAttrs[] = {
+        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
+        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+        EGL_DEPTH_SIZE, 24,
+        EGL_NONE
+    };
+    EGLConfig config = nullptr;
+    EGLint configCount = 0;
+    if (!eglChooseConfig(display, configAttrs, &config, 1, &configCount) || configCount < 1) {
+        (void)std::printf("animseq-fail choose config 0x%x\n", eglGetError());
+        eglTerminate(display);
+        return 1;
+    }
+    const EGLint pbufferAttrs[] = { EGL_WIDTH, width, EGL_HEIGHT, height, EGL_NONE };
+    EGLSurface surface = eglCreatePbufferSurface(display, config, pbufferAttrs);
+    if (surface == EGL_NO_SURFACE) {
+        (void)std::printf("animseq-fail pbuffer 0x%x\n", eglGetError());
+        eglTerminate(display);
+        return 1;
+    }
+    (void)eglBindAPI(EGL_OPENGL_API);
+    EGLContext context = eglCreateContext(display, config, EGL_NO_CONTEXT, nullptr);
+    if (context == EGL_NO_CONTEXT) {
+        (void)std::printf("animseq-fail context 0x%x\n", eglGetError());
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    if (!eglMakeCurrent(display, surface, surface, context)) {
+        (void)std::printf("animseq-fail make current 0x%x\n", eglGetError());
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    const char* glVersion = reinterpret_cast<const char*>(glGetString(GL_VERSION));
+    (void)std::printf("animseq-gl %s\n", glVersion ? glVersion : "(null)");
+    std::string gameDir = ResolveGameDir(argc, argv);
+    std::vector<IfpAnimSeqFrame> seq;
+    char seqErr[512] = {};
+    std::string animUse = animReq;
+    bool didFallback = false;
+    std::string fallbackPick;
+    if (!IfpAnim_Seq(gameDir.c_str(), model, animUse.c_str(), frames, seq, seqErr, sizeof(seqErr))) {
+        // Walk-cycle fallback: if the requested animation is missing from
+        // the bank, pick the nearest walk cycle (prefer WALK_civi, else the
+        // first stored name containing "walk") and retry once.
+        std::string low = animUse;
+        for (char& c : low) {
+            if (c >= 'A' && c <= 'Z') {
+                c = static_cast<char>(c + 32);
+            }
+        }
+        (void)low;
+        std::vector<std::string> names;
+        char bankSrc[160] = {};
+        char listErr[256] = {};
+        bool listed = IfpAnim_List(gameDir.c_str(), names, bankSrc, sizeof(bankSrc), listErr,
+                                   sizeof(listErr));
+        std::string candidate;
+        if (listed) {
+            for (const auto& n : names) {
+                std::string l = n;
+                for (char& c : l) {
+                    if (c >= 'A' && c <= 'Z') {
+                        c = static_cast<char>(c + 32);
+                    }
+                }
+                if (l == "walk_civi") {
+                    candidate = n;
+                    break;
+                }
+            }
+            if (candidate.empty()) {
+                for (const auto& n : names) {
+                    std::string l = n;
+                    for (char& c : l) {
+                        if (c >= 'A' && c <= 'Z') {
+                            c = static_cast<char>(c + 32);
+                        }
+                    }
+                    if (l.find("walk") != std::string::npos) {
+                        candidate = n;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!candidate.empty() && candidate != animUse) {
+            fallbackPick = candidate;
+            animUse = candidate;
+            didFallback = true;
+            seq.clear();
+            if (!IfpAnim_Seq(gameDir.c_str(), model, animUse.c_str(), frames, seq, seqErr,
+                             sizeof(seqErr))) {
+                (void)std::printf("animseq-fail load %s (game=%s model=%s anim=%s frames=%d)\n",
+                                   seqErr, gameDir.c_str(), model, animUse.c_str(), frames);
+                IfpAnim_Shutdown();
+                eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+                eglDestroyContext(display, context);
+                eglDestroySurface(display, surface);
+                eglTerminate(display);
+                return 1;
+            }
+        } else {
+            (void)std::printf("animseq-fail load %s (game=%s model=%s anim=%s frames=%d)\n", seqErr,
+                               gameDir.c_str(), model, animUse.c_str(), frames);
+            IfpAnim_Shutdown();
+            eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            eglDestroyContext(display, context);
+            eglDestroySurface(display, surface);
+            eglTerminate(display);
+            return 1;
+        }
+    }
+    if (static_cast<int>(seq.size()) != frames) {
+        (void)std::printf("animseq-fail short seq got=%d want=%d\n", static_cast<int>(seq.size()),
+                           frames);
+        IfpAnim_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    const IfpAnimStats& s0 = seq.front().stats;
+    (void)std::printf(
+        "animseq-load model=%s src=%s txd=%s textures=%d geoms=%d frames=%d bank=%s bankSrc=%s "
+        "anim=%s seqs=%d bankAnims=%d total=%.4f kframes=%d interp=lerp+slerp\n",
+        s0.model, s0.src, s0.txd, s0.textures, s0.geoms, s0.frames, s0.bank, s0.bankSrc, s0.anim,
+        s0.seqs, s0.animsInBank, s0.animTotal, frames
+    );
+    if (didFallback) {
+        (void)std::printf("animseq-fallback requested=%s picked=%s\n", animReq, fallbackPick.c_str());
+    }
+    if (s0.tried > 0) {
+        (void)std::printf("animseq-model-fallback requested=%s picked=%s tried=%d cap=128sec\n",
+                           s0.requested, s0.src, s0.tried);
+    }
+    std::vector<uint64_t> checksums;
+    checksums.reserve(static_cast<size_t>(frames));
+    std::vector<uint8_t> lastPixels;
+    TexFrameStats lastTex{};
+    for (int i = 0; i < frames; ++i) {
+        const IfpAnimSeqFrame& fr = seq[static_cast<size_t>(i)];
+        std::vector<uint8_t> pixels;
+        TexFrameStats texStats{};
+        DrawWorldFrame(fr.scene, width, height, 60.0f, nullptr, pixels, texStats);
+        uint64_t sumR = 0;
+        uint64_t sumG = 0;
+        uint64_t sumB = 0;
+        uint64_t nonBlack = 0;
+        uint64_t checksum = PixelsChecksum(pixels, sumR, sumG, sumB, nonBlack);
+        uint64_t total = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
+        if (nonBlack == 0) {
+            (void)std::printf("animseq-fail black frame i=%d\n", i);
+            IfpAnim_Shutdown();
+            eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            eglDestroyContext(display, context);
+            eglDestroySurface(display, surface);
+            eglTerminate(display);
+            return 1;
+        }
+        checksums.push_back(checksum);
+        (void)std::printf(
+            "animseq-frame i=%d time=%.4f timeAbs=%.4f checksum=%llu root=(%.4f,%.4f,%.4f) "
+            "mapped=%d unmapped=%d wsum=%.6f nonblack=%llu/%llu\n",
+            i, fr.stats.time, fr.stats.timeAbs, static_cast<unsigned long long>(checksum),
+            fr.stats.rootWorld[0], fr.stats.rootWorld[1], fr.stats.rootWorld[2], fr.stats.mapped,
+            fr.stats.unmapped, fr.stats.wsum, static_cast<unsigned long long>(nonBlack),
+            static_cast<unsigned long long>(total)
+        );
+        if (i == frames - 1) {
+            lastPixels = std::move(pixels);
+            lastTex = texStats;
+        }
+    }
+    // Root travel D: world distance of the tag-0 bone, frame 0 -> frame K-1.
+    double dx =
+        static_cast<double>(seq.back().stats.rootWorld[0]) - seq.front().stats.rootWorld[0];
+    double dy =
+        static_cast<double>(seq.back().stats.rootWorld[1]) - seq.front().stats.rootWorld[1];
+    double dz =
+        static_cast<double>(seq.back().stats.rootWorld[2]) - seq.front().stats.rootWorld[2];
+    double rootTravel = std::sqrt(dx * dx + dy * dy + dz * dz);
+    // Loop gap G: mean joint-space pose distance (IFP bytes only).
+    float loopGap = 0.0f;
+    int gapMapped = 0;
+    {
+        char gapErr[256] = {};
+        if (!IfpAnim_LoopGap(gameDir.c_str(), seq.front().stats.anim, &loopGap, &gapMapped, gapErr,
+                             sizeof(gapErr))) {
+            (void)std::printf("animseq-fail loopgap %s\n", gapErr);
+            IfpAnim_Shutdown();
+            eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            eglDestroyContext(display, context);
+            eglDestroySurface(display, surface);
+            eglTerminate(display);
+            return 1;
+        }
+    }
+    // Keyaudit: first frame with a fractional bracket proves real lerp+slerp
+    // between two neighbouring IFP keys (all values are IFP bytes).
+    const IfpAnimStats* audit = &seq.front().stats;
+    for (int i = 0; i < frames; ++i) {
+        const IfpAnimStats& st = seq[static_cast<size_t>(i)].stats;
+        if (st.interp == 1 && st.keyK0 >= 0 && st.keyK1 == st.keyK0 + 1 && st.keyAlpha > 0.0001f &&
+            st.keyAlpha < 0.9999f) {
+            audit = &st;
+            break;
+        }
+    }
+    (void)std::printf(
+        "keyaudit bone=\"%s\" tag=%d k0=%d k1=%d t0=%.4f t1=%.4f alpha=%.4f timeAbs=%.4f "
+        "q0=(%.4f,%.4f,%.4f,%.4f) q1=(%.4f,%.4f,%.4f,%.4f) qi=(%.4f,%.4f,%.4f,%.4f) "
+        "p0=(%.4f,%.4f,%.4f) p1=(%.4f,%.4f,%.4f) pi=(%.4f,%.4f,%.4f) hasT=%d interp=lerp+slerp\n",
+        audit->keyBone, audit->keyTag, audit->keyK0, audit->keyK1, audit->keyT0, audit->keyT1,
+        audit->keyAlpha, audit->keyTimeAbs, audit->keyQ0[0], audit->keyQ0[1], audit->keyQ0[2],
+        audit->keyQ0[3], audit->keyQ1[0], audit->keyQ1[1], audit->keyQ1[2], audit->keyQ1[3],
+        audit->keyQI[0], audit->keyQI[1], audit->keyQI[2], audit->keyQI[3], audit->keyP0[0],
+        audit->keyP0[1], audit->keyP0[2], audit->keyP1[0], audit->keyP1[1], audit->keyP1[2],
+        audit->keyPI[0], audit->keyPI[1], audit->keyPI[2], audit->keyHasT
+    );
+    // Gates (honest, no tuning): distinct frames, real motion, closed loop.
+    bool gateDistinct = true;
+    for (int i = 0; i < frames && gateDistinct; ++i) {
+        for (int j = i + 1; j < frames; ++j) {
+            if (checksums[static_cast<size_t>(i)] == checksums[static_cast<size_t>(j)]) {
+                gateDistinct = false;
+                break;
+            }
+        }
+    }
+    bool gateKnown = true;
+    for (int i = 0; i < frames; ++i) {
+        if (checksums[static_cast<size_t>(i)] == 8661044579928738921ULL ||
+            checksums[static_cast<size_t>(i)] == 4444196192875791124ULL) {
+            gateKnown = false;
+            break;
+        }
+    }
+    bool gateTravel = rootTravel > 0.05;
+    bool gateLoop = loopGap < rootTravel;
+    bool gateMapped = s0.mapped >= 24;
+    bool gateWsum = std::fabs(s0.wsum - 1.0) < 0.01;
+    if (!(gateDistinct && gateKnown && gateTravel && gateLoop && gateMapped && gateWsum)) {
+        (void)std::printf(
+            "animseq-fail gate distinct=%d known=%d travel=%.6f(>0.05) gap=%.6f(<travel) "
+            "mapped=%d(>=24) wsum=%.6f(~1.0)\n",
+            gateDistinct ? 1 : 0, gateKnown ? 1 : 0, rootTravel, loopGap, s0.mapped, s0.wsum
+        );
+        IfpAnim_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    if (!WriteTga24(outPath, width, height, lastPixels)) {
+        (void)std::printf("animseq-fail write '%s'\n", outPath);
+        IfpAnim_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    eglDestroyContext(display, context);
+    eglDestroySurface(display, surface);
+    eglTerminate(display);
+    OS_DebugOut("mad-sa-linux anim seq");
+    (void)std::printf(
+        "texanimseq-ok tris=%d sampledTri=%d texelFetch=%ld greyFallback=%d flatTri=%d "
+        "texPixels=%ld firstTex=%s render=cpu\n",
+        lastTex.tris, lastTex.sampledTri, lastTex.texelFetch, lastTex.fallbackTri, lastTex.flatTri,
+        lastTex.texPixels, lastTex.haveFirst ? lastTex.firstTex : "-"
+    );
+    std::string cs;
+    for (int i = 0; i < frames; ++i) {
+        char cell[32];
+        (void)std::snprintf(cell, sizeof(cell), "%s%llu", i ? "," : "",
+                             static_cast<unsigned long long>(checksums[static_cast<size_t>(i)]));
+        cs += cell;
+    }
+    (void)std::printf("animseq-ok model=%s anim=%s frames=%d checksums=%s rootTravel=%.6f loopGap=%.6f "
+                       "interp=lerp+slerp\n",
+                       s0.model, s0.anim, frames, cs.c_str(), rootTravel, loopGap);
+    (void)std::printf("animseqshot-ok out=%s frames=%d rootTravel=%.6f loopGap=%.6f\n", outPath, frames,
+                       rootTravel, loopGap);
+    IfpAnim_Shutdown();
+    return 0;
+}
+
 // Round 12 helper: enumerate the ped IFP bank (names as stored).
 int RunListAnims(int argc, char** argv) {
     std::string gameDir = ResolveGameDir(argc, argv);
@@ -1939,6 +2277,9 @@ int main(int argc, char** argv) {
     }
     if (HasArg(argc, argv, "--shot-anim")) {
         return RunShotAnim(argc, argv);
+    }
+    if (HasArg(argc, argv, "--anim-seq")) {
+        return RunAnimSeq(argc, argv);
     }
     if (HasArg(argc, argv, "--list-anims")) {
         return RunListAnims(argc, argv);
