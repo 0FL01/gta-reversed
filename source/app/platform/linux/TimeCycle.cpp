@@ -166,6 +166,7 @@ bool TimeCycle_LoadWeatherHour(const char* gameDir, const char* weather, int hou
         int v[18];
         float farClp = 0.0f; // tokens[27] (FarClp per the header comment)
         float fogSt = 0.0f; // tokens[28] (FogSt per the header comment)
+        uint8_t water[4] = {}; // tokens[36..39] (WaterRGBA per header)
     };
     std::vector<Row> rows;
     for (size_t i = sec + 1; i < lines.size(); ++i) {
@@ -208,6 +209,9 @@ bool TimeCycle_LoadWeatherHour(const char* gameDir, const char* weather, int hou
         // FarClp/FogSt are tokens[27]/[28] of the whitespace-split row
         // (header: ... PoleShd FarClp FogSt LightOnGround ...). Both come
         // only from these timecyc bytes; a row without them is skipped.
+        // R6aa: WaterRGBA are tokens[36..39] (header: ... BottomCloudRGB
+        // WaterRGBA Alpha1 ...; the game's own sscanf reads them as %f
+        // waterR/waterG/waterB/waterA after the two cloud RGB triples).
         {
             std::vector<std::string> toks;
             {
@@ -240,6 +244,27 @@ bool TimeCycle_LoadWeatherHour(const char* gameDir, const char* weather, int hou
             }
             row.farClp = far;
             row.fogSt = fog;
+            if (toks.size() < 40) {
+                continue; // no WaterRGBA on this row: skip, never invent
+            }
+            float wrgba[4] = {};
+            bool wok = true;
+            for (int k = 0; k < 4; ++k) {
+                char* endW = nullptr;
+                const float wv = std::strtof(toks[36 + k].c_str(), &endW);
+                if (!endW || *endW != '\0' || !std::isfinite(wv) || wv < 0.0f ||
+                    wv > 255.0f) {
+                    wok = false;
+                    break;
+                }
+                wrgba[k] = wv;
+            }
+            if (!wok) {
+                continue;
+            }
+            for (int k = 0; k < 4; ++k) {
+                row.water[k] = static_cast<uint8_t>(wrgba[k]);
+            }
         }
         rows.push_back(row);
     }
@@ -283,6 +308,9 @@ bool TimeCycle_LoadWeatherHour(const char* gameDir, const char* weather, int hou
     }
     out.farClp = row.farClp;
     out.fogSt = row.fogSt;
+    for (int k = 0; k < 4; ++k) {
+        out.water[k] = row.water[k];
+    }
     return true;
 }
 
