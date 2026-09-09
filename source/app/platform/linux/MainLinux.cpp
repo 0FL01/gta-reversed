@@ -61,7 +61,7 @@ using uint64 = uint64_t;
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --shot-cs-duo <out.tga> | --shot-water <out.tga> [--hour H] | --csanim-seq <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--frames 5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --shot-cs-duo <out.tga> | --shot-water <out.tga> [--hour H] [--water-file water1.dat] | --csanim-seq <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--frames 5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -641,6 +641,13 @@ int RunShot(int argc, char** argv) {
 // colors the visible polys with the flat WaterRGBA bytes of the matching
 // EXTRASUNNY_LA timecyc row (--hour, default 12 = Midday), and renders one
 // CPU frame over the LA shore quad x[-1584,-1360] y[-1826,-1642] (z=0).
+// R6ab (round 30): optional --water-file water1.dat renders the second
+// shipped water file through the SAME parser/renderer (--hour colors stay
+// the same path): water1.dat rows carry no flag column file-wide (see
+// WaterLevel.h), so they count as visible and are logged via noflag; the
+// camera moves to the same relative spot over the first north-sea quad
+// x[-2992,-2832] y[1184,2112] (z=0). Without the flag the default path is
+// bit-identical to round 29 (same file, same camera, same log line).
 // No procedural plane, no invented color: water-ok requires Wp>20000 exact
 // WaterRGBA pixels and fails otherwise (no TGA, no water-ok on any path).
 int RunShotWater(int argc, char** argv) {
@@ -667,6 +674,32 @@ int RunShotWater(int argc, char** argv) {
         }
         hour = h;
     }
+    // R6ab: optional second water file. Only the two shipped basenames are
+    // accepted; anything else (including paths) fails honestly.
+    const char* waterBase = "water.dat";
+    {
+        const char* wfArg = ArgValue(argc, argv, "--water-file", nullptr);
+        if (HasArg(argc, argv, "--water-file") && !wfArg) {
+            (void)std::printf("water-fail bad --water-file '(missing value)' "
+                              "(want water.dat|water1.dat)\n");
+            return 1;
+        }
+        if (wfArg) {
+            if (std::strcmp(wfArg, "water.dat") == 0) {
+                waterBase = "water.dat";
+            } else if (std::strcmp(wfArg, "water1.dat") == 0) {
+                waterBase = "water1.dat";
+            } else {
+                (void)std::printf("water-fail bad --water-file '%s' "
+                                  "(want water.dat|water1.dat)\n",
+                                  wfArg);
+                return 1;
+            }
+        }
+    }
+    char waterFile[32] = {};
+    (void)std::snprintf(waterFile, sizeof(waterFile), "data/%s", waterBase);
+    const bool isWater1 = std::strcmp(waterBase, "water1.dat") == 0;
     const int width = 640;
     const int height = 480;
     auto getPlatformDisplay = reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(
@@ -729,7 +762,7 @@ int RunShotWater(int argc, char** argv) {
     std::string gameDir = ResolveGameDir(argc, argv);
     WaterLevelData water{};
     char waterErr[512] = {};
-    if (!WaterLevel_Load(gameDir.c_str(), water, waterErr, sizeof(waterErr))) {
+    if (!WaterLevel_Load(gameDir.c_str(), waterFile, water, waterErr, sizeof(waterErr))) {
         (void)std::printf("water-fail load %s (game=%s)\n", waterErr, gameDir.c_str());
         WaterLevel_Shutdown();
         eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
@@ -738,12 +771,21 @@ int RunShotWater(int argc, char** argv) {
         eglTerminate(display);
         return 1;
     }
-    (void)std::printf(
-        "water-load rows=%d quads=%d tris=%d invis=%d skipped=%d file=data/water.dat "
-        "water1=untouched bbox=[%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f]\n",
-        water.rows, water.quads, water.tris, water.invis, water.skipped,
-        water.bboxMin[0], water.bboxMin[1], water.bboxMin[2], water.bboxMax[0],
-        water.bboxMax[1], water.bboxMax[2]);
+    if (!isWater1) {
+        (void)std::printf(
+            "water-load rows=%d quads=%d tris=%d invis=%d skipped=%d file=data/water.dat "
+            "water1=untouched bbox=[%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f]\n",
+            water.rows, water.quads, water.tris, water.invis, water.skipped,
+            water.bboxMin[0], water.bboxMin[1], water.bboxMin[2], water.bboxMax[0],
+            water.bboxMax[1], water.bboxMax[2]);
+    } else {
+        (void)std::printf(
+            "water-load rows=%d quads=%d tris=%d invis=%d skipped=%d file=data/water1.dat "
+            "noflag=%d bbox=[%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f]\n",
+            water.rows, water.quads, water.tris, water.invis, water.skipped, water.noflag,
+            water.bboxMin[0], water.bboxMin[1], water.bboxMin[2], water.bboxMax[0],
+            water.bboxMax[1], water.bboxMax[2]);
+    }
     TimeCycleParams tcp{};
     char tcErr[256] = {};
     if (!TimeCycle_LoadHour(gameDir.c_str(), hour, tcp, tcErr, sizeof(tcErr))) {
@@ -779,9 +821,20 @@ int RunShotWater(int argc, char** argv) {
     }
     // Fixed camera over the LA shore quad x[-1584,-1360] y[-1826,-1642]
     // (z=0, first water.dat row): steep 70deg-down tilt (Z-up lookAt
-    // degenerates at nadir, so never exactly straight down).
-    const float eye[3] = { -1470.0f, -1760.0f, 110.0f };
-    const float target[3] = { -1470.0f, -1720.0f, 0.0f };
+    // degenerates at nadir, so never exactly straight down). The water1.dat
+    // camera keeps the same relative geometry over the first north-sea quad
+    // x[-2992,-2832] y[1184,2112] (z=0, center -2912,1648): eye 40 south of
+    // the target, 110 up.
+    float eye[3] = { -1470.0f, -1760.0f, 110.0f };
+    float target[3] = { -1470.0f, -1720.0f, 0.0f };
+    if (isWater1) {
+        eye[0] = -2912.0f;
+        eye[1] = 1608.0f;
+        eye[2] = 110.0f;
+        target[0] = -2912.0f;
+        target[1] = 1648.0f;
+        target[2] = 0.0f;
+    }
     (void)std::printf("waterCam=eye=%.1f,%.1f,%.1f target=%.1f,%.1f,%.1f fov=60\n",
                       eye[0], eye[1], eye[2], target[0], target[1], target[2]);
     std::vector<uint8> pixels;
