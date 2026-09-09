@@ -54,6 +54,7 @@ using uint64 = uint64_t;
 #include "app/platform/linux/WaterLevel.h"
 #include "app/platform/linux/ShoreShot.h"
 #include "app/platform/linux/HudShot.h"
+#include "app/platform/linux/RadarMap.h"
 #include "app/platform/linux/DriveSim.h"
 #include "app/platform/linux/Handling.h"
 #include "app/platform/linux/WalkSim.h"
@@ -63,7 +64,7 @@ using uint64 = uint64_t;
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --shot-cs-duo <out.tga> | --shot-water <out.tga> [--hour H] [--water-file water1.dat] | --shot-shore <out.tga> [--hour H] | --shot-hud <out.tga> [--health H] [--armor A] | --csanim-seq <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--frames 5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --shot-cs-duo <out.tga> | --shot-water <out.tga> [--hour H] [--water-file water1.dat] | --shot-shore <out.tga> [--hour H] | --shot-hud <out.tga> [--health H] [--armor A] | --shot-radar <out.tga> [--x X] [--y Y] | --csanim-seq <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--frames 5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -1198,6 +1199,87 @@ int RunShotHud(int argc, char** argv) {
                        static_cast<unsigned long long>(hB / (640ULL * 480ULL)),
                        static_cast<unsigned long long>(checksum));
     HudShot_Shutdown();
+    return 0;
+}
+
+// R6ae: live minimap from the shipped radar tiles (round 33). The mosaic is
+// the DrawRadarMap 3x3 around the world->tile of (--x,--y) (default is the
+// shore pier 836,-1866); every map pixel is a radar-TXD texel via RadarMap,
+// the disc is the DrawRadarMask analytic circle, the player marker is the
+// hud.txd `arrow` sprite + a font2 `N` north tag. Pure CPU 2D, no EGL.
+int RunShotRadar(int argc, char** argv) {
+    const char* outPath = ArgValue(argc, argv, "--shot-radar", "radar.tga");
+    if (!outPath || outPath[0] == '\0') {
+        (void)std::printf("radar-fail bad args shot-radar='%s'\n",
+                           outPath ? outPath : "(null)");
+        return 1;
+    }
+    double wx = 836.0;
+    double wy = -1866.0;
+    {
+        const char* xArg = ArgValue(argc, argv, "--x", nullptr);
+        const char* yArg = ArgValue(argc, argv, "--y", nullptr);
+        if (xArg && std::sscanf(xArg, "%lf", &wx) != 1) {
+            (void)std::printf("radar-fail bad --x '%s' (want float)\n", xArg);
+            return 1;
+        }
+        if (yArg && std::sscanf(yArg, "%lf", &wy) != 1) {
+            (void)std::printf("radar-fail bad --y '%s' (want float)\n", yArg);
+            return 1;
+        }
+    }
+    std::string gameDir = ResolveGameDir(argc, argv);
+    std::vector<uint8> pixels;
+    RadarMapStats rst{};
+    char radarErr[768] = {};
+    if (!RadarMap_Render(gameDir.c_str(), wx, wy, pixels, rst, radarErr,
+                         sizeof(radarErr))) {
+        (void)std::printf("radar-fail load %s (game=%s)\n", radarErr, gameDir.c_str());
+        RadarMap_Shutdown();
+        return 1;
+    }
+    (void)std::printf("radarSrc=%s\n", rst.radarSrc);
+    (void)std::printf("tileName=%s x=floor((X+3000)/500) y=ceil(11-(Y+3000)/500)\n",
+                       rst.tileFmt);
+    (void)std::printf("radartile center=%d,%d centerTex=%s tileSize=%dx%d\n", rst.tileX,
+                       rst.tileY, rst.firstTile, rst.tileW, rst.tileH);
+    (void)std::printf("radartiles row0=%s,%s,%s row1=%s,%s,%s row2=%s,%s,%s\n",
+                       rst.tileNames[0], rst.tileNames[1], rst.tileNames[2],
+                       rst.tileNames[3], rst.tileNames[4], rst.tileNames[5],
+                       rst.tileNames[6], rst.tileNames[7], rst.tileNames[8]);
+    (void)std::printf("radar-disc r=%d range=%d mask=circle marker=arrow-fixed "
+                       "arrow=%dx%d glyphs=%d discPixels=%ld oob=%ld\n",
+                       rst.discR, rst.discRange, rst.arrowW, rst.arrowH, rst.glyphs,
+                       rst.discPixels, rst.oob);
+    uint64_t sR = 0, sG = 0, sB = 0, sN = 0;
+    uint64_t checksum = PixelsChecksum(pixels, sR, sG, sB, sN);
+    if (rst.tiles != 9) {
+        (void)std::printf("radar-fail short mosaic tiles=%d (want 9)\n", rst.tiles);
+        RadarMap_Shutdown();
+        return 1;
+    }
+    if (rst.tilePx <= 10000) {
+        (void)std::printf("radar-fail thin tiles tilePx=%ld (want >10000)\n", rst.tilePx);
+        RadarMap_Shutdown();
+        return 1;
+    }
+    if (rst.markerPixels <= 50) {
+        (void)std::printf("radar-fail hidden marker markerPixels=%ld (want >50)\n",
+                           rst.markerPixels);
+        RadarMap_Shutdown();
+        return 1;
+    }
+    if (!WriteTga24(outPath, 640, 480, pixels)) {
+        (void)std::printf("radar-fail write '%s'\n", outPath);
+        RadarMap_Shutdown();
+        return 1;
+    }
+    OS_DebugOut("mad-sa-linux radar shot");
+    (void)std::printf("radar-ok x=%.6g y=%.6g tiles=%d tilePx=%ld markerPixels=%ld "
+                       "checksum=%llu\n",
+                       wx, wy, rst.tiles, rst.tilePx, rst.markerPixels,
+                       static_cast<unsigned long long>(checksum));
+    RadarMap_Shutdown();
     return 0;
 }
 
@@ -5685,6 +5767,9 @@ int main(int argc, char** argv) {
     }
     if (HasArg(argc, argv, "--shot-cs-duo")) {
         return RunShotCsDuo(argc, argv);
+    }
+    if (HasArg(argc, argv, "--shot-radar")) {
+        return RunShotRadar(argc, argv);
     }
     if (HasArg(argc, argv, "--shot-hud")) {
         return RunShotHud(argc, argv);
