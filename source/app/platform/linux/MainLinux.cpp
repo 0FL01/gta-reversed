@@ -5454,6 +5454,78 @@ int RunDrive(int argc, char** argv) {
     const bool useHandling = HasArg(argc, argv, "--use-handling");
     // R6ao: optional HUD overlay on every waypoint frame (default path bit-identical).
     const bool wantHud = HasArg(argc, argv, "--hud");
+    // R6aq (round 45): optional wanted/money overlays on drive frames. Only
+    // with --hud (without it an honest drivehud-fail); ranges match the game
+    // path (--wanted 0-6, --money -999999..9999999). Absent flags keep the
+    // legacy R6ao path bit-for-bit.
+    int driveWanted = -1;
+    bool hasDriveWanted = false;
+    int driveMoney = 0;
+    bool hasDriveMoney = false;
+    if (HasArg(argc, argv, "--wanted") || HasArg(argc, argv, "--money")) {
+        if (!wantHud) {
+            (void)std::printf("drivehud-fail needs --hud for --wanted/--money\n");
+            eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            eglDestroyContext(display, context);
+            eglDestroySurface(display, surface);
+            eglTerminate(display);
+            return 1;
+        }
+        if (HasArg(argc, argv, "--wanted")) {
+            const char* wArg = ArgValue(argc, argv, "--wanted", nullptr);
+            const bool ok = wArg && wArg[0] >= '0' && wArg[0] <= '6' && wArg[1] == '\0';
+            if (!ok) {
+                (void)std::printf("drivehud-fail bad --wanted '%s' (want 0-6)\n",
+                                   wArg ? wArg : "(null)");
+                eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+                eglDestroyContext(display, context);
+                eglDestroySurface(display, surface);
+                eglTerminate(display);
+                return 1;
+            }
+            driveWanted = wArg[0] - '0';
+            hasDriveWanted = true;
+        }
+        if (HasArg(argc, argv, "--money")) {
+            const char* mArg = ArgValue(argc, argv, "--money", nullptr);
+            bool ok = mArg && mArg[0] != '\0';
+            size_t pos = 0;
+            if (ok && mArg[0] == '-') {
+                pos = 1;
+                ok = mArg[1] != '\0';
+            }
+            size_t digits = 0;
+            for (; ok && mArg[pos] != '\0'; ++pos) {
+                if (mArg[pos] < '0' || mArg[pos] > '9') {
+                    ok = false;
+                    break;
+                }
+                ++digits;
+                if (digits > 7) {
+                    ok = false;
+                    break;
+                }
+            }
+            long val = 0;
+            if (ok && digits > 0) {
+                val = std::atol(mArg);
+                ok = val >= -999999L && val <= 9999999L;
+            } else {
+                ok = false;
+            }
+            if (!ok) {
+                (void)std::printf("drivehud-fail bad --money '%s' (want -999999..9999999)\n",
+                                   mArg ? mArg : "(null)");
+                eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+                eglDestroyContext(display, context);
+                eglDestroySurface(display, surface);
+                eglTerminate(display);
+                return 1;
+            }
+            driveMoney = static_cast<int>(val);
+            hasDriveMoney = true;
+        }
+    }
     HandlingParams hp{};
     if (useHandling) {
         char hErr[512] = {};
@@ -5841,8 +5913,12 @@ int RunDrive(int argc, char** argv) {
     std::vector<uint64_t> checksums;
     checksums.reserve(static_cast<size_t>(waypoints));
     std::vector<long> hudPer; // R6ao: per-frame overlay deltas (wantHud only)
+    std::vector<long> wmStarPer; // R6aq: per-frame wanted deltas (hasDriveWanted only)
+    std::vector<long> wmMoneyPer; // R6aq: per-frame money deltas (hasDriveMoney only)
     if (wantHud) {
         hudPer.reserve(static_cast<size_t>(waypoints));
+        wmStarPer.reserve(static_cast<size_t>(waypoints));
+        wmMoneyPer.reserve(static_cast<size_t>(waypoints));
     }
     TexFrameStats texAgg{};
     int totalFrames = 0;
@@ -5933,6 +6009,35 @@ int RunDrive(int argc, char** argv) {
                 (void)std::printf("drivehud-fail blit wp=%d spd=\"%s\"\n", i, spdText);
                 failed = true;
                 break;
+            }
+            // R6aq: wanted/money overlays through the EXISTING GameShot
+            // helpers (same font2 0x5D texels, same starPos row, same money
+            // format/pos/color). No copy-paste blit, no procedural glyphs.
+            long starPx = 0;
+            long moneyPx = 0;
+            if (hasDriveWanted) {
+                WantedStats wSt{};
+                char werr[512] = {};
+                if (!GameShot_ApplyWanted(gameDir.c_str(), hudPixels, driveWanted, wSt, werr,
+                                          sizeof(werr))) {
+                    (void)std::printf("drivehud-fail wanted %s (wp=%d)\n", werr, i);
+                    failed = true;
+                    break;
+                }
+                starPx = wSt.starPixels;
+                wmStarPer.push_back(starPx);
+            }
+            if (hasDriveMoney) {
+                MoneyStats mSt{};
+                char merr[512] = {};
+                if (!GameShot_ApplyMoney(gameDir.c_str(), hudPixels, driveMoney, mSt, merr,
+                                         sizeof(merr))) {
+                    (void)std::printf("drivehud-fail money %s (wp=%d)\n", merr, i);
+                    failed = true;
+                    break;
+                }
+                moneyPx = mSt.moneyPixels;
+                wmMoneyPer.push_back(moneyPx);
             }
             long hudChanged = 0;
             for (std::size_t b = 0; b < pixels.size(); b += 4) {
@@ -6042,6 +6147,93 @@ int RunDrive(int argc, char** argv) {
         (void)std::printf("drivehud-fail thin total hudPixels=%ld(need >2000)\n", hudSum);
         DriveSim_ShutdownWorld();
         return 1;
+    }
+    // R6aq: wanted/money summary through the same GameShot metrics. Without
+    // the flags this block never runs (legacy drivehud-ok below bit-identical).
+    if (hasDriveWanted || hasDriveMoney) {
+        long starRep = wmStarPer.empty() ? 0 : wmStarPer.front();
+        long moneyRep = wmMoneyPer.empty() ? 0 : wmMoneyPer.front();
+        // Per-frame equality proof: all waypoint overlays use the same N/M
+        // with the same font2 path, so every frame must report the same
+        // starPixels (background-independent opaque ink). Money may vary
+        // where it overwrites the per-frame SPD ink, so only >200 is gated.
+        bool starEq = true;
+        for (size_t k = 1; k < wmStarPer.size(); ++k) {
+            if (wmStarPer[k] != starRep) {
+                starEq = false;
+                break;
+            }
+        }
+        if (hasDriveWanted && driveWanted > 0 && !(starRep > 0)) {
+            (void)std::printf("drivehud-fail thin stars starPixels=%ld\n", starRep);
+            DriveSim_ShutdownWorld();
+            return 1;
+        }
+        if (hasDriveMoney && !(moneyRep > 200)) {
+            (void)std::printf("drivehud-fail thin money moneyPixels=%ld (want >200)\n",
+                               moneyRep);
+            DriveSim_ShutdownWorld();
+            return 1;
+        }
+        // Same texels/row/format/pos/color as the game path (constants from
+        // GameShot.h, same helpers above): logged for the byte proof.
+        if (hasDriveWanted) {
+            (void)std::printf("drivehud-star starTex=font2 src=models/fonts.txd glyph=0x5D\n");
+            (void)std::printf("drivehud-starPos right=%d,top=%d,cellH=%d drawn=%d starEq=%d\n",
+                               kWantedRight, kWantedTop, kWantedCellH, driveWanted,
+                               starEq ? 1 : 0);
+        }
+        if (hasDriveMoney) {
+            char mText[16] = {};
+            int mR = kMoneyGreenR, mG = kMoneyGreenG, mB = kMoneyGreenB;
+            if (driveMoney < 0) {
+                (void)std::snprintf(mText, sizeof(mText), "-$%07d", -driveMoney);
+                mR = kMoneyRedR;
+                mG = kMoneyRedG;
+                mB = kMoneyRedB;
+            } else {
+                (void)std::snprintf(mText, sizeof(mText), "$%08d", driveMoney);
+            }
+            (void)std::printf("drivehud-moneyFmt=$%%08d/-$%%07d src=game_sa/Hud.cpp:DrawMoney\n");
+            (void)std::printf("drivehud-money text=\"%s\" digits=%d moneyPixels=%ld\n", mText,
+                               static_cast<int>(std::strlen(mText)), moneyRep);
+            (void)std::printf(
+                "drivehud-moneyPos right=%d,top=%d,cellH=%d "
+                "layout=FROM_RIGHT(32)+GetYPosBasedOnHealth(STRETCH_Y(89),12)\n",
+                kMoneyRight, kMoneyTop, kMoneyCellH);
+            (void)std::printf("drivehud-moneyColor=%d,%d,%d spec=HudColours(GREEN ge0/RED lt0)\n",
+                               mR, mG, mB);
+        }
+        if (hasDriveWanted && hasDriveMoney) {
+            (void)std::printf("drivehud-wm wanted=%d money=%d starPixels=%ld moneyPixels=%ld\n",
+                               driveWanted, driveMoney, starRep, moneyRep);
+        } else if (hasDriveWanted) {
+            (void)std::printf("drivehud-wm wanted=%d starPixels=%ld\n", driveWanted, starRep);
+        } else {
+            (void)std::printf("drivehud-wm money=%d moneyPixels=%ld\n", driveMoney, moneyRep);
+        }
+        if (hasDriveWanted && hasDriveMoney) {
+            (void)std::printf("drivehud-ok waypoints=%d frames=%d model=%s hudPixels=%ld "
+                               "(sum-over-waypoints) spdTexts=%s wanted=%d money=%d checksums=%s\n",
+                               waypoints, totalFrames, meas.model, hudSum, spdJoin.c_str(),
+                               driveWanted, driveMoney, cs.c_str());
+        } else if (hasDriveWanted) {
+            (void)std::printf("drivehud-ok waypoints=%d frames=%d model=%s hudPixels=%ld "
+                               "(sum-over-waypoints) spdTexts=%s wanted=%d checksums=%s\n",
+                               waypoints, totalFrames, meas.model, hudSum, spdJoin.c_str(),
+                               driveWanted, cs.c_str());
+        } else {
+            (void)std::printf("drivehud-ok waypoints=%d frames=%d model=%s hudPixels=%ld "
+                               "(sum-over-waypoints) spdTexts=%s money=%d checksums=%s\n",
+                               waypoints, totalFrames, meas.model, hudSum, spdJoin.c_str(),
+                               driveMoney, cs.c_str());
+        }
+        (void)std::printf(
+            "drive-verify distTotal=%.3f wheelR=%.6f expectSpin=%.6f spinTotal=%.6f "
+            "relErr=%.6f span=%.2f maxTurn=%.1f\n",
+            distTotal, meas.wheelR, expectSpin, spinTotal, spinErr, span, maxTurn);
+        DriveSim_ShutdownWorld();
+        return 0;
     }
     (void)std::printf("drivehud-ok waypoints=%d frames=%d model=%s hudPixels=%ld "
                        "(sum-over-waypoints) spdTexts=%s checksums=%s\n",
