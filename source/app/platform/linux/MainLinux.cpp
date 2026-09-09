@@ -6488,6 +6488,81 @@ int RunWalk(int argc, char** argv) {
     }
     // R6ap: optional HUD overlay on every waypoint frame (default path bit-identical).
     const bool wantHud = HasArg(argc, argv, "--hud");
+    // R6ar (round 46): optional wanted/money overlays on walk frames. Only
+    // with --hud (without it an honest walkhud-fail); ranges mirror the game
+    // path (--wanted 0-6, --money -999999..9999999) as in R6aq drive. Absent
+    // flags keep the legacy R6ap path bit-for-bit.
+    int walkWanted = -1;
+    bool hasWalkWanted = false;
+    int walkMoney = 0;
+    bool hasWalkMoney = false;
+    if (HasArg(argc, argv, "--wanted") || HasArg(argc, argv, "--money")) {
+        if (!wantHud) {
+            (void)std::printf("walkhud-fail needs --hud for --wanted/--money\n");
+            WalkSim_ShutdownWorld();
+            eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            eglDestroyContext(display, context);
+            eglDestroySurface(display, surface);
+            eglTerminate(display);
+            return 1;
+        }
+        if (HasArg(argc, argv, "--wanted")) {
+            const char* wArg = ArgValue(argc, argv, "--wanted", nullptr);
+            const bool ok = wArg && wArg[0] >= '0' && wArg[0] <= '6' && wArg[1] == '\0';
+            if (!ok) {
+                (void)std::printf("walkhud-fail bad --wanted '%s' (want 0-6)\n",
+                                   wArg ? wArg : "(null)");
+                WalkSim_ShutdownWorld();
+                eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+                eglDestroyContext(display, context);
+                eglDestroySurface(display, surface);
+                eglTerminate(display);
+                return 1;
+            }
+            walkWanted = wArg[0] - '0';
+            hasWalkWanted = true;
+        }
+        if (HasArg(argc, argv, "--money")) {
+            const char* mArg = ArgValue(argc, argv, "--money", nullptr);
+            bool ok = mArg && mArg[0] != '\0';
+            size_t pos = 0;
+            if (ok && mArg[0] == '-') {
+                pos = 1;
+                ok = mArg[1] != '\0';
+            }
+            size_t digits = 0;
+            for (; ok && mArg[pos] != '\0'; ++pos) {
+                if (mArg[pos] < '0' || mArg[pos] > '9') {
+                    ok = false;
+                    break;
+                }
+                ++digits;
+                if (digits > 7) {
+                    ok = false;
+                    break;
+                }
+            }
+            long val = 0;
+            if (ok && digits > 0) {
+                val = std::atol(mArg);
+                ok = val >= -999999L && val <= 9999999L;
+            } else {
+                ok = false;
+            }
+            if (!ok) {
+                (void)std::printf("walkhud-fail bad --money '%s' (want -999999..9999999)\n",
+                                   mArg ? mArg : "(null)");
+                WalkSim_ShutdownWorld();
+                eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+                eglDestroyContext(display, context);
+                eglDestroySurface(display, surface);
+                eglTerminate(display);
+                return 1;
+            }
+            walkMoney = static_cast<int>(val);
+            hasWalkMoney = true;
+        }
+    }
     HudDriveAssets hudAssets{};
     std::vector<std::string> hudSpdTexts;
     std::vector<double> hudVel;
@@ -6572,8 +6647,12 @@ int RunWalk(int argc, char** argv) {
     std::vector<uint64_t> checksums;
     checksums.reserve(static_cast<size_t>(waypoints));
     std::vector<long> hudPer; // R6ap: per-frame overlay deltas (wantHud only)
+    std::vector<long> wmStarPer; // R6ar: per-frame wanted deltas (hasWalkWanted only)
+    std::vector<long> wmMoneyPer; // R6ar: per-frame money deltas (hasWalkMoney only)
     if (wantHud) {
         hudPer.reserve(static_cast<size_t>(waypoints));
+        wmStarPer.reserve(static_cast<size_t>(waypoints));
+        wmMoneyPer.reserve(static_cast<size_t>(waypoints));
     }
     TexFrameStats texAgg{};
     int totalFrames = 0;
@@ -6669,6 +6748,35 @@ int RunWalk(int argc, char** argv) {
                 (void)std::printf("walkhud-fail blit wp=%d spd=\"%s\"\n", i, spdText);
                 failed = true;
                 break;
+            }
+            // R6ar: wanted/money overlays through the EXISTING GameShot
+            // helpers (same font2 0x5D texels, same starPos row, same money
+            // format/pos/color). No copy-paste blit, no procedural glyphs.
+            long starPx = 0;
+            long moneyPx = 0;
+            if (hasWalkWanted) {
+                WantedStats wSt{};
+                char werr[512] = {};
+                if (!GameShot_ApplyWanted(gameDir.c_str(), hudPixels, walkWanted, wSt, werr,
+                                          sizeof(werr))) {
+                    (void)std::printf("walkhud-fail wanted %s (wp=%d)\n", werr, i);
+                    failed = true;
+                    break;
+                }
+                starPx = wSt.starPixels;
+                wmStarPer.push_back(starPx);
+            }
+            if (hasWalkMoney) {
+                MoneyStats mSt{};
+                char merr[512] = {};
+                if (!GameShot_ApplyMoney(gameDir.c_str(), hudPixels, walkMoney, mSt, merr,
+                                         sizeof(merr))) {
+                    (void)std::printf("walkhud-fail money %s (wp=%d)\n", merr, i);
+                    failed = true;
+                    break;
+                }
+                moneyPx = mSt.moneyPixels;
+                wmMoneyPer.push_back(moneyPx);
             }
             long hudChanged = 0;
             for (std::size_t b = 0; b < pixels.size(); b += 4) {
@@ -6793,6 +6901,95 @@ int RunWalk(int argc, char** argv) {
         (void)std::printf("walkhud-fail thin total hudPixels=%ld(need >2000)\n", hudSum);
         WalkSim_ShutdownWorld();
         return 1;
+    }
+    // R6ar: wanted/money summary through the same GameShot metrics. Without
+    // the flags this block never runs (legacy walkhud-ok below bit-identical).
+    if (hasWalkWanted || hasWalkMoney) {
+        long starRep = wmStarPer.empty() ? 0 : wmStarPer.front();
+        long moneyRep = wmMoneyPer.empty() ? 0 : wmMoneyPer.front();
+        // Per-frame equality proof: all waypoint overlays use the same N/M
+        // with the same font2 path, so every frame must report the same
+        // starPixels (background-independent opaque ink). Money may vary
+        // where it overwrites the per-frame SPD ink, so only >200 is gated.
+        bool starEq = true;
+        for (size_t k = 1; k < wmStarPer.size(); ++k) {
+            if (wmStarPer[k] != starRep) {
+                starEq = false;
+                break;
+            }
+        }
+        if (hasWalkWanted && walkWanted > 0 && !(starRep > 0)) {
+            (void)std::printf("walkhud-fail thin stars starPixels=%ld\n", starRep);
+            WalkSim_ShutdownWorld();
+            return 1;
+        }
+        if (hasWalkMoney && !(moneyRep > 200)) {
+            (void)std::printf("walkhud-fail thin money moneyPixels=%ld (want >200)\n",
+                               moneyRep);
+            WalkSim_ShutdownWorld();
+            return 1;
+        }
+        // Same texels/row/format/pos/color as the game path (constants from
+        // GameShot.h, same helpers above): logged for the byte proof.
+        if (hasWalkWanted) {
+            (void)std::printf("walkhud-star starTex=font2 src=models/fonts.txd glyph=0x5D\n");
+            (void)std::printf("walkhud-starPos right=%d,top=%d,cellH=%d drawn=%d starEq=%d\n",
+                               kWantedRight, kWantedTop, kWantedCellH, walkWanted,
+                               starEq ? 1 : 0);
+        }
+        if (hasWalkMoney) {
+            char mText[16] = {};
+            int mR = kMoneyGreenR, mG = kMoneyGreenG, mB = kMoneyGreenB;
+            if (walkMoney < 0) {
+                (void)std::snprintf(mText, sizeof(mText), "-$%07d", -walkMoney);
+                mR = kMoneyRedR;
+                mG = kMoneyRedG;
+                mB = kMoneyRedB;
+            } else {
+                (void)std::snprintf(mText, sizeof(mText), "$%08d", walkMoney);
+            }
+            (void)std::printf("walkhud-moneyFmt=$%%08d/-$%%07d src=game_sa/Hud.cpp:DrawMoney\n");
+            (void)std::printf("walkhud-money text=\"%s\" digits=%d moneyPixels=%ld\n", mText,
+                               static_cast<int>(std::strlen(mText)), moneyRep);
+            (void)std::printf(
+                "walkhud-moneyPos right=%d,top=%d,cellH=%d "
+                "layout=FROM_RIGHT(32)+GetYPosBasedOnHealth(STRETCH_Y(89),12)\n",
+                kMoneyRight, kMoneyTop, kMoneyCellH);
+            (void)std::printf("walkhud-moneyColor=%d,%d,%d spec=HudColours(GREEN ge0/RED lt0)\n",
+                               mR, mG, mB);
+        }
+        if (hasWalkWanted && hasWalkMoney) {
+            (void)std::printf("walkhud-wm wanted=%d money=%d starPixels=%ld moneyPixels=%ld\n",
+                               walkWanted, walkMoney, starRep, moneyRep);
+        } else if (hasWalkWanted) {
+            (void)std::printf("walkhud-wm wanted=%d starPixels=%ld\n", walkWanted, starRep);
+        } else {
+            (void)std::printf("walkhud-wm money=%d moneyPixels=%ld\n", walkMoney, moneyRep);
+        }
+        if (hasWalkWanted && hasWalkMoney) {
+            (void)std::printf("walkhud-ok waypoints=%d frames=%d model=%s anim=%s hudPixels=%ld "
+                               "(sum-over-waypoints) spdTexts=%s walkV=%.6f walkKmh=%d "
+                               "wanted=%d money=%d checksums=%s\n",
+                               waypoints, totalFrames, clip.model, clip.anim, hudSum,
+                               spdJoin.c_str(), walkV, walkKmh, walkWanted, walkMoney, cs.c_str());
+        } else if (hasWalkWanted) {
+            (void)std::printf("walkhud-ok waypoints=%d frames=%d model=%s anim=%s hudPixels=%ld "
+                               "(sum-over-waypoints) spdTexts=%s walkV=%.6f walkKmh=%d "
+                               "wanted=%d checksums=%s\n",
+                               waypoints, totalFrames, clip.model, clip.anim, hudSum,
+                               spdJoin.c_str(), walkV, walkKmh, walkWanted, cs.c_str());
+        } else {
+            (void)std::printf("walkhud-ok waypoints=%d frames=%d model=%s anim=%s hudPixels=%ld "
+                               "(sum-over-waypoints) spdTexts=%s walkV=%.6f walkKmh=%d "
+                               "money=%d checksums=%s\n",
+                               waypoints, totalFrames, clip.model, clip.anim, hudSum,
+                               spdJoin.c_str(), walkV, walkKmh, walkMoney, cs.c_str());
+        }
+        (void)std::printf("walk-verify distTotal=%.3f strideLen=%.6f expectCycles=%.6f "
+                           "actualCycles=%.6f relErr=%.6f span=%.2f\n",
+                           distTotal, clip.strideLen, expectCycles, actualCycles, cycErr, span);
+        WalkSim_ShutdownWorld();
+        return 0;
     }
     (void)std::printf("walkhud-ok waypoints=%d frames=%d model=%s anim=%s hudPixels=%ld "
                        "(sum-over-waypoints) spdTexts=%s walkV=%.6f walkKmh=%d checksums=%s\n",
