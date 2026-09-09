@@ -42,6 +42,7 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
         app/platform/linux/CarPose.cpp
         app/platform/linux/TimeCycle.cpp
         app/platform/linux/DriveSim.cpp
+        app/platform/linux/Handling.cpp
         app/platform/linux/WalkSim.cpp
     )
     target_compile_features(mad-sa-linux PRIVATE cxx_std_23)

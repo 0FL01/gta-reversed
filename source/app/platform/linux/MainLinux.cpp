@@ -48,6 +48,7 @@ using uint64 = uint64_t;
 #include "app/platform/linux/CarPose.h"
 #include "app/platform/linux/TimeCycle.h"
 #include "app/platform/linux/DriveSim.h"
+#include "app/platform/linux/Handling.h"
 #include "app/platform/linux/WalkSim.h"
 
 #include <sys/resource.h>
@@ -55,7 +56,7 @@ using uint64 = uint64_t;
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -2415,6 +2416,35 @@ int RunDrive(int argc, char** argv) {
         "frontY=%.6f rearY=%.6f\n",
         meas.model, meas.src, meas.wheels, meas.wheelR, meas.wheelbase, meas.clearance,
         meas.frontY, meas.rearY);
+    // R6p: optional handling-data speed profile (default path untouched).
+    const bool useHandling = HasArg(argc, argv, "--use-handling");
+    HandlingParams hp{};
+    if (useHandling) {
+        char hErr[512] = {};
+        if (!Handling_Load(gameDir.c_str(), model, hp, hErr, sizeof(hErr))) {
+            (void)std::printf("drive-fail handling %s (game=%s model=%s)\n", hErr,
+                               gameDir.c_str(), model);
+            eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            eglDestroyContext(display, context);
+            eglDestroySurface(display, surface);
+            eglTerminate(display);
+            return 1;
+        }
+        // File-unit values logged with the verbatim file tokens (byte proof
+        // against `grep ^MODEL data/handling.cfg`); SI values on the next line.
+        (void)std::printf("handling-load model=%s mass=%s vmax=%s accel=%s drag=%s gears=%s\n",
+                           hp.requested, hp.massTok, hp.vmaxTok, hp.accelTok, hp.dragTok,
+                           hp.gearsTok);
+        (void)std::printf(
+            "handling-si model=%s mass=%.6f vmaxFileKmh=%.6f vmaxMs=%.6f accelFileMs2=%.6f "
+            "accelSi=%.6f drag=%.6f gears=%d drive=%c engine=%c "
+            "formula=VMAXms=VMAXkmh*0.277778(1000/3600;VELOCITY_CONST=0.277778/50@"
+            "cHandlingDataMgr.cpp:11,/50=frame-scale-unused-in-SI) "
+            "accelSi=file-ms2-per-handling.cfg-header dt=1/30 "
+            "integ=v(t+dt)=min(v+A*dt,VMAX),s=int(v)-trapezoid\n",
+            hp.requested, hp.mass, hp.vmaxFileKmh, hp.vmaxMs, hp.accelFile, hp.accelSi,
+            hp.drag, hp.gears, hp.driveType, hp.engineType);
+    }
     // 2. World (pager + COL) around the drive corridor.
     E2ELoadInfo load{};
     {
@@ -2437,6 +2467,12 @@ int RunDrive(int argc, char** argv) {
     (void)std::printf("drive-formula steerFormula=atan(wheelbase*dyaw/ds) camD=%.1f camH=%.1f "
                        "clearance=%.6f wheelR=%.6f\n",
                        kCamD, kCamH, meas.clearance, meas.wheelR);
+    if (useHandling) {
+        (void)std::printf(
+            "drive-simformula v(t+dt)=min(v+A*dt,VMAX) dt=1/30 s=int(v)-trapezoid "
+            "spin=s/wheelR VMAXms=%.6f A=%.6f mode=handling\n",
+            hp.vmaxMs, hp.accelSi);
+    }
     double maxTurn = DriveSim_MaxTurnDeg(ctrl);
     {
         std::string ps;
@@ -2460,9 +2496,25 @@ int RunDrive(int argc, char** argv) {
         eglTerminate(display);
         return 1;
     }
-    // 3. Kinematic sample (yaw/steer/spin/dist from path + DFF constants).
+    // 3. Sample: legacy uniform arc-length (default, bit-identical) or
+    // handling launch profile (uniform in sim time, --use-handling only).
     std::vector<DriveWaypoint> wps;
-    {
+    std::vector<DriveSimTrace> hTrace;
+    double hTotalTime = 0.0;
+    if (useHandling) {
+        char sErr[512] = {};
+        if (!DriveSim_SampleHandling(ctrl, waypoints, meas.wheelbase, meas.wheelR, hp.vmaxMs,
+                                     hp.accelSi, 1.0 / 30.0, wps, hTrace, hTotalTime, sErr,
+                                     sizeof(sErr))) {
+            (void)std::printf("drive-fail sample-handling %s\n", sErr);
+            DriveSim_ShutdownWorld();
+            eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            eglDestroyContext(display, context);
+            eglDestroySurface(display, surface);
+            eglTerminate(display);
+            return 1;
+        }
+    } else {
         char sErr[512] = {};
         if (!DriveSim_Sample(ctrl, waypoints, meas.wheelbase, meas.wheelR, wps, sErr,
                               sizeof(sErr))) {
@@ -2501,12 +2553,123 @@ int RunDrive(int argc, char** argv) {
                 zMax = w.carZ;
             }
         }
-        (void)std::printf("drive-wp i=%d x=%.2f y=%.2f ground=%.2f model=%s prim=%s carZ=%.2f "
-                           "yaw=%.3f steer=%.3f spinDeg=%.3f spinRad=%.6f dist=%.2f\n",
-                           i, w.x, w.y, w.groundH, w.groundModel, w.groundPrim, w.carZ, w.yawPath,
-                           w.steerDeg, w.spinDeg, w.spinRad, w.dist);
+        if (useHandling) {
+            (void)std::printf("drive-wp i=%d x=%.2f y=%.2f ground=%.2f model=%s prim=%s carZ=%.2f "
+                               "yaw=%.3f steer=%.3f spinDeg=%.3f spinRad=%.6f dist=%.2f v=%.2f "
+                               "t=%.3f s=%.2f\n",
+                               i, w.x, w.y, w.groundH, w.groundModel, w.groundPrim, w.carZ,
+                               w.yawPath, w.steerDeg, w.spinDeg, w.spinRad, w.dist, w.vel, w.time,
+                               w.dist);
+        } else {
+            (void)std::printf("drive-wp i=%d x=%.2f y=%.2f ground=%.2f model=%s prim=%s carZ=%.2f "
+                               "yaw=%.3f steer=%.3f spinDeg=%.3f spinRad=%.6f dist=%.2f\n",
+                               i, w.x, w.y, w.groundH, w.groundModel, w.groundPrim, w.carZ,
+                               w.yawPath, w.steerDeg, w.spinDeg, w.spinRad, w.dist);
+        }
     }
     (void)std::printf("drive-heights min=%.2f max=%.2f span=%.2f\n", zMin, zMax, zMax - zMin);
+    if (useHandling) {
+        // Fixed-time sim probes (launch visibility) interpolated on the dt trace.
+        auto simAt = [&](double tq, double& vq, double& sq) {
+            vq = 0.0;
+            sq = 0.0;
+            if (hTrace.empty()) {
+                return;
+            }
+            if (tq <= 0.0) {
+                vq = hTrace.front().v;
+                sq = hTrace.front().s;
+                return;
+            }
+            if (tq >= hTotalTime) {
+                vq = hTrace.back().v;
+                sq = hTrace.back().s;
+                return;
+            }
+            for (size_t k = 0; k + 1 < hTrace.size(); ++k) {
+                if (hTrace[k + 1].t >= tq) {
+                    double t0 = hTrace[k].t, v0 = hTrace[k].v, s0 = hTrace[k].s;
+                    double t1 = hTrace[k + 1].t, v1 = hTrace[k + 1].v;
+                    double span = t1 - t0;
+                    double aEff = (span > 1e-12) ? (v1 - v0) / span : 0.0;
+                    double d = tq - t0;
+                    vq = v0 + aEff * d;
+                    sq = s0 + v0 * d + 0.5 * aEff * d * d;
+                    return;
+                }
+            }
+            vq = hTrace.back().v;
+            sq = hTrace.back().s;
+        };
+        for (int pi = 0; pi < 3; ++pi) {
+            double tq = 0.3 * pi; // 0.0 / 0.3 / 0.6
+            double vq = 0.0, sq = 0.0;
+            simAt(tq, vq, sq);
+            (void)std::printf("driveok-sim t=%.1f v=%.2f s=%.2f\n", tq, vq, sq);
+        }
+        // Monotonic launch gate + clamp flag (from the waypoint v series).
+        bool mono = true;
+        for (int i = 1; i < waypoints; ++i) {
+            if (!(wps[static_cast<size_t>(i)].vel >=
+                  wps[static_cast<size_t>(i - 1)].vel - 1e-9)) {
+                mono = false;
+            }
+        }
+        bool v0zero = waypoints > 0 && std::fabs(wps.front().vel) < 1e-9;
+        bool clamped = false;
+        for (int i = 0; i < waypoints; ++i) {
+            if (wps[static_cast<size_t>(i)].vel >= hp.vmaxMs - 1e-6) {
+                clamped = true;
+            }
+        }
+        if (!clamped) {
+            for (const auto& tr : hTrace) {
+                if (tr.v >= hp.vmaxMs - 1e-6) {
+                    clamped = true;
+                    break;
+                }
+            }
+        }
+        (void)std::printf("handling-clamp vmaxMs=%.6f vmaxClamped=%d mono=%d v0zero=%d "
+                           "simTime=%.3f steps=%d%s\n",
+                           hp.vmaxMs, clamped ? 1 : 0, mono ? 1 : 0, v0zero ? 1 : 0, hTotalTime,
+                           static_cast<int>(hTrace.size()),
+                           clamped ? ""
+                                   : " note=path-shorter-than-runup(VMAX-not-reached)");
+        // speedIntegralCheck: trapezoid over the full dt=1/30 v trace vs
+        // distTotal (the geometric path length L, hit exactly by the
+        // fractional last step). Must be < 0.01.
+        double integral = 0.0;
+        for (size_t k = 0; k + 1 < hTrace.size(); ++k) {
+            double dtk = hTrace[k + 1].t - hTrace[k].t;
+            integral += (hTrace[k].v + hTrace[k + 1].v) * 0.5 * dtk;
+        }
+        double distTotalH = wps.empty() ? 0.0 : wps.back().dist;
+        double relErrH =
+            (distTotalH > 1e-9) ? std::fabs(integral - distTotalH) / distTotalH : 1.0;
+        (void)std::printf("speedIntegralCheck distTotal=%.3f integral=%.3f relErr=%.6f "
+                           "steps=%d dt=1/30 method=trapezoid-over-logged-v-trace\n",
+                           distTotalH, integral, relErrH, static_cast<int>(hTrace.size()));
+        if (!(mono && v0zero)) {
+            (void)std::printf("drive-fail handling-gate mono=%d v0zero=%d\n", mono ? 1 : 0,
+                               v0zero ? 1 : 0);
+            DriveSim_ShutdownWorld();
+            eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            eglDestroyContext(display, context);
+            eglDestroySurface(display, surface);
+            eglTerminate(display);
+            return 1;
+        }
+        if (!(relErrH < 0.01)) {
+            (void)std::printf("drive-fail speed-integral relErr=%.6f(need <0.01)\n", relErrH);
+            DriveSim_ShutdownWorld();
+            eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            eglDestroyContext(display, context);
+            eglDestroySurface(display, surface);
+            eglTerminate(display);
+            return 1;
+        }
+    }
     if (!groundClear) {
         (void)std::printf("drive-fail ground miss (need COL hit on every waypoint)\n");
         DriveSim_ShutdownWorld();
