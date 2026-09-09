@@ -56,7 +56,7 @@ using uint64 = uint64_t;
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -2069,6 +2069,255 @@ int RunAnimSeq(int argc, char** argv) {
     return 0;
 }
 
+// Round 19 (R6q): HAnim blend between two IFP poses. Pose A is the exact
+// --shot-anim path (fromAnim at T=0.5, legacy single-key sample) and pose B
+// is the first frame of toAnim (T=0); K frames interpolate every bone with
+// the R6k operators (slerp quats, lerp translations, alpha_i=i/(K-1)).
+// Endpoints copy the exact endpoint locals, so frame 0 must reproduce the
+// R6j checksum bit-for-bit (gated as c0matchesR6j). All SRT come from IFP
+// bytes; no procedural poses anywhere on this path.
+int RunAnimBlend(int argc, char** argv) {
+    const char* outPath = ArgValue(argc, argv, "--anim-blend", "blend.tga");
+    const char* model = ArgValue(argc, argv, "--model", "andre");
+    const char* fromReq = ArgValue(argc, argv, "--from", "IDLE_stance");
+    const char* toReq = ArgValue(argc, argv, "--to", "WALK_civi");
+    const char* framesArg = ArgValue(argc, argv, "--frames", "5");
+    int frames = std::atoi(framesArg ? framesArg : "5");
+    if (!outPath || outPath[0] == '\0' || !model || model[0] == '\0' || !fromReq ||
+        fromReq[0] == '\0' || !toReq || toReq[0] == '\0' || frames < 2 || frames > 64) {
+        (void)std::printf(
+            "blend-fail bad args anim-blend='%s' model='%s' from='%s' to='%s' frames='%s'\n",
+            outPath ? outPath : "(null)", model ? model : "(null)", fromReq ? fromReq : "(null)",
+            toReq ? toReq : "(null)", framesArg ? framesArg : "(null)");
+        return 1;
+    }
+    const int width = 640;
+    const int height = 480;
+    auto getPlatformDisplay = reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(
+        eglGetProcAddress("eglGetPlatformDisplayEXT")
+    );
+    if (!getPlatformDisplay) {
+        (void)std::printf("blend-fail no eglGetPlatformDisplayEXT\n");
+        return 1;
+    }
+#ifndef EGL_PLATFORM_SURFACELESS_MESA
+#define EGL_PLATFORM_SURFACELESS_MESA 0x31DD
+#endif
+    EGLDisplay display = getPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
+    if (display == EGL_NO_DISPLAY) {
+        (void)std::printf("blend-fail no surfaceless display 0x%x\n", eglGetError());
+        return 1;
+    }
+    if (!eglInitialize(display, nullptr, nullptr)) {
+        (void)std::printf("blend-fail egl init 0x%x\n", eglGetError());
+        return 1;
+    }
+    const EGLint configAttrs[] = {
+        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
+        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+        EGL_DEPTH_SIZE, 24,
+        EGL_NONE
+    };
+    EGLConfig config = nullptr;
+    EGLint configCount = 0;
+    if (!eglChooseConfig(display, configAttrs, &config, 1, &configCount) || configCount < 1) {
+        (void)std::printf("blend-fail choose config 0x%x\n", eglGetError());
+        eglTerminate(display);
+        return 1;
+    }
+    const EGLint pbufferAttrs[] = { EGL_WIDTH, width, EGL_HEIGHT, height, EGL_NONE };
+    EGLSurface surface = eglCreatePbufferSurface(display, config, pbufferAttrs);
+    if (surface == EGL_NO_SURFACE) {
+        (void)std::printf("blend-fail pbuffer 0x%x\n", eglGetError());
+        eglTerminate(display);
+        return 1;
+    }
+    (void)eglBindAPI(EGL_OPENGL_API);
+    EGLContext context = eglCreateContext(display, config, EGL_NO_CONTEXT, nullptr);
+    if (context == EGL_NO_CONTEXT) {
+        (void)std::printf("blend-fail context 0x%x\n", eglGetError());
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    if (!eglMakeCurrent(display, surface, surface, context)) {
+        (void)std::printf("blend-fail make current 0x%x\n", eglGetError());
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    const char* glVersion = reinterpret_cast<const char*>(glGetString(GL_VERSION));
+    (void)std::printf("blend-gl %s\n", glVersion ? glVersion : "(null)");
+    std::string gameDir = ResolveGameDir(argc, argv);
+    IfpAnimBlendResult blend;
+    char blendErr[512] = {};
+    if (!IfpAnim_Blend(gameDir.c_str(), model, fromReq, toReq, frames, blend, blendErr,
+                       sizeof(blendErr))) {
+        (void)std::printf("blend-fail load %s (game=%s model=%s from=%s to=%s frames=%d)\n",
+                           blendErr, gameDir.c_str(), model, fromReq, toReq, frames);
+        IfpAnim_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    if (static_cast<int>(blend.frames.size()) != frames ||
+        static_cast<int>(blend.alphas.size()) != frames) {
+        (void)std::printf("blend-fail short blend got=%d want=%d\n",
+                           static_cast<int>(blend.frames.size()), frames);
+        IfpAnim_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    const IfpAnimStats& s0 = blend.frames.front().stats;
+    (void)std::printf(
+        "blend-load model=%s src=%s txd=%s textures=%d geoms=%d frames=%d bank=%s bankSrc=%s "
+        "from=%s to=%s totalA=%.4f kframes=%d interp=slerp+lerp\n",
+        s0.model, s0.src, s0.txd, s0.textures, s0.geoms, s0.frames, s0.bank, s0.bankSrc,
+        blend.fromAnim, blend.toAnim, s0.animTotal, frames
+    );
+    if (s0.tried > 0) {
+        (void)std::printf("blend-model-fallback requested=%s picked=%s tried=%d cap=128sec\n",
+                           s0.requested, s0.src, s0.tried);
+    }
+    std::vector<uint64_t> checksums;
+    checksums.reserve(static_cast<size_t>(frames));
+    std::vector<uint8_t> lastPixels;
+    TexFrameStats lastTex{};
+    for (int i = 0; i < frames; ++i) {
+        const IfpAnimBlendFrame& fr = blend.frames[static_cast<size_t>(i)];
+        std::vector<uint8_t> pixels;
+        TexFrameStats texStats{};
+        DrawWorldFrame(fr.scene, width, height, 60.0f, nullptr, pixels, texStats);
+        uint64_t sumR = 0;
+        uint64_t sumG = 0;
+        uint64_t sumB = 0;
+        uint64_t nonBlack = 0;
+        uint64_t checksum = PixelsChecksum(pixels, sumR, sumG, sumB, nonBlack);
+        uint64_t total = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
+        if (nonBlack == 0) {
+            (void)std::printf("blend-fail black frame i=%d\n", i);
+            IfpAnim_Shutdown();
+            eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            eglDestroyContext(display, context);
+            eglDestroySurface(display, surface);
+            eglTerminate(display);
+            return 1;
+        }
+        checksums.push_back(checksum);
+        (void)std::printf(
+            "blend-frame i=%d alpha=%.4f checksum=%llu root=(%.4f,%.4f,%.4f) "
+            "mapped=%d unmapped=%d wsum=%.6f nonblack=%llu/%llu\n",
+            i, blend.alphas[static_cast<size_t>(i)], static_cast<unsigned long long>(checksum),
+            fr.stats.rootWorld[0], fr.stats.rootWorld[1], fr.stats.rootWorld[2], fr.stats.mapped,
+            fr.stats.unmapped, fr.stats.wsum, static_cast<unsigned long long>(nonBlack),
+            static_cast<unsigned long long>(total)
+        );
+        if (i == frames - 1) {
+            lastPixels = std::move(pixels);
+            lastTex = texStats;
+        }
+    }
+    // Blendaudit: endpoint quats/trans are IFP bytes, qi/ti the exact
+    // slerp/lerp at alpha=0.5 through the R6k operators.
+    (void)std::printf(
+        "blendaudit bone=\"%s\" tag=%d "
+        "qA=(%.4f,%.4f,%.4f,%.4f) qB=(%.4f,%.4f,%.4f,%.4f) qi=(%.4f,%.4f,%.4f,%.4f) "
+        "tA=(%.4f,%.4f,%.4f) tB=(%.4f,%.4f,%.4f) ti=(%.4f,%.4f,%.4f) alpha=0.5000 "
+        "interp=slerp+lerp\n",
+        blend.boneName, blend.boneTag, blend.qA[0], blend.qA[1], blend.qA[2], blend.qA[3],
+        blend.qB[0], blend.qB[1], blend.qB[2], blend.qB[3], blend.qI[0], blend.qI[1],
+        blend.qI[2], blend.qI[3], blend.tA[0], blend.tA[1], blend.tA[2], blend.tB[0],
+        blend.tB[1], blend.tB[2], blend.tI[0], blend.tI[1], blend.tI[2]
+    );
+    std::string alphaStr;
+    for (int i = 0; i < frames; ++i) {
+        char cell[32];
+        (void)std::snprintf(cell, sizeof(cell), "%s%.2f", i ? "," : "",
+                             blend.alphas[static_cast<size_t>(i)]);
+        alphaStr += cell;
+    }
+    std::string cs;
+    for (int i = 0; i < frames; ++i) {
+        char cell[32];
+        (void)std::snprintf(cell, sizeof(cell), "%s%llu", i ? "," : "",
+                             static_cast<unsigned long long>(checksums[static_cast<size_t>(i)]));
+        cs += cell;
+    }
+    constexpr uint64_t kR6j = 4444196192875791124ULL;
+    constexpr uint64_t kBind = 8661044579928738921ULL;
+    bool c0match = !checksums.empty() && checksums[0] == kR6j;
+    bool gateDistinct = true;
+    for (int i = 0; i < frames && gateDistinct; ++i) {
+        for (int j = i + 1; j < frames; ++j) {
+            if (checksums[static_cast<size_t>(i)] == checksums[static_cast<size_t>(j)]) {
+                gateDistinct = false;
+                break;
+            }
+        }
+    }
+    bool gateKnown = true;
+    for (int i = 0; i < frames; ++i) {
+        if (checksums[static_cast<size_t>(i)] == kBind) {
+            gateKnown = false;
+            break;
+        }
+    }
+    bool gateMorph = blend.morphMono > 0.8;
+    bool gateMapped = s0.mapped >= 24;
+    bool gateWsum = std::fabs(s0.wsum - 1.0) < 0.01;
+    (void)std::printf("blend-ok from=%s to=%s frames=%d alphas=%s checksums=%s morphMono=%.6f\n",
+                       blend.fromAnim, blend.toAnim, frames, alphaStr.c_str(), cs.c_str(),
+                       blend.morphMono);
+    (void)std::printf("c0matchesR6j=%d c0=%llu r6j=%llu\n", c0match ? 1 : 0,
+                       static_cast<unsigned long long>(checksums.empty() ? 0ULL : checksums[0]),
+                       static_cast<unsigned long long>(kR6j));
+    if (!(c0match && gateDistinct && gateKnown && gateMorph && gateMapped && gateWsum)) {
+        (void)std::printf(
+            "blend-fail gate c0match=%d distinct=%d known=%d morphMono=%.6f(>0.80, %d/%d) "
+            "mapped=%d(>=24) wsum=%.6f(~1.0)\n",
+            c0match ? 1 : 0, gateDistinct ? 1 : 0, gateKnown ? 1 : 0, blend.morphMono,
+            blend.morphPassed, blend.morphChecked, s0.mapped, s0.wsum
+        );
+        IfpAnim_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    if (!WriteTga24(outPath, width, height, lastPixels)) {
+        (void)std::printf("blend-fail write '%s'\n", outPath);
+        IfpAnim_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    eglDestroyContext(display, context);
+    eglDestroySurface(display, surface);
+    eglTerminate(display);
+    OS_DebugOut("mad-sa-linux anim blend");
+    (void)std::printf(
+        "texblend-ok tris=%d sampledTri=%d texelFetch=%ld greyFallback=%d flatTri=%d "
+        "texPixels=%ld firstTex=%s render=cpu\n",
+        lastTex.tris, lastTex.sampledTri, lastTex.texelFetch, lastTex.fallbackTri, lastTex.flatTri,
+        lastTex.texPixels, lastTex.haveFirst ? lastTex.firstTex : "-"
+    );
+    (void)std::printf("blendshot-ok out=%s frames=%d morphMono=%.6f\n", outPath, frames,
+                       blend.morphMono);
+    IfpAnim_Shutdown();
+    return 0;
+}
+
 // Round 14 (R6l): car wheels steer + spin. Loads one car DFF (default
 // --model landstal) with its per-model TXD, finds the wheel dummy frames by
 // their stored hierarchy names, applies --steer (front-pair yaw, degrees)
@@ -3482,6 +3731,9 @@ int main(int argc, char** argv) {
     }
     if (HasArg(argc, argv, "--anim-seq")) {
         return RunAnimSeq(argc, argv);
+    }
+    if (HasArg(argc, argv, "--anim-blend")) {
+        return RunAnimBlend(argc, argv);
     }
     if (HasArg(argc, argv, "--shot-car")) {
         return RunShotCar(argc, argv);
