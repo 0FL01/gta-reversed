@@ -47,6 +47,7 @@ using uint64 = uint64_t;
 #include "app/platform/linux/IfpAnim.h"
 #include "app/platform/linux/CarPose.h"
 #include "app/platform/linux/DuoShot.h"
+#include "app/platform/linux/CrowdShot.h"
 #include "app/platform/linux/TimeCycle.h"
 #include "app/platform/linux/DriveSim.h"
 #include "app/platform/linux/Handling.h"
@@ -57,7 +58,7 @@ using uint64 = uint64_t;
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -2774,6 +2775,199 @@ int RunShotDuo(int argc, char** argv) {
     return 0;
 }
 
+// Round 23 (R6u): crowd of three. Three skinned DFFs (andre + wmybmx +
+// ballas1, first archive-order trio of gta3.img with a full 32-bone
+// skeleton and passing pose gates) each in its own IFP pose
+// (andre=IDLE_stance@0.5 legacy, wmybmx=WALK_civi@T=0.2 interp,
+// ballas1=IDLE_stance@0.9 legacy: three DIFFERENT poses) via IfpAnim_Init,
+// offset in a row by (-2.5/0/+2.5,0,0), all Z on the flat z=0 plane
+// (ground=flat, no raycast this round, as in R6t), and rendered in ONE
+// TexSample_RenderCrowd call with a common z-buffer. pix[i] counts depth
+// winners of actor i; overlap12 counts pixels where >=2 actors projected,
+// overlapAll where all three projected (anti-montage proof). No stitched
+// TGAs, no procedural meshes.
+int RunShotCrowd(int argc, char** argv) {
+    const char* outPath = ArgValue(argc, argv, "--shot-crowd", "crowd.tga");
+    if (!outPath || outPath[0] == '\0') {
+        (void)std::printf("crowd-fail bad args shot-crowd='%s'\n",
+                           outPath ? outPath : "(null)");
+        return 1;
+    }
+    const int width = 640;
+    const int height = 480;
+    auto getPlatformDisplay = reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(
+        eglGetProcAddress("eglGetPlatformDisplayEXT")
+    );
+    if (!getPlatformDisplay) {
+        (void)std::printf("crowd-fail no eglGetPlatformDisplayEXT\n");
+        return 1;
+    }
+#ifndef EGL_PLATFORM_SURFACELESS_MESA
+#define EGL_PLATFORM_SURFACELESS_MESA 0x31DD
+#endif
+    EGLDisplay display = getPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
+    if (display == EGL_NO_DISPLAY) {
+        (void)std::printf("crowd-fail no surfaceless display 0x%x\n", eglGetError());
+        return 1;
+    }
+    if (!eglInitialize(display, nullptr, nullptr)) {
+        (void)std::printf("crowd-fail egl init 0x%x\n", eglGetError());
+        return 1;
+    }
+    const EGLint configAttrs[] = {
+        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
+        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+        EGL_DEPTH_SIZE, 24,
+        EGL_NONE
+    };
+    EGLConfig config = nullptr;
+    EGLint configCount = 0;
+    if (!eglChooseConfig(display, configAttrs, &config, 1, &configCount) || configCount < 1) {
+        (void)std::printf("crowd-fail choose config 0x%x\n", eglGetError());
+        eglTerminate(display);
+        return 1;
+    }
+    const EGLint pbufferAttrs[] = { EGL_WIDTH, width, EGL_HEIGHT, height, EGL_NONE };
+    EGLSurface surface = eglCreatePbufferSurface(display, config, pbufferAttrs);
+    if (surface == EGL_NO_SURFACE) {
+        (void)std::printf("crowd-fail pbuffer 0x%x\n", eglGetError());
+        eglTerminate(display);
+        return 1;
+    }
+    (void)eglBindAPI(EGL_OPENGL_API);
+    EGLContext context = eglCreateContext(display, config, EGL_NO_CONTEXT, nullptr);
+    if (context == EGL_NO_CONTEXT) {
+        (void)std::printf("crowd-fail context 0x%x\n", eglGetError());
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    if (!eglMakeCurrent(display, surface, surface, context)) {
+        (void)std::printf("crowd-fail make current 0x%x\n", eglGetError());
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    const char* glVersion = reinterpret_cast<const char*>(glGetString(GL_VERSION));
+    (void)std::printf("crowd-gl %s\n", glVersion ? glVersion : "(null)");
+    std::string gameDir = ResolveGameDir(argc, argv);
+    WorldShotScene scene{};
+    CrowdShotStats cst{};
+    IfpAnimStats pst[3]{};
+    char crowdErr[640] = {};
+    if (!CrowdShot_Init(gameDir.c_str(), scene, cst, pst, crowdErr, sizeof(crowdErr))) {
+        (void)std::printf("crowd-fail load %s (game=%s)\n", crowdErr, gameDir.c_str());
+        CrowdShot_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    (void)std::printf(
+        "crowd-load models=%s,%s,%s src=%s;%s;%s anims=%s@%.1f%s,%s@%.1f%s,%s@%.1f%s "
+        "mapped=%d,%d,%d unmapped=%d,%d,%d bones=%d,%d,%d tris=%d,%d,%d ends=%d,%d "
+        "bbox=[%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f]\n",
+        cst.models[0], cst.models[1], cst.models[2], pst[0].src, pst[1].src, pst[2].src,
+        cst.anims[0], cst.times[0], cst.interp[0] ? "(interp)" : "(legacy)", cst.anims[1],
+        cst.times[1], cst.interp[1] ? "(interp)" : "(legacy)", cst.anims[2], cst.times[2],
+        cst.interp[2] ? "(interp)" : "(legacy)", cst.mapped[0], cst.mapped[1], cst.mapped[2],
+        cst.unmapped[0], cst.unmapped[1], cst.unmapped[2], cst.bones[0], cst.bones[1],
+        cst.bones[2], cst.tris[0], cst.tris[1], cst.tris[2], cst.meshEnd0, cst.meshEnd1,
+        scene.bboxMin[0], scene.bboxMin[1], scene.bboxMin[2], scene.bboxMax[0], scene.bboxMax[1],
+        scene.bboxMax[2]);
+    (void)std::printf("crowd-offsets ped0=%.1f,%.1f,%.1f ped1=%.1f,%.1f,%.1f ped2=%.1f,%.1f,%.1f "
+                       "ground=flat\n",
+                       cst.offsets[0][0], cst.offsets[0][1], cst.offsets[0][2],
+                       cst.offsets[1][0], cst.offsets[1][1], cst.offsets[1][2],
+                       cst.offsets[2][0], cst.offsets[2][1], cst.offsets[2][2]);
+    (void)std::printf("crowd-cam eye=%.1f,%.1f,%.1f target=%.1f,%.1f,%.1f fov=60\n", cst.eye[0],
+                       cst.eye[1], cst.eye[2], cst.target[0], cst.target[1], cst.target[2]);
+    for (int i = 0; i < 3; ++i) {
+        if (cst.bones[i] != 32 || cst.mapped[i] != 32 || cst.unmapped[i] != 0) {
+            (void)std::printf("crowd-fail gate ped%d bones=%d(==32) mapped=%d(==32) unmapped=%d"
+                               "(==0)\n",
+                               i, cst.bones[i], cst.mapped[i], cst.unmapped[i]);
+            CrowdShot_Shutdown();
+            eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            eglDestroyContext(display, context);
+            eglDestroySurface(display, surface);
+            eglTerminate(display);
+            return 1;
+        }
+    }
+    std::vector<uint8> pixels;
+    TexFrameStats texStats{};
+    TexCrowdStats crowd{};
+    TexSample_RenderCrowd(scene, cst.meshEnd0, cst.meshEnd1, width, height, cst.eye, cst.target,
+                          pixels, texStats, crowd);
+    uint64_t sumR = 0;
+    uint64_t sumG = 0;
+    uint64_t sumB = 0;
+    uint64_t nonBlack = 0;
+    uint64_t checksum = PixelsChecksum(pixels, sumR, sumG, sumB, nonBlack);
+    uint64_t total = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
+    if (nonBlack == 0) {
+        (void)std::printf("crowd-fail black frame\n");
+        CrowdShot_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    if (crowd.pix[0] <= 500 || crowd.pix[1] <= 500 || crowd.pix[2] <= 500 ||
+        (crowd.overlap12 <= 0 && crowd.overlapAll <= 0)) {
+        (void)std::printf("crowd-fail gate pixels=%ld,%ld,%ld(>500 each) overlap12=%ld "
+                           "overlapAll=%ld(>=1 of them >0)\n",
+                           crowd.pix[0], crowd.pix[1], crowd.pix[2], crowd.overlap12,
+                           crowd.overlapAll);
+        CrowdShot_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    if (!WriteTga24(outPath, width, height, pixels)) {
+        (void)std::printf("crowd-fail write '%s'\n", outPath);
+        CrowdShot_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    eglDestroyContext(display, context);
+    eglDestroySurface(display, surface);
+    eglTerminate(display);
+    OS_DebugOut("mad-sa-linux crowd shot");
+    (void)std::printf(
+        "texcrowd-ok tris=%d sampledTri=%d texelFetch=%ld greyFallback=%d flatTri=%d texPixels=%ld "
+        "render=cpu shared-z=1\n",
+        texStats.tris, texStats.sampledTri, texStats.texelFetch, texStats.fallbackTri,
+        texStats.flatTri, texStats.texPixels);
+    (void)std::printf(
+        "crowd-ok peds=3 models=%s,%s,%s poses=%s@%.1f%s,%s@%.1f%s,%s@%.1f%s pixels=%ld,%ld,%ld "
+        "overlap12=%ld overlapAll=%ld checksum=%llu\n",
+        cst.models[0], cst.models[1], cst.models[2], cst.anims[0], cst.times[0],
+        cst.interp[0] ? "(interp)" : "(legacy)", cst.anims[1], cst.times[1],
+        cst.interp[1] ? "(interp)" : "(legacy)", cst.anims[2], cst.times[2],
+        cst.interp[2] ? "(interp)" : "(legacy)", crowd.pix[0], crowd.pix[1], crowd.pix[2],
+        crowd.overlap12, crowd.overlapAll, static_cast<unsigned long long>(checksum));
+    (void)std::printf(
+        "crowdshot-ok out=%s nonblack=%llu/%llu avg=%llu,%llu,%llu checksum=%llu\n", outPath,
+        static_cast<unsigned long long>(nonBlack), static_cast<unsigned long long>(total),
+        static_cast<unsigned long long>(sumR / total),
+        static_cast<unsigned long long>(sumG / total),
+        static_cast<unsigned long long>(sumB / total), static_cast<unsigned long long>(checksum));
+    CrowdShot_Shutdown();
+    return 0;
+}
+
 // Round 16 (R6n): kinematic drive. Car (CarPose DFF/TXD, steer+spin) rides a
 // caller-supplied XY polyline; Z comes only from the COL raycast
 // (carZ = groundH + clearance), yaw from the segment, front steer from
@@ -3997,6 +4191,9 @@ int main(int argc, char** argv) {
     }
     if (HasArg(argc, argv, "--shot-duo")) {
         return RunShotDuo(argc, argv);
+    }
+    if (HasArg(argc, argv, "--shot-crowd")) {
+        return RunShotCrowd(argc, argv);
     }
     if (HasArg(argc, argv, "--drive")) {
         return RunDrive(argc, argv);
