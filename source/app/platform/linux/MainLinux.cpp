@@ -59,7 +59,7 @@ using uint64 = uint64_t;
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --csanim-seq <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--frames 5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -3032,6 +3032,240 @@ int RunShotCsAnim(int argc, char** argv) {
     return 0;
 }
 
+// Round 26 (R6x): cutscene-animation sequencer. Samples K evenly spaced
+// fractional times T_i = i/(K-1) (default K=5) across the SAME ANPK clip as
+// --shot-cs-anim through the SAME CsAnim_Init lerp+slerp path (no new
+// sampler, no procedural poses), skins/renders every frame with the same
+// 60deg orbit rasterizer, writes the TGA of the last frame, and reports
+// csanimseq-ok with per-frame times/checksums plus rootTravel (world
+// distance of the tag-0 bone between frame 0 and frame K-1). The middle
+// frame of an odd K (i=(K-1)/2, T=0.5 for K=5) must reproduce the R6w
+// --shot-cs-anim checksum bit-for-bit (gated as midMatchesR6w).
+int RunCsAnimSeq(int argc, char** argv) {
+    const char* outPath = ArgValue(argc, argv, "--csanim-seq", "csanimseq.tga");
+    const char* model = ArgValue(argc, argv, "--model", "cssmokevest");
+    const char* bank = ArgValue(argc, argv, "--bank", "smoke1a");
+    const char* anim = ArgValue(argc, argv, "--anim", "csplay");
+    const char* framesArg = ArgValue(argc, argv, "--frames", "5");
+    int frames = std::atoi(framesArg ? framesArg : "5");
+    if (!outPath || outPath[0] == '\0' || !model || model[0] == '\0' || !bank ||
+        bank[0] == '\0' || !anim || anim[0] == '\0' || frames < 2 || frames > 64) {
+        (void)std::printf(
+            "csanimseq-fail bad args csanim-seq='%s' model='%s' bank='%s' anim='%s' frames='%s'\n",
+            outPath ? outPath : "(null)", model ? model : "(null)", bank ? bank : "(null)",
+            anim ? anim : "(null)", framesArg ? framesArg : "(null)");
+        return 1;
+    }
+    const int width = 640;
+    const int height = 480;
+    auto getPlatformDisplay = reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(
+        eglGetProcAddress("eglGetPlatformDisplayEXT")
+    );
+    if (!getPlatformDisplay) {
+        (void)std::printf("csanimseq-fail no eglGetPlatformDisplayEXT\n");
+        return 1;
+    }
+#ifndef EGL_PLATFORM_SURFACELESS_MESA
+#define EGL_PLATFORM_SURFACELESS_MESA 0x31DD
+#endif
+    EGLDisplay display = getPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
+    if (display == EGL_NO_DISPLAY) {
+        (void)std::printf("csanimseq-fail no surfaceless display 0x%x\n", eglGetError());
+        return 1;
+    }
+    if (!eglInitialize(display, nullptr, nullptr)) {
+        (void)std::printf("csanimseq-fail egl init 0x%x\n", eglGetError());
+        return 1;
+    }
+    const EGLint configAttrs[] = {
+        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
+        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+        EGL_DEPTH_SIZE, 24,
+        EGL_NONE
+    };
+    EGLConfig config = nullptr;
+    EGLint configCount = 0;
+    if (!eglChooseConfig(display, configAttrs, &config, 1, &configCount) || configCount < 1) {
+        (void)std::printf("csanimseq-fail choose config 0x%x\n", eglGetError());
+        eglTerminate(display);
+        return 1;
+    }
+    const EGLint pbufferAttrs[] = { EGL_WIDTH, width, EGL_HEIGHT, height, EGL_NONE };
+    EGLSurface surface = eglCreatePbufferSurface(display, config, pbufferAttrs);
+    if (surface == EGL_NO_SURFACE) {
+        (void)std::printf("csanimseq-fail pbuffer 0x%x\n", eglGetError());
+        eglTerminate(display);
+        return 1;
+    }
+    (void)eglBindAPI(EGL_OPENGL_API);
+    EGLContext context = eglCreateContext(display, config, EGL_NO_CONTEXT, nullptr);
+    if (context == EGL_NO_CONTEXT) {
+        (void)std::printf("csanimseq-fail context 0x%x\n", eglGetError());
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    if (!eglMakeCurrent(display, surface, surface, context)) {
+        (void)std::printf("csanimseq-fail make current 0x%x\n", eglGetError());
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    const char* glVersion = reinterpret_cast<const char*>(glGetString(GL_VERSION));
+    (void)std::printf("csanimseq-gl %s\n", glVersion ? glVersion : "(null)");
+    std::string gameDir = ResolveGameDir(argc, argv);
+    // One scene+stats per frame: the SAME CsAnim_Init sampler as
+    // --shot-cs-anim, called with T_i = i/(K-1) (timeAbs = T_i * total).
+    std::vector<WorldShotScene> scenes(static_cast<size_t>(frames));
+    std::vector<CsAnimStats> st(static_cast<size_t>(frames));
+    std::vector<uint64_t> checksums;
+    checksums.reserve(static_cast<size_t>(frames));
+    std::vector<uint8> lastPixels;
+    TexFrameStats lastTex{};
+    for (int i = 0; i < frames; ++i) {
+        double timeFrac = frames <= 1 ? 0.0 : static_cast<double>(i) / (frames - 1);
+        char seqErr[512] = {};
+        if (!CsAnim_Init(gameDir.c_str(), model, bank, anim, timeFrac, scenes[static_cast<size_t>(i)],
+                         st[static_cast<size_t>(i)], seqErr, sizeof(seqErr))) {
+            (void)std::printf("csanimseq-fail load i=%d %s (game=%s model=%s bank=%s anim=%s)\n",
+                               i, seqErr, gameDir.c_str(), model, bank, anim);
+            CsAnim_Shutdown();
+            eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            eglDestroyContext(display, context);
+            eglDestroySurface(display, surface);
+            eglTerminate(display);
+            return 1;
+        }
+        const CsAnimStats& a = st[static_cast<size_t>(i)];
+        std::vector<uint8> pixels;
+        TexFrameStats texStats{};
+        DrawWorldFrame(scenes[static_cast<size_t>(i)], width, height, 60.0f, nullptr, pixels,
+                       texStats);
+        uint64_t sumR = 0;
+        uint64_t sumG = 0;
+        uint64_t sumB = 0;
+        uint64_t nonBlack = 0;
+        uint64_t checksum = PixelsChecksum(pixels, sumR, sumG, sumB, nonBlack);
+        uint64_t total = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
+        if (nonBlack == 0) {
+            (void)std::printf("csanimseq-fail black frame i=%d\n", i);
+            CsAnim_Shutdown();
+            eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            eglDestroyContext(display, context);
+            eglDestroySurface(display, surface);
+            eglTerminate(display);
+            return 1;
+        }
+        checksums.push_back(checksum);
+        (void)std::printf(
+            "csanimseq-frame i=%d time=%.4f timeAbs=%.4f checksum=%llu root=(%.4f,%.4f,%.4f) "
+            "mapped=%d unmapped=%d wsum=%.6f nonblack=%llu/%llu\n",
+            i, a.time, a.timeAbs, static_cast<unsigned long long>(checksum), a.rootWorld[0],
+            a.rootWorld[1], a.rootWorld[2], a.mapped, a.unmapped, a.wsum,
+            static_cast<unsigned long long>(nonBlack), static_cast<unsigned long long>(total));
+        if (i == frames - 1) {
+            lastPixels = std::move(pixels);
+            lastTex = texStats;
+        }
+    }
+    const CsAnimStats& s0 = st.front();
+    (void)std::printf(
+        "csanimseq-load model=%s src=%s txd=%s textures=%d geoms=%d frames=%d bank=%s bankSrc=%s "
+        "anim=%s seqs=%d total=%.4f kframes=%d interp=lerp+slerp\n",
+        s0.model, s0.src, s0.txd, s0.textures, s0.geoms, s0.frames, s0.bank, s0.bankSrc, s0.anim,
+        s0.seqs, s0.animTotal, frames);
+    // Root travel D: world distance of the tag-0 bone, frame 0 -> frame K-1.
+    double dx = static_cast<double>(st.back().rootWorld[0]) - s0.rootWorld[0];
+    double dy = static_cast<double>(st.back().rootWorld[1]) - s0.rootWorld[1];
+    double dz = static_cast<double>(st.back().rootWorld[2]) - s0.rootWorld[2];
+    double rootTravel = std::sqrt(dx * dx + dy * dy + dz * dz);
+    // Mid-bit-identity: for odd K the middle frame sits at T=0.5 exactly
+    // (i=(K-1)/2, double division i/(K-1)==0.5) and must reproduce the R6w
+    // --shot-cs-anim checksum through the identical sampler path.
+    int midMatchesR6w = 0;
+    int midIdx = -1;
+    uint64_t midChecksum = 0;
+    if (frames % 2 == 1) {
+        midIdx = (frames - 1) / 2;
+        midChecksum = checksums[static_cast<size_t>(midIdx)];
+        midMatchesR6w = (midChecksum == 12593717684848869509ULL) ? 1 : 0;
+        (void)std::printf("csanimseq-mid mid=%llu r6w=12593717684848869509 midMatchesR6w=%d\n",
+                          static_cast<unsigned long long>(midChecksum), midMatchesR6w);
+    }
+    bool gateDistinct = true;
+    for (int i = 0; i < frames && gateDistinct; ++i) {
+        for (int j = i + 1; j < frames; ++j) {
+            if (checksums[static_cast<size_t>(i)] == checksums[static_cast<size_t>(j)]) {
+                gateDistinct = false;
+                break;
+            }
+        }
+    }
+    bool gateKnown = true;
+    for (int i = 0; i < frames; ++i) {
+        if (checksums[static_cast<size_t>(i)] == 7067056039750001653ULL) {
+            gateKnown = false;
+            break;
+        }
+    }
+    bool gateTravel = rootTravel > 0.5;
+    bool gateMid = (frames % 2 == 0) ? true : (midMatchesR6w == 1);
+    if (!(gateDistinct && gateKnown && gateTravel && gateMid)) {
+        (void)std::printf(
+            "csanimseq-fail gate distinct=%d known=%d travel=%.6f(>0.5) mid=%d midMatchesR6w=%d\n",
+            gateDistinct ? 1 : 0, gateKnown ? 1 : 0, rootTravel, midIdx, midMatchesR6w);
+        CsAnim_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    if (!WriteTga24(outPath, width, height, lastPixels)) {
+        (void)std::printf("csanimseq-fail write '%s'\n", outPath);
+        CsAnim_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    eglDestroyContext(display, context);
+    eglDestroySurface(display, surface);
+    eglTerminate(display);
+    OS_DebugOut("mad-sa-linux csanim seq");
+    (void)std::printf(
+        "texcsanimseq-ok tris=%d sampledTri=%d texelFetch=%ld greyFallback=%d flatTri=%d "
+        "texPixels=%ld firstTex=%s render=cpu\n",
+        lastTex.tris, lastTex.sampledTri, lastTex.texelFetch, lastTex.fallbackTri, lastTex.flatTri,
+        lastTex.texPixels, lastTex.haveFirst ? lastTex.firstTex : "-");
+    std::string times;
+    for (int i = 0; i < frames; ++i) {
+        char cell[32];
+        (void)std::snprintf(cell, sizeof(cell), "%s%.2f", i ? "," : "",
+                            st[static_cast<size_t>(i)].timeAbs);
+        times += cell;
+    }
+    std::string cs;
+    for (int i = 0; i < frames; ++i) {
+        char cell[32];
+        (void)std::snprintf(cell, sizeof(cell), "%s%llu", i ? "," : "",
+                            static_cast<unsigned long long>(checksums[static_cast<size_t>(i)]));
+        cs += cell;
+    }
+    (void)std::printf("csanimseq-ok model=%s anim=%s frames=%d times=%s checksums=%s rootTravel=%.6f "
+                      "midMatchesR6w=%d\n",
+                      s0.model, s0.anim, frames, times.c_str(), cs.c_str(), rootTravel,
+                      midMatchesR6w);
+    (void)std::printf("csanimseqshot-ok out=%s frames=%d rootTravel=%.6f\n", outPath, frames,
+                      rootTravel);
+    CsAnim_Shutdown();
+    return 0;
+}
+
 int RunListCsAnims(int argc, char** argv) {
     std::string gameDir = ResolveGameDir(argc, argv);
     const char* bank = ArgValue(argc, argv, "--bank", "smoke1a");
@@ -4661,6 +4895,9 @@ int main(int argc, char** argv) {
     }
     if (HasArg(argc, argv, "--shot-cs-anim")) {
         return RunShotCsAnim(argc, argv);
+    }
+    if (HasArg(argc, argv, "--csanim-seq")) {
+        return RunCsAnimSeq(argc, argv);
     }
     if (HasArg(argc, argv, "--shot-cs")) {
         return RunShotCs(argc, argv);
