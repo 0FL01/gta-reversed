@@ -70,6 +70,7 @@ struct RealtimeGameplayState {
     float PedHeading = 0.0f; // world forward atan2(y,x), DFF +Y forward
     float CarHeading = 0.0f;
     float Speed = 0.0f; // signed car speed m/s
+    std::uint8_t Gear = 1; // source transmission, 0=reverse; original 30 FPS limiter cadence
     float Steer = 0.0f; // radians at wheels
     float WheelSpin = 0.0f; // radians, actual travelled distance / DFF radius
     float VerticalSpeed = 0.0f;

@@ -63,6 +63,9 @@ struct MenuHudFont {
     bool ok = false;
 };
 bool MenuShot_LoadHudFont(const char* gameDir, MenuHudFont& font, char* err, std::size_t errSize);
+// Startup-only owned font1 + font-ID 1 metrics (CFont::FONT_PRICEDOWN).
+// Its subfont glyph mapping differs from the legacy font2 blitters below.
+bool MenuShot_LoadPricedownFont(const char* gameDir, MenuHudFont& font, char* err, std::size_t errSize);
 // Draws ASCII text right-aligned (last glyph ends at xRight, exclusive) in
 // top-down framebuffer coords on bottom-up RGBA. Returns drawn glyph count.
 int MenuShot_DrawTextRight(std::vector<uint8_t>& px, int fbW, int fbH, const MenuHudFont& font,

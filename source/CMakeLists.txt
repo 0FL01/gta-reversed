@@ -29,6 +29,7 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
         app/platform/linux/Realtime.cpp
         app/platform/linux/RealtimeEnvironment.cpp
         app/platform/linux/RealtimeGameplay.cpp
+        app/platform/linux/RealtimeHud.cpp
         app/platform/linux/WorldShot.cpp
         app/platform/linux/SceneShot.cpp
         app/platform/linux/StreamPager.cpp

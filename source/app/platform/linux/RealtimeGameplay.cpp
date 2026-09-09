@@ -4,6 +4,7 @@
 #include "app/platform/linux/Collide.h"
 #include "app/platform/linux/Handling.h"
 #include "app/platform/linux/IfpAnim.h"
+#include "app/platform/linux/NativeTransmission.h"
 
 #include <algorithm>
 #include <array>
@@ -81,7 +82,7 @@ static V RotateZ(V v, float a) { return {v.X*std::cos(a)-v.Y*std::sin(a), v.X*st
 
 // Handling_Load deliberately exposes only the old batch subset. Read the
 // additional real columns locally rather than changing that shared contract.
-static bool ExtraHandling(float& brake, float& lock, float& traction, std::string& error) {
+static bool ExtraHandling(float& brake, float& lock, float& traction, uint32_t& flags, std::string& error) {
     void* file=nullptr;
     if (OS_FileOpen(FILE_DATA_AREA_DEFAULT,&file,"data/handling.cfg",FILE_ACCESS_READ)!=0 || !file) {
         error="cannot read handling brake/steering columns"; return false;
@@ -98,16 +99,20 @@ static bool ExtraHandling(float& brake, float& lock, float& traction, std::strin
         std::vector<std::string> t;
         for (std::string token; row>>token;) t.push_back(token);
         if (t.empty() || t[0]!="LANDSTAL") continue;
-        if (t.size()<21) break;
+        if (t.size()<33) break;
         auto number=[&](size_t i, float& out) {
             char* end=nullptr; out=std::strtof(t[i].c_str(),&end);
             return end && !*end && std::isfinite(out) && out>0.0f;
         };
         if (!number(17,brake) || !number(20,lock) || !number(8,traction)) break;
+        char* end=nullptr;
+        const auto parsed=std::strtoul(t[32].c_str(),&end,16);
+        if (!end || end==t[32].c_str() || *end || parsed>UINT32_MAX) break;
+        flags=static_cast<uint32_t>(parsed);
         lock*=Pi/180.0f;
         return true;
     }
-    error="missing/invalid LANDSTAL braking, traction or steering lock"; return false;
+    error="missing/invalid LANDSTAL braking, traction, steering lock or handling flags"; return false;
 }
 } // namespace
 
@@ -278,6 +283,9 @@ struct RealtimeGameplay::Impl {
     CarPoseStats CarStats{};
     CarPoseMeasure Measure{};
     HandlingParams Handling{};
+    NativeTransmission Transmission;
+    NativeTransmission::State TransmissionState;
+    double TransmissionTime=0;
     std::vector<V> WheelPivots;
     float BrakeDecel=0,SteeringLock=0,Traction=0;
     float CarHalfWidth=0,CarHalfLength=0,CarHeight=0;
@@ -450,15 +458,37 @@ struct RealtimeGameplay::Impl {
         State.Ped=next;
     }
     void CarStep(float h,const RealtimeGameplayInput& input,const RealtimeGameplayWorld& world) {
-        const float throttle=State.InVehicle ? input.Forward : 0.0f;
-        const bool braking=!State.InVehicle || input.Brake || input.Handbrake || throttle*State.Speed< -0.1f;
-        if (braking) State.Speed=Approach(State.Speed,0.0f,BrakeDecel*(input.Handbrake ? 1.5f:1.0f)*h);
-        else {
-            State.Speed+=throttle*static_cast<float>(Handling.accelSi)*h;
-            const float resistance=0.12f+static_cast<float>(Handling.drag/Handling.mass)*State.Speed*State.Speed;
-            State.Speed=Approach(State.Speed,0.0f,resistance*h);
+        // Original inertia smoothing and wheel friction are per CALL, not per
+        // second. Use the original default 30 FPS limiter cadence (app/app.h),
+        // CTimer timestep=50/30, independently of render/collision substeps.
+        TransmissionTime+=h;
+        constexpr double engineStep=NativeTransmission::SecondsPerUpdate;
+        constexpr float timeStep=NativeTransmission::TimeStep;
+        while (TransmissionTime+1e-9>=engineStep) {
+            TransmissionTime-=engineStep;
+            const float throttle=State.InVehicle ? input.Forward:0.0f;
+            const bool braking=!State.InVehicle || input.Brake || input.Handbrake || throttle*State.Speed< -0.1f;
+            if (State.InVehicle) {
+                const float gas=braking ? 0.0f:throttle;
+                const float acceleration=Transmission.DriveAcceleration(gas,TransmissionState,State.Speed/50.0f,timeStep,CarVertical==0);
+                // ProcessCarWheelPair -> ProcessWheel -> ApplyMoveForce applies
+                // this delta once per contacting driven wheel, not once per car.
+                // Current native body has no individual suspension/tire solver:
+                // flat no-slip all-wheel contact aggregation only; no air thrust.
+                if (CarVertical==0) State.Speed+=acceleration*static_cast<float>(Transmission.DrivenWheels())*50.0f;
+            }
+            if (braking) {
+                // Existing scalar brake/handbrake controller. NOT the original
+                // per-wheel adhesion, brake bias, lockup or lateral slip solver.
+                State.Speed=Approach(State.Speed,0.0f,BrakeDecel*(input.Handbrake ? 1.5f:1.0f)*static_cast<float>(engineStep));
+            } else if (std::abs(throttle)<0.01f && CarVertical==0) {
+                // ProcessWheel's non-driving friction: 0.9 / mass per contact
+                // wheel per call (four supported wheels), capped at rest.
+                State.Speed=Approach(State.Speed,0.0f,4.0f*0.9f/static_cast<float>(Handling.mass)*50.0f);
+            }
+            State.Speed=Transmission.AirResistance(State.Speed,timeStep);
+            State.Gear=TransmissionState.CurrentGear;
         }
-        State.Speed=std::clamp(State.Speed,-static_cast<float>(Handling.vmaxMs)*0.25f,static_cast<float>(Handling.vmaxMs));
         const float steering=State.InVehicle ? -input.Side*SteeringLock/(1.0f+std::abs(State.Speed)*0.04f) : 0.0f;
         State.Steer=Approach(State.Steer,steering,h*2.0f);
         float yawRate=State.Speed/static_cast<float>(Measure.wheelbase)*std::tan(State.Steer);
@@ -605,7 +635,18 @@ bool RealtimeGameplay::Initialize(const char* gameDir,std::string& error) {
         }
     } scope;
     if (!Handling_Load(gameDir,"landstal",next->Handling,err,sizeof(err))) { error=err; return false; }
-    if (!ExtraHandling(next->BrakeDecel,next->SteeringLock,next->Traction,error)) return false;
+    uint32_t handlingFlags=0;
+    if (!ExtraHandling(next->BrakeDecel,next->SteeringLock,next->Traction,handlingFlags,error)) return false;
+    const auto& handling=next->Handling;
+    if (handling.gears>5 || !std::isfinite(handling.mass) || !std::isfinite(handling.drag) || handling.drag<0 ||
+        !std::isfinite(handling.vmaxFileKmh) || !std::isfinite(handling.accelFile) ||
+        !std::isfinite(handling.inertia) || handling.inertia<=0 ||
+        (handling.driveType!='4' && handling.driveType!='F' && handling.driveType!='R')) {
+        error="unsupported/invalid native automobile transmission"; return false;
+    }
+    next->Transmission.Initialize({static_cast<float>(handling.vmaxFileKmh),static_cast<float>(handling.accelFile),
+        static_cast<float>(handling.inertia),static_cast<float>(handling.drag),static_cast<uint8_t>(handling.gears),
+        handling.driveType,handlingFlags});
     for (auto& clip:next->Clips) {
         std::vector<IfpAnimSeqFrame> seq;
         if (!IfpAnim_Seq(gameDir,"andre",clip.Name,33,seq,err,sizeof(err))) { error=err; return false; }
@@ -685,6 +726,7 @@ bool RealtimeGameplay::Spawn(const RealtimeGameplayWorld& world,float x,float y,
     p.State.PedHeading=p.State.CarHeading=p.OrbitYaw=heading;
     p.State.Ready=p.State.Grounded=true;
     p.CarVertical=p.CarPitch=p.CarRoll=p.Phase=p.PedSpeed=0;
+    p.TransmissionState={}; p.TransmissionTime=0;
     p.IdlePhase=p.AirPhase=p.MoveBlend=p.RunBlend=p.AirBlend=0;
     p.Pose(0); p.UpdateCamera(0,world); error.clear(); return true;
 }

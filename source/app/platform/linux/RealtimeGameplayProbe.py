@@ -18,7 +18,7 @@ output.mkdir(parents=True, exist_ok=True)
 commands = subprocess.check_output(['ninja', '-C', str(build), '-t', 'commands', 'mad-sa-linux'], text=True).splitlines()
 compile_command = shlex.split(next(c for c in commands if '-c ' in c and '/Handling.cpp' in c))
 objects = []
-probe = 'RealtimeGameplayTerrainProbe' if '--terrain' in sys.argv else 'RealtimeGameplayPoseProbe' if '--pose' in sys.argv else 'RealtimeGameplayProbe'
+probe = 'RealtimeGameplayDriveProbe' if '--drive' in sys.argv else 'RealtimeGameplayTerrainProbe' if '--terrain' in sys.argv else 'RealtimeGameplayPoseProbe' if '--pose' in sys.argv else 'RealtimeGameplayProbe'
 build_log = (output / (probe + '-build.log')).open('w')
 for name in ('RealtimeGameplay', 'IfpAnim', probe):
     command = []

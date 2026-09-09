@@ -175,6 +175,50 @@ int ClampTile(int v) {
 
 } // namespace
 
+bool RadarMap_LoadAssets(const char* gameDir, RadarMapAssets& out, char* err, std::size_t errSize) {
+    out = {};
+    if (!gameDir || !gameDir[0] || !RadarRwInit()) {
+        SetErr(err, errSize, "radar preload: invalid game dir or librw init failed");
+        return false;
+    }
+    OS_SetFilePathOffset(gameDir);
+    const auto decode = [](std::vector<uint8>& bytes, const char* name, TexImage& image) {
+        rw::StreamMemory stream;
+        stream.open(bytes.data(), static_cast<uint32>(bytes.size()));
+        rw::TexDictionary* txd = nullptr;
+        if (rw::findChunk(&stream, rw::ID_TEXDICTIONARY, nil, nil)) {
+            txd = rw::TexDictionary::streamRead(&stream);
+        }
+        stream.close();
+        if (!txd) return false;
+        auto* texture = txd->find(name);
+        const bool ok = texture && TexSample_Decode(texture, image) && !image.rgba.empty();
+        txd->destroy();
+        return ok;
+    };
+    for (int i = 0; i < 144; ++i) {
+        char name[32], entry[40];
+        std::snprintf(name, sizeof(name), "radar%02d", i);
+        std::snprintf(entry, sizeof(entry), "%s.txd", name);
+        std::vector<uint8> bytes;
+        auto& tile = out.tiles[i];
+        if (!ImgReadEntryLocal("models/gta3.img", entry, bytes) || !decode(bytes, name, tile)
+            || tile.w != 128 || tile.h != 128) {
+            SetErr(err, errSize, entry);
+            return false;
+        }
+    }
+    std::vector<uint8> bytes;
+    if (!ReadWholeFile("models/hud.txd", bytes)
+        || !decode(bytes, "radar_centre", out.centre)
+        || !decode(bytes, "radar_north", out.north)
+        || !decode(bytes, "radardisc", out.disc)) {
+        SetErr(err, errSize, "hud.txd: radar_centre/radar_north/radardisc decode failed");
+        return false;
+    }
+    return true;
+}
+
 bool RadarMap_Render(const char* gameDir, double worldX, double worldY,
                      std::vector<uint8_t>& outRGBA, RadarMapStats& stats, char* err,
                      std::size_t errSize) {

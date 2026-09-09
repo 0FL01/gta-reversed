@@ -4,6 +4,7 @@
 #include "app/platform/linux/StreamPager.h"
 #include "app/platform/linux/RealtimeEnvironment.h"
 #include "app/platform/linux/RealtimeGameplay.h"
+#include "app/platform/linux/RealtimeHud.h"
 #include "app/platform/linux/RealtimeStreaming.h"
 
 #include <SDL3/SDL.h>
@@ -543,6 +544,12 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             static_cast<double>(SDL_GetTicksNS() - initStart) / 1e9, world.active->cpu->Collision.TriangleCount(),
             gameplay.Actors().stats.triangles, gameplay.Actors().images.size());
     }
+    RealtimeHud hud;
+    if (!hud.Load(gameDir, error, sizeof(error)) || !hud.Upload(error, sizeof(error))) {
+        std::printf("play-fail HUD: %s\n", error);
+        return 1;
+    }
+    std::printf("play-hud radar=144-tiles clock=game-time player=%s\n", gameplayEnabled ? "gameplay" : "hidden-freecam");
     world.Start(gameplayEnabled); // final startup parser has returned; transfer exclusive pager ownership
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_ALPHA_TEST);
@@ -557,7 +564,7 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
     bool running = true;
     bool demoJumped = false;
     bool demoEntered = false;
-    bool demoExited = false;
+    double demoNextExitAttempt = 9.0;
     while (running) {
         const Uint64 now = SDL_GetTicksNS();
         if (seconds > 0 && static_cast<double>(now - start) / 1e9 >= seconds) {
@@ -625,10 +632,16 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
                     if (!demoEntered && time >= 2.0) {
                         input.Interact = demoEntered = true;
                     }
-                    input.Forward = (time >= 2.2 && time < 6.0) || time >= 10.0 ? 1.0f : 0.0f;
-                    input.Brake = time >= 6.0 && time < 9.0;
-                    if (!demoExited && time >= 9.0) {
-                        input.Interact = demoExited = true;
+                    const auto& state = gameplay.State();
+                    input.Forward = (time >= 2.2 && time < 6.0) ||
+                        (time >= 10.0 && state.Exits > 0 && !state.InVehicle) ? 1.0f : 0.0f;
+                    // Brake until stopped, not until an assumed stopping time.
+                    // Retry a rejected exit via input; never bypass speed or
+                    // collision checks, and never resume driving after failure.
+                    input.Brake = time >= 6.0 && state.InVehicle;
+                    if (state.InVehicle && time >= demoNextExitAttempt && std::abs(state.Speed) <= 0.8f) {
+                        input.Interact = true;
+                        demoNextExitAttempt = time + 0.5;
                     }
                 }
                 if (demoCurb) {
@@ -672,6 +685,20 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             environment.EndWorld();
         }
         environment.DrawWater();
+        RealtimeHudView hudView;
+        hudView.cameraYaw = camera.yaw;
+        hudView.radar = gameplayEnabled;
+        RealtimeHudState hudState;
+        hudState.hour = static_cast<int>(hour);
+        hudState.minute = static_cast<int>(hour * 60.0f) % 60;
+        if (gameplayEnabled) {
+            const auto& state = gameplay.State();
+            const auto& position = state.InVehicle ? state.Car : state.Ped;
+            hudState.playerX = position.X;
+            hudState.playerY = position.Y;
+            hudState.playerYaw = state.InVehicle ? state.CarHeading : state.PedHeading;
+        }
+        hud.Draw(hudView, hudState, width, height);
         const auto glError = glGetError();
         if (glError != GL_NO_ERROR || !SDL_GL_SwapWindow(window.window)) {
             std::printf("play-fail present GL=0x%x SDL=%s\n", glError, SDL_GetError());
@@ -695,11 +722,11 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             if (gameplayEnabled) {
                 const auto& state = gameplay.State();
                 std::printf("play-state ticks=%llu mode=%s grounded=%d ped=%.2f,%.2f,%.2f car=%.2f,%.2f,%.2f "
-                    "speed=%.2f walk=%.2f drive=%.2f jumps=%llu landings=%llu entries=%llu exits=%llu anim=%s "
+                    "speed=%.2f gear=%d walk=%.2f drive=%.2f jumps=%llu landings=%llu entries=%llu exits=%llu anim=%s "
                     "blocked=%llu phase=%.4f moveBlend=%.3f runBlend=%.3f airBlend=%.3f\n",
                     static_cast<unsigned long long>(state.Ticks), state.InVehicle ? "car" : "foot", state.Grounded,
                     state.Ped.X, state.Ped.Y, state.Ped.Z, state.Car.X, state.Car.Y, state.Car.Z,
-                    state.Speed, state.WalkDistance, state.DriveDistance,
+                    state.Speed, state.Gear, state.WalkDistance, state.DriveDistance,
                     static_cast<unsigned long long>(state.Jumps), static_cast<unsigned long long>(state.Landings),
                     static_cast<unsigned long long>(state.Entries), static_cast<unsigned long long>(state.Exits), state.Animation,
                     static_cast<unsigned long long>(state.BlockedSteps), state.LocomotionPhase,

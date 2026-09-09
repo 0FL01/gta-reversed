@@ -40,6 +40,16 @@
 #include <cstddef>
 #include <cstdint>
 #include <vector>
+#include <array>
+#include "app/platform/linux/TexSample.h"
+
+struct RadarMapAssets {
+    std::array<TexImage, 144> tiles; // y*12+x; top-down RGBA, no RW ownership
+    TexImage centre, north, disc;
+};
+// Preload once before any streaming worker starts. No GL; all dictionaries
+// are destroyed before returning. Draw-time consumers must only use copies.
+bool RadarMap_LoadAssets(const char* gameDir, RadarMapAssets& out, char* err, std::size_t errSize);
 
 struct RadarMapStats {
     char radarSrc[64] = {}; // always "models/gta3.img"

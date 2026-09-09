@@ -109,7 +109,7 @@ struct FontMetrics {
     bool ok = false;
 };
 
-bool ParseFontsDat(const std::vector<uint8>& bytes, FontMetrics& out) {
+bool ParseFontsDat(const std::vector<uint8>& bytes, FontMetrics& out, int fontId = 0) {
     out = FontMetrics{};
     std::string text(bytes.begin(), bytes.end());
     // Split into lines (tolerate CRLF).
@@ -145,7 +145,7 @@ bool ParseFontsDat(const std::vector<uint8>& bytes, FontMetrics& out) {
                              &v[3], &v[4], &v[5], &v[6], &v[7]) != 8) {
                 return false;
             }
-            if (curFont == 0) {
+            if (curFont == fontId) {
                 for (int k = 0; k < 8; ++k) {
                     out.prop[propRow * 8 + k] = v[k];
                 }
@@ -162,7 +162,7 @@ bool ParseFontsDat(const std::vector<uint8>& bytes, FontMetrics& out) {
             }
             if (want == Want::Id) {
                 curFont = val;
-            } else if (curFont == 0) {
+            } else if (curFont == fontId) {
                 if (want == Want::Space) {
                     out.space = val;
                 } else {
@@ -184,7 +184,8 @@ bool ParseFontsDat(const std::vector<uint8>& bytes, FontMetrics& out) {
         }
     }
     // Sanity: first PROP row of font 0 is "12 13 13 28 28 28 28 8".
-    out.ok = (out.prop[0] == 12 && out.prop[3] == 28 && out.unprop > 0 && out.space > 0);
+    out.ok = (fontId == 0 ? out.prop[0] == 12 && out.prop[3] == 28 : out.prop[0] > 0)
+        && out.unprop > 0 && out.space > 0;
     return out.ok;
 }
 
@@ -601,7 +602,7 @@ static bool HudRwInitEngine() {
     return true;
 }
 
-bool MenuShot_LoadHudFont(const char* gameDir, MenuHudFont& font, char* err, std::size_t errSize) {
+static bool LoadHudFont(const char* gameDir, MenuHudFont& font, char* err, std::size_t errSize, int fontId) {
     font = MenuHudFont{};
     if (!gameDir || !gameDir[0]) {
         SetErr(err, errSize, "no game dir");
@@ -628,18 +629,18 @@ bool MenuShot_LoadHudFont(const char* gameDir, MenuHudFont& font, char* err, std
         SetErr(err, errSize, "fonts.txd parse failed");
         return false;
     }
-    const char* wantTex = "font2";
+    const char* wantTex = fontId == 0 ? "font2" : "font1";
     rw::Texture* tex = txd->find(wantTex);
     if (!tex) {
         txd->destroy();
-        SetErr(err, errSize, "fonts.txd has no font2");
+        SetErr(err, errSize, "fonts.txd missing requested font");
         return false;
     }
     TexImage decoded;
     const bool decOk = TexSample_Decode(tex, decoded);
     txd->destroy();
     if (!decOk || decoded.rgba.empty() || decoded.w != 512 || decoded.h != 512) {
-        SetErr(err, errSize, "font2 decode failed (want 512x512)");
+        SetErr(err, errSize, "font decode failed (want 512x512)");
         return false;
     }
     std::vector<uint8> fontsDat;
@@ -648,7 +649,7 @@ bool MenuShot_LoadHudFont(const char* gameDir, MenuHudFont& font, char* err, std
         return false;
     }
     FontMetrics metrics;
-    if (!ParseFontsDat(fontsDat, metrics)) {
+    if (!ParseFontsDat(fontsDat, metrics, fontId)) {
         SetErr(err, errSize, "data/fonts.dat parse failed");
         return false;
     }
@@ -665,6 +666,14 @@ bool MenuShot_LoadHudFont(const char* gameDir, MenuHudFont& font, char* err, std
     font.space = metrics.space;
     font.ok = true;
     return true;
+}
+
+bool MenuShot_LoadHudFont(const char* gameDir, MenuHudFont& font, char* err, std::size_t errSize) {
+    return LoadHudFont(gameDir, font, err, errSize, 0);
+}
+
+bool MenuShot_LoadPricedownFont(const char* gameDir, MenuHudFont& font, char* err, std::size_t errSize) {
+    return LoadHudFont(gameDir, font, err, errSize, 1);
 }
 
 int MenuShot_DrawTextRight(std::vector<uint8_t>& px, int fbW, int fbH, const MenuHudFont& font,
