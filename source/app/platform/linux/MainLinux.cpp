@@ -66,7 +66,7 @@ using uint64 = uint64_t;
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --shot-cs-duo <out.tga> | --shot-water <out.tga> [--hour H] [--water-file water1.dat] | --shot-shore <out.tga> [--hour H] | --shot-hud <out.tga> [--health H] [--armor A] | --shot-radar <out.tga> [--x X] [--y Y] | --zone-at X,Y | --shot-game <out.tga> [--health H] [--armor A] [--show-zone] [--wanted N] [--money M] [--hour H] [--weather W] | --csanim-seq <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--frames 5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] [--hud] [--wanted N] [--money M] [--radar] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] [--hud] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --shot-cs-duo <out.tga> | --shot-water <out.tga> [--hour H] [--water-file water1.dat] | --shot-shore <out.tga> [--hour H] | --shot-hud <out.tga> [--health H] [--armor A] | --shot-radar <out.tga> [--x X] [--y Y] | --zone-at X,Y | --shot-game <out.tga> [--health H] [--armor A] [--show-zone] [--wanted N] [--money M] [--hour H] [--weather W] | --csanim-seq <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--frames 5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] [--hud] [--wanted N] [--money M] [--radar] [--show-zone] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] [--hud] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -5463,13 +5463,28 @@ int RunDrive(int argc, char** argv) {
     // GameShot 1:1 disc blit at radarPos=87,409). Only with --hud (without it
     // an honest drivehud-fail needs --hud). Absent flag keeps all legacy
     // paths bit-for-bit.
+    // R6aw (round 51): optional --show-zone overlays the district name of the
+    // car XY of every waypoint (existing ZoneInfo smallest-zone rule + GXT
+    // MAIN display string + font2 centered blit at zonePos=320,360 cellH=40,
+    // same layout as --shot-game --show-zone via GameShot_ApplyZoneLabelAt).
+    // Only with --hud (without it an honest drivehud-fail needs --hud).
+    // Absent flag keeps all legacy paths bit-for-bit.
     int driveWanted = -1;
     bool hasDriveWanted = false;
     int driveMoney = 0;
     bool hasDriveMoney = false;
     const bool wantRadar = HasArg(argc, argv, "--radar");
+    const bool wantZone = HasArg(argc, argv, "--show-zone");
     if (wantRadar && !wantHud) {
         (void)std::printf("drivehud-fail needs --hud for --radar\n");
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    if (wantZone && !wantHud) {
+        (void)std::printf("drivehud-fail needs --hud for --show-zone\n");
         eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
         eglDestroyContext(display, context);
         eglDestroySurface(display, surface);
@@ -5931,6 +5946,9 @@ int RunDrive(int argc, char** argv) {
     std::vector<long> wmMoneyPer; // R6aq: per-frame money deltas (hasDriveMoney only)
     std::vector<long> radarPer; // R6as: per-frame radar disc pixels (wantRadar only)
     std::vector<std::string> radarTex; // R6as: per-frame center tile names
+    std::vector<long> zonePer; // R6aw: per-frame zone label pixels (wantZone only)
+    std::vector<std::string> zoneKeys; // R6aw: per-frame GXT keys from info.zon
+    std::vector<std::string> zoneTexts; // R6aw: per-frame GXT display strings
     if (wantHud) {
         hudPer.reserve(static_cast<size_t>(waypoints));
         wmStarPer.reserve(static_cast<size_t>(waypoints));
@@ -5938,6 +5956,11 @@ int RunDrive(int argc, char** argv) {
         if (wantRadar) {
             radarPer.reserve(static_cast<size_t>(waypoints));
             radarTex.reserve(static_cast<size_t>(waypoints));
+        }
+        if (wantZone) {
+            zonePer.reserve(static_cast<size_t>(waypoints));
+            zoneKeys.reserve(static_cast<size_t>(waypoints));
+            zoneTexts.reserve(static_cast<size_t>(waypoints));
         }
     }
     TexFrameStats texAgg{};
@@ -6095,6 +6118,35 @@ int RunDrive(int argc, char** argv) {
                 (void)std::printf("drivehud-radar wp=%d x=%.2f y=%.2f centerTex=%s discPixels=%ld\n",
                                    i, w.x, w.y, rst.firstTile, copied);
             }
+            // R6aw: zone label of THIS waypoint car XY through the EXISTING
+            // ZoneInfo+GXT+font2 path (same zonePos=320,360 cellH=40 layout as
+            // --shot-game --show-zone via GameShot_ApplyZoneLabelAt). Fixed
+            // pier text on every frame would be synthetic; here key/text
+            // follow w.x/w.y (see log).
+            if (wantZone) {
+                ZoneLabelStats zSt{};
+                char zerr[768] = {};
+                if (!GameShot_ApplyZoneLabelAt(gameDir.c_str(), hudPixels, w.x, w.y, zSt,
+                                               zerr, sizeof(zerr))) {
+                    (void)std::printf("drivehud-fail zone %s (wp=%d x=%.2f y=%.2f)\n",
+                                       zerr, i, w.x, w.y);
+                    failed = true;
+                    break;
+                }
+                if (zSt.labelPixels <= 500) {
+                    (void)std::printf(
+                        "drivehud-fail thin zone wp=%d labelPixels=%ld (want >500)\n", i,
+                        zSt.labelPixels);
+                    failed = true;
+                    break;
+                }
+                zonePer.push_back(zSt.labelPixels);
+                zoneKeys.emplace_back(zSt.key);
+                zoneTexts.emplace_back(zSt.text);
+                (void)std::printf("drivehud-zone wp=%d x=%.2f y=%.2f key=%s text=\"%s\" "
+                                   "labelPixels=%ld\n",
+                                   i, w.x, w.y, zSt.key, zSt.text, zSt.labelPixels);
+            }
             long hudChanged = 0;
             for (std::size_t b = 0; b < pixels.size(); b += 4) {
                 if (hudPixels[b] != pixels[b] || hudPixels[b + 1] != pixels[b + 1] ||
@@ -6228,6 +6280,42 @@ int RunDrive(int argc, char** argv) {
         (void)std::printf("drivehud-radar-ok waypoints=%d radarPixels=%ld\n", waypoints,
                            radarSum);
     }
+    // R6aw: zone summary (only with --show-zone; without it this block never
+    // runs and all legacy drivehud-ok lines below stay bit-identical).
+    long zoneSum = 0;
+    if (wantZone) {
+        if (static_cast<int>(zonePer.size()) != waypoints ||
+            static_cast<int>(zoneKeys.size()) != waypoints ||
+            static_cast<int>(zoneTexts.size()) != waypoints) {
+            (void)std::printf("drivehud-fail zone count %d/%d/%d (want %d)\n",
+                               static_cast<int>(zonePer.size()),
+                               static_cast<int>(zoneKeys.size()),
+                               static_cast<int>(zoneTexts.size()), waypoints);
+            DriveSim_ShutdownWorld();
+            return 1;
+        }
+        for (long v : zonePer) {
+            if (!(v > 500)) {
+                (void)std::printf("drivehud-fail thin zone total zonePixels=%ld (want >500)\n",
+                                   v);
+                DriveSim_ShutdownWorld();
+                return 1;
+            }
+            zoneSum += v;
+        }
+        if (!(zoneSum > 500)) {
+            (void)std::printf("drivehud-fail thin zone total zonePixels=%ld(need >500)\n",
+                               zoneSum);
+            DriveSim_ShutdownWorld();
+            return 1;
+        }
+        (void)std::printf("drivehud-zone-ok waypoints=%d zonePixels=%ld\n", waypoints,
+                           zoneSum);
+    }
+    // R6aw: zone tag for the final lines (empty without --show-zone keeps all
+    // legacy drivehud-ok lines bit-identical; with the flag every variant
+    // carries zoneLabel=1 before checksums).
+    const char* zoneTag = wantZone ? " zoneLabel=1" : "";
     // R6aq: wanted/money summary through the same GameShot metrics. Without
     // the flags this block never runs (legacy drivehud-ok below bit-identical).
     if (hasDriveWanted || hasDriveMoney) {
@@ -6295,41 +6383,41 @@ int RunDrive(int argc, char** argv) {
         if (hasDriveWanted && hasDriveMoney) {
             if (wantRadar) {
                 (void)std::printf("drivehud-ok waypoints=%d frames=%d model=%s hudPixels=%ld "
-                                   "(sum-over-waypoints) spdTexts=%s wanted=%d money=%d radar=1 "
+                                   "(sum-over-waypoints) spdTexts=%s wanted=%d money=%d radar=1%s "
                                    "checksums=%s\n",
                                    waypoints, totalFrames, meas.model, hudSum, spdJoin.c_str(),
-                                   driveWanted, driveMoney, cs.c_str());
+                                   driveWanted, driveMoney, zoneTag, cs.c_str());
             } else {
                 (void)std::printf("drivehud-ok waypoints=%d frames=%d model=%s hudPixels=%ld "
-                                   "(sum-over-waypoints) spdTexts=%s wanted=%d money=%d checksums=%s\n",
+                                   "(sum-over-waypoints) spdTexts=%s wanted=%d money=%d%s checksums=%s\n",
                                    waypoints, totalFrames, meas.model, hudSum, spdJoin.c_str(),
-                                   driveWanted, driveMoney, cs.c_str());
+                                   driveWanted, driveMoney, zoneTag, cs.c_str());
             }
         } else if (hasDriveWanted) {
             if (wantRadar) {
                 (void)std::printf("drivehud-ok waypoints=%d frames=%d model=%s hudPixels=%ld "
-                                   "(sum-over-waypoints) spdTexts=%s wanted=%d radar=1 "
+                                   "(sum-over-waypoints) spdTexts=%s wanted=%d radar=1%s "
                                    "checksums=%s\n",
                                    waypoints, totalFrames, meas.model, hudSum, spdJoin.c_str(),
-                                   driveWanted, cs.c_str());
+                                   driveWanted, zoneTag, cs.c_str());
             } else {
                 (void)std::printf("drivehud-ok waypoints=%d frames=%d model=%s hudPixels=%ld "
-                                   "(sum-over-waypoints) spdTexts=%s wanted=%d checksums=%s\n",
+                                   "(sum-over-waypoints) spdTexts=%s wanted=%d%s checksums=%s\n",
                                    waypoints, totalFrames, meas.model, hudSum, spdJoin.c_str(),
-                                   driveWanted, cs.c_str());
+                                   driveWanted, zoneTag, cs.c_str());
             }
         } else {
             if (wantRadar) {
                 (void)std::printf("drivehud-ok waypoints=%d frames=%d model=%s hudPixels=%ld "
-                                   "(sum-over-waypoints) spdTexts=%s money=%d radar=1 "
+                                   "(sum-over-waypoints) spdTexts=%s money=%d radar=1%s "
                                    "checksums=%s\n",
                                    waypoints, totalFrames, meas.model, hudSum, spdJoin.c_str(),
-                                   driveMoney, cs.c_str());
+                                   driveMoney, zoneTag, cs.c_str());
             } else {
                 (void)std::printf("drivehud-ok waypoints=%d frames=%d model=%s hudPixels=%ld "
-                                   "(sum-over-waypoints) spdTexts=%s money=%d checksums=%s\n",
+                                   "(sum-over-waypoints) spdTexts=%s money=%d%s checksums=%s\n",
                                    waypoints, totalFrames, meas.model, hudSum, spdJoin.c_str(),
-                                   driveMoney, cs.c_str());
+                                   driveMoney, zoneTag, cs.c_str());
             }
         }
         (void)std::printf(
@@ -6341,13 +6429,13 @@ int RunDrive(int argc, char** argv) {
     }
     if (wantRadar) {
         (void)std::printf("drivehud-ok waypoints=%d frames=%d model=%s hudPixels=%ld "
-                           "(sum-over-waypoints) spdTexts=%s radar=1 checksums=%s\n",
-                           waypoints, totalFrames, meas.model, hudSum, spdJoin.c_str(),
+                           "(sum-over-waypoints) spdTexts=%s radar=1%s checksums=%s\n",
+                           waypoints, totalFrames, meas.model, hudSum, spdJoin.c_str(), zoneTag,
                            cs.c_str());
     } else {
         (void)std::printf("drivehud-ok waypoints=%d frames=%d model=%s hudPixels=%ld "
-                           "(sum-over-waypoints) spdTexts=%s checksums=%s\n",
-                           waypoints, totalFrames, meas.model, hudSum, spdJoin.c_str(),
+                           "(sum-over-waypoints) spdTexts=%s%s checksums=%s\n",
+                           waypoints, totalFrames, meas.model, hudSum, spdJoin.c_str(), zoneTag,
                            cs.c_str());
     }
     (void)std::printf("drive-verify distTotal=%.3f wheelR=%.6f expectSpin=%.6f spinTotal=%.6f "
