@@ -1,10 +1,12 @@
-// TimeCycle implementation: EXTRASUNNY_LA daylight rows from timecyc.dat.
+// TimeCycle implementation: named-weather daylight rows from timecyc.dat.
 // See TimeCycle.h for the contract. Column layout reference (read-only, NOT
 // linked): game_sa/TimeCycle.cpp CTimeCycle::Initialise sscanf order — Amb,
 // Amb_Obj, Dir, SkyTop, SkyBot, SunCore, ... — and the eTimeType/TimeSamples
 // table {0,5,6,7,12,19,20,22,24} in CTimeCycle::Update. Section/row labels
 // (//////////// EXTRASUNNY_LA, //Midnight, //5AM, ...) are read from the
 // file itself; only the 8-row/24-hour table shape is shared with the game.
+// R6r: any section by exact token match (not substring: "SUNNY_LA" must not
+// match "EXTRASUNNY_LA").
 
 #include "app/platform/linux/TimeCycle.h"
 
@@ -64,12 +66,24 @@ std::string TrimRight(const std::string& s) {
 
 } // namespace
 
-bool TimeCycle_LoadHour(const char* gameDir, int hour, TimeCycleParams& out, char* err,
-                        std::size_t errSize) {
+bool TimeCycle_LoadWeatherHour(const char* gameDir, const char* weather, int hour,
+                               TimeCycleParams& out, char* err, std::size_t errSize) {
     out = TimeCycleParams{};
     if (!gameDir || !gameDir[0]) {
         SetErr(err, errSize, "no game dir");
         return false;
+    }
+    if (!weather || !weather[0]) {
+        SetErr(err, errSize, "no weather section");
+        return false;
+    }
+    for (const char* p = weather; *p; ++p) {
+        const char c = *p;
+        const bool ok = (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+        if (!ok) {
+            SetErr(err, errSize, "bad weather name (want A-Z0-9_)");
+            return false;
+        }
     }
     if (hour < 0 || hour > 23) {
         SetErr(err, errSize, "hour out of range 0-23");
@@ -108,27 +122,49 @@ bool TimeCycle_LoadHour(const char* gameDir, int hour, TimeCycleParams& out, cha
             pos = end < buf.size() ? end + 1 : buf.size();
         }
     }
-    // Find the EXTRASUNNY_LA section header (comment line naming it).
+    // Find the named weather section header: a comment line with 4+ leading
+    // slashes whose first token after the slashes is exactly `weather`.
     size_t sec = lines.size();
     for (size_t i = 0; i < lines.size(); ++i) {
-        const std::string& ln = lines[i];
-        if (!ln.empty() && ln[0] == '/' && ln.find("EXTRASUNNY_LA") != std::string::npos) {
+        std::string ln = TrimRight(lines[i]);
+        size_t b = 0;
+        while (b < ln.size() && (ln[b] == ' ' || ln[b] == '\t')) {
+            ++b;
+        }
+        size_t s = b;
+        while (s < ln.size() && ln[s] == '/') {
+            ++s;
+        }
+        if (s - b < 4) {
+            continue;
+        }
+        size_t t = s;
+        while (t < ln.size() && (ln[t] == ' ' || ln[t] == '\t')) {
+            ++t;
+        }
+        size_t e = t;
+        while (e < ln.size() && ln[e] != ' ' && ln[e] != '\t' && ln[e] != '\r') {
+            ++e;
+        }
+        if (t < e && ln.substr(t, e - t) == weather) {
             sec = i;
             break;
         }
     }
     if (sec == lines.size()) {
-        SetErr(err, errSize, "section EXTRASUNNY_LA not found");
+        char msg[128];
+        (void)std::snprintf(msg, sizeof(msg), "section %s not found", weather);
+        SetErr(err, errSize, msg);
         return false;
     }
-    // Collect the 8 data rows: non-empty lines not starting with '/'.
+    // Collect the data rows: non-empty lines not starting with '/'.
     // (Label lines like //Midnight and the header are skipped; the next
     // section header stops the scan.)
     struct Row {
         int v[18];
     };
     std::vector<Row> rows;
-    for (size_t i = sec + 1; i < lines.size() && rows.size() < 8; ++i) {
+    for (size_t i = sec + 1; i < lines.size(); ++i) {
         std::string ln = TrimRight(lines[i]);
         size_t b = 0;
         while (b < ln.size() && (ln[b] == ' ' || ln[b] == '\t')) {
@@ -167,14 +203,16 @@ bool TimeCycle_LoadHour(const char* gameDir, int hour, TimeCycleParams& out, cha
         }
         rows.push_back(row);
     }
-    if (rows.size() != 8) {
+    if (rows.empty()) {
         char msg[128];
-        (void)std::snprintf(msg, sizeof(msg), "EXTRASUNNY_LA: want 8 rows, got %d",
-                            static_cast<int>(rows.size()));
+        (void)std::snprintf(msg, sizeof(msg), "%s: no data rows", weather);
         SetErr(err, errSize, msg);
         return false;
     }
-    const int idx = SampleForHour(hour);
+    int idx = SampleForHour(hour);
+    if (idx >= static_cast<int>(rows.size())) {
+        idx = static_cast<int>(rows.size()) - 1; // floor-map clamp for N!=8
+    }
     const Row& row = rows[static_cast<size_t>(idx)];
     for (int k = 0; k < 18; ++k) {
         if (row.v[k] < 0 || row.v[k] > 255) {
@@ -184,7 +222,11 @@ bool TimeCycle_LoadHour(const char* gameDir, int hour, TimeCycleParams& out, cha
     }
     out.hour = hour;
     out.sampleIdx = idx;
-    (void)std::snprintf(out.sampleName, sizeof(out.sampleName), "%s", kSampleNames[idx]);
+    if (rows.size() == 8) {
+        (void)std::snprintf(out.sampleName, sizeof(out.sampleName), "%s", kSampleNames[idx]);
+    } else {
+        (void)std::snprintf(out.sampleName, sizeof(out.sampleName), "row%d", idx);
+    }
     // Column order per CTimeCycle::Initialise: Amb(0-2), Amb_Obj(3-5),
     // Dir(6-8), SkyTop(9-11), SkyBot(12-14), SunCore(15-17).
     for (int k = 0; k < 3; ++k) {
@@ -195,4 +237,9 @@ bool TimeCycle_LoadHour(const char* gameDir, int hour, TimeCycleParams& out, cha
         out.sunCore[k] = static_cast<uint8_t>(row.v[15 + k]);
     }
     return true;
+}
+
+bool TimeCycle_LoadHour(const char* gameDir, int hour, TimeCycleParams& out, char* err,
+                        std::size_t errSize) {
+    return TimeCycle_LoadWeatherHour(gameDir, "EXTRASUNNY_LA", hour, out, err, errSize);
 }
