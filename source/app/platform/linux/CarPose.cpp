@@ -538,7 +538,7 @@ std::vector<rw::TexDictionary*> s_txds;
 
 bool CarPose_Init(const char* gameDir, const char* model, double steerDeg, double spinDeg,
                   WorldShotScene& scene, CarPoseStats& stats, CarPoseAudit& audit, char* err,
-                  std::size_t errSize, CarPoseTextures textures) {
+                  std::size_t errSize, CarPoseTextures textures, CarPoseComponents components) {
     stats = CarPoseStats{};
     audit = CarPoseAudit{};
     scene.meshes.clear();
@@ -693,6 +693,67 @@ bool CarPose_Init(const char* gameDir, const char* model, double steerDeg, doubl
         return false;
     }
 
+    const bool pristine = components.geometry == CarPoseGeometry::PristineNear ||
+        (components.geometry == CarPoseGeometry::FromTextureMode && textures == CarPoseTextures::RealtimeVehicle);
+    std::map<rw::Frame*, const RawFrame*> frameInfo;
+    for (size_t i = 0; i < raw.size(); ++i) {
+        frameInfo[byRaw[i]] = &raw[i];
+    }
+    std::vector<rw::Atomic*> extras;
+    rw::Frame* extraParent = root;
+    if (pristine) {
+        // CVehicleModelInfo::PreprocessHierarchy removes the first object of
+        // each descriptor extra frame; CreateInstance clones only the chosen
+        // slots. Names come from the NodeName plugin, not material/mesh guesses.
+        // CVisibilityPlugins' ATOMIC_OK/DAMAGED flags are runtime flags (its
+        // constructor initializes them to zero); they are not stored DFF flags.
+        for (size_t i = 0; i < raw.size(); ++i) {
+            if (raw[i].name == "chassis_dummy") extraParent = byRaw[i];
+        }
+        for (const char* name : {"extra1", "extra2", "extra3", "extra4", "extra5", "extra6"}) {
+            for (size_t i = 0; i < raw.size(); ++i) {
+                if (raw[i].name != name) continue;
+                FORLIST(link, byRaw[i]->objectList) {
+                    auto* object = rw::ObjectWithFrame::fromFrame(link);
+                    if (object->object.type == rw::Atomic::ID) extras.push_back(reinterpret_cast<rw::Atomic*>(object));
+                    break; // GetFirstObject, as upstream
+                }
+                break;
+            }
+        }
+        stats.extrasAvailable = static_cast<int>(extras.size());
+        for (int extra : components.extras) {
+            if (extra < -1 || extra >= stats.extrasAvailable) {
+                TexSample_FreeLinked(lc);
+                SetErr(err, errSize, "forced vehicle extra index outside available DFF components");
+                return false;
+            }
+        }
+    }
+    const auto visible = [&](rw::Atomic* atomic) {
+        if (!pristine) return true;
+        const auto& name = frameInfo.at(atomic->getFrame())->name;
+        // HideDamagedAtomicCB (0x4C7720): strstr, case-sensitive, on the
+        // atomic's own frame. _ok tags the intact atomic, it does not force
+        // rpATOMICRENDER back on. Respect the serialized RenderWare flags too.
+        if (name.find("_dam") != std::string::npos) {
+            ++stats.damagedAtomicsSkipped;
+            return false;
+        }
+        if (!(atomic->getFlags() & rw::Atomic::RENDER)) {
+            ++stats.nonRenderAtomicsSkipped;
+            return false;
+        }
+        // SetAtomicRendererCB assigns _vlo the really-low-detail callback;
+        // RenderVehicleReallyLowDetailCB and HiDetailCB are distance-exclusive.
+        // This actor cache is the near-detail representation, not both LODs.
+        if (name.find("_vlo") != std::string::npos) {
+            ++stats.lodAtomicsSkipped;
+            return false;
+        }
+        return true;
+    };
+
     // --- 5. Wheel dummies by stored name; body audit frame ("chassis"). ---
     struct Wheel {
         int raw = -1;
@@ -761,6 +822,11 @@ bool CarPose_Init(const char* gameDir, const char* model, double steerDeg, doubl
     std::vector<rw::Atomic*> bodyAtomics;
     FORLIST(link, lc.clump->atomics) {
         rw::Atomic* atomic = rw::Atomic::fromClump(link);
+        if (pristine) {
+            bool extra = false;
+            for (auto* candidate : extras) extra |= candidate == atomic;
+            if (extra || !visible(atomic)) continue;
+        }
         rw::Geometry* geo = atomic ? atomic->geometry : nil;
         if (!geo || geo->numTriangles <= 0 || geo->numVertices <= 0) {
             continue;
@@ -787,6 +853,13 @@ bool CarPose_Init(const char* gameDir, const char* model, double steerDeg, doubl
             kit.push_back(k);
         } else {
             bodyAtomics.push_back(atomic);
+        }
+    }
+    if (pristine) {
+        for (int extra : components.extras) {
+            if (extra < 0 || !visible(extras[extra])) continue;
+            bodyAtomics.push_back(extras[extra]);
+            ++stats.extrasSelected;
         }
     }
     if (kit.empty()) {
@@ -1034,6 +1107,16 @@ bool CarPose_Init(const char* gameDir, const char* model, double steerDeg, doubl
             m = *ltm;
         } else {
             m.setIdentity();
+        }
+        if (pristine) {
+            for (auto* extra : extras) {
+                if (extra == atomic) {
+                    // CreateInstance copies the extra's LOCAL matrix onto a
+                    // new frame under CAR_CHASSIS, not the original parent LTM.
+                    rw::Matrix::mult(&m, &af->matrix, extraParent->getLTM());
+                    break;
+                }
+            }
         }
         int got = 0;
         bool ok = false;

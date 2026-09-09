@@ -216,12 +216,12 @@ bool RealtimeGameplayWorld::SphereBlocked(V center,float radius) const {
         return Dot(d,d)<radius*radius;
     });
 }
-bool RealtimeGameplayWorld::SweepSphere(V from,V to,float radius,float& fraction,bool walkableOnly,float maxContactHeight) const {
+bool RealtimeGameplayWorld::SweepSphere(V from,V to,float radius,float& fraction,bool walkableOnly,float maxContactHeight,V* contactNormal) const {
     if (m_Impl->Nodes.empty()) return false;
     const V delta=Sub(to,from),r{radius,radius,radius};
     const float dd=Dot(delta,delta);
     if (dd<1e-12f) return false;
-    float best=1.0f; bool found=false;
+    float best=1.0f; bool found=false; V bestNormal{};
     m_Impl->Query(0,Sub(Min(from,to),r),Add(Max(from,to),r),[&](const Impl::Triangle& t) {
         if (walkableOnly && t.Up<WalkableUp) return false;
         auto accept=[&](float f,V contact) {
@@ -230,7 +230,7 @@ bool RealtimeGameplayWorld::SweepSphere(V from,V to,float radius,float& fraction
             if (walkableOnly && (normal.Z<0.05f*radius || contact.Z>maxContactHeight+0.001f)) return;
             // Touching while travelling away/tangentially isn't an obstruction.
             if (Dot(normal,delta)>=-1e-8f) return;
-            best=f; found=true;
+            best=f; found=true; bestNormal=Mul(normal,1.0f/Length(normal));
         };
         const V closest=Closest(from,t.A,t.B,t.C);
         if (Dot(Sub(from,closest),Sub(from,closest))<radius*radius) accept(0,closest);
@@ -261,7 +261,7 @@ bool RealtimeGameplayWorld::SweepSphere(V from,V to,float radius,float& fraction
         }
         return false;
     });
-    if (found) fraction=best;
+    if (found) { fraction=best; if (contactNormal) *contactNormal=bestNormal; }
     return found;
 }
 size_t RealtimeGameplayWorld::TriangleCount() const { return m_Impl->Triangles.size(); }
@@ -301,14 +301,19 @@ struct RealtimeGameplay::Impl {
         }
         return false;
     }
-    bool PedPathBlocked(const RealtimeGameplayWorld& world,V from,V to) const {
-        float hit;
+    bool PedPathBlocked(const RealtimeGameplayWorld& world,V from,V to,V* normal=nullptr) const {
+        float hit,best=INFINITY;
+        if (normal) *normal={};
         for (float z:PedCenters) {
-            if (world.SweepSphere(Add(from,{0,0,z}),Add(to,{0,0,z}),PedRadius,hit)) return true;
+            V n;
+            if (world.SweepSphere(Add(from,{0,0,z}),Add(to,{0,0,z}),PedRadius,hit,false,INFINITY,&n)) {
+                if (!normal) return true;
+                if (hit<best) { best=hit; *normal=n; }
+            }
         }
         // Car is a separate dynamic solid, absent from the static BVH. Small
         // substeps plus endpoint overlap cover it (max sprint step is 4.6 cm).
-        return PedBlocked(world,to);
+        return best<INFINITY || PedBlocked(world,to);
     }
     bool Support(const RealtimeGameplayWorld& world,V feet,float up,float down,float& height) const {
         const V from=Add(feet,{0,0,FootCenter+up}),to=Add(feet,{0,0,FootCenter-down});
@@ -364,12 +369,13 @@ struct RealtimeGameplay::Impl {
         const float speed=input.Sprint ? 5.5f : 2.0f;
         const V before=State.Ped;
         const bool wasGrounded=State.Grounded;
+        V collisionNormal{};
         auto move=[&](V offset,V& result) {
             result=Add(before,offset);
             float support;
             if (wasGrounded && Support(world,result,StepUp,StepDown,support)) {
                 result.Z=support;
-                if (!PedPathBlocked(world,before,result)) return true;
+                if (!PedPathBlocked(world,before,result,&collisionNormal)) return true;
                 // Step path: raise, advance, settle onto a real footprint hit.
                 // Every leg is swept, including the head; never bypass a riser.
                 V raised=before; raised.Z=std::max(before.Z,result.Z);
@@ -377,26 +383,49 @@ struct RealtimeGameplay::Impl {
                 return !PedPathBlocked(world,before,raised) && !PedPathBlocked(world,raised,across) &&
                        !PedPathBlocked(world,across,result);
             }
-            return !PedPathBlocked(world,before,result);
+            return !PedPathBlocked(world,before,result,&collisionNormal);
         };
         const V offset=Mul(dir,speed*h);
         V next;
         if (!move(offset,next)) {
             ++State.BlockedSteps;
-            // Evaluate both axes: a zero-length first axis mustn't suppress a
-            // valid second slide. Keep the candidate with greatest progress.
-            V x,y; const bool xOk=move({offset.X,0,0},x),yOk=move({0,offset.Y,0},y);
             next=before;
-            if (xOk && Length(Sub(x,before))>Length(Sub(next,before))) next=x;
-            if (yOk && Length(Sub(y,before))>Length(Sub(next,before))) next=y;
+            std::array<V,4> planes{};
+            for (size_t count=0;count<planes.size();++count) {
+                // Horizontal contact constraints cannot inject upward velocity.
+                // Step/ramp support still comes exclusively from real geometry.
+                collisionNormal.Z=0;
+                const float length=Length(collisionNormal);
+                if (length<0.01f) {
+                    // Dynamic car overlap has no static triangle normal. Retain
+                    // its clearance-checked axis fallback, never after acquiring
+                    // a world plane (which would discard a corner constraint).
+                    if (count==0) {
+                        V x,y;
+                        const bool xOk=move({offset.X,0,0},x),yOk=move({0,offset.Y,0},y);
+                        if (xOk && Length(Sub(x,before))>Length(Sub(next,before))) next=x;
+                        if (yOk && Length(Sub(y,before))>Length(Sub(next,before))) next=y;
+                    }
+                    break;
+                }
+                planes[count]=Mul(collisionNormal,1/length);
+                V slide{}; float bestError=Dot(offset,offset);
+                for (size_t i=0;i<=count;++i) {
+                    const V candidate=Sub(offset,Mul(planes[i],std::min(0.0f,Dot(offset,planes[i]))));
+                    bool feasible=true;
+                    for (size_t j=0;j<=count;++j) feasible &= Dot(candidate,planes[j])>=-1e-7f;
+                    const float error=Dot(Sub(candidate,offset),Sub(candidate,offset));
+                    if (feasible && error<bestError) { slide=candidate; bestError=error; }
+                }
+                if (Length(slide)<1e-6f) break;
+                V candidate;
+                // Recheck the WHOLE body and step path after every projection.
+                // A second wall adds a constraint instead of undoing the first.
+                if (move(slide,candidate)) { next=candidate; break; }
+            }
         }
         const float distance=std::hypot(next.X-before.X,next.Y-before.Y);
-        PedSpeed=Approach(PedSpeed,distance/h,h*18.0f);
         State.WalkDistance+=distance;
-        // Preserve foot-cycle progress through idle, airborne and speed changes.
-        const float run=std::clamp((PedSpeed-2.0f)/3.5f,0.0f,1.0f);
-        Phase+=distance/(Clips[1].Stride*(1-run)+Clips[2].Stride*run);
-        Phase-=std::floor(Phase);
         if (distance>1e-5f) {
             const float desired=std::atan2(next.Y-before.Y,next.X-before.X);
             State.PedHeading=Wrap(State.PedHeading+std::clamp(Wrap(desired-State.PedHeading),-6*h,6*h));
@@ -469,7 +498,9 @@ struct RealtimeGameplay::Impl {
         if (State.InVehicle) { State.Ped=State.Car; State.Grounded=CarVertical==0; }
     }
     void Pose(float dt) {
-        MoveBlend=Approach(MoveBlend,std::clamp(PedSpeed/2.0f,0.0f,1.0f),dt*6);
+        const float moveTarget=std::clamp(PedSpeed/2.0f,0.0f,1.0f);
+        MoveBlend+=(moveTarget-MoveBlend)*(-std::expm1(-12.0f*dt));
+        if (moveTarget==0 && MoveBlend<0.001f) MoveBlend=0;
         RunBlend=Approach(RunBlend,std::clamp((PedSpeed-2.0f)/3.5f,0.0f,1.0f),dt*5);
         AirBlend=Approach(AirBlend,State.Grounded ? 0.0f:1.0f,dt*7);
         IdlePhase=std::fmod(IdlePhase+dt/Clips[0].Duration,1.0f);
@@ -600,8 +631,11 @@ bool RealtimeGameplay::Initialize(const char* gameDir,std::string& error) {
         (next->CarBind.meshes.size()-next->CarStats.geoms)%4) { error="invalid car wheel layout"; return false; }
     WorldShotScene spin,steer;
     CarPoseStats stats{};
-    if (!CarPose_Init(gameDir,"landstal",0,180,spin,stats,audit,err,sizeof(err)) ||
-        !CarPose_Init(gameDir,"landstal",180,0,steer,stats,audit,err,sizeof(err))) { error=err; return false; }
+    if (!CarPose_Init(gameDir,"landstal",0,180,spin,stats,audit,err,sizeof(err),CarPoseTextures::RealtimeVehicle) ||
+        !CarPose_Init(gameDir,"landstal",180,0,steer,stats,audit,err,sizeof(err),CarPoseTextures::RealtimeVehicle)) { error=err; return false; }
+    if (spin.meshes.size()!=next->CarBind.meshes.size() || steer.meshes.size()!=next->CarBind.meshes.size()) {
+        error="car pose cache component layouts differ"; return false;
+    }
     const size_t kits=(next->CarBind.meshes.size()-next->CarStats.geoms)/4;
     if (!kits) { error="car has no wheel geometry"; return false; }
     for (size_t w=0;w<4;++w) {
@@ -670,10 +704,22 @@ void RealtimeGameplay::Tick(double dt,const RealtimeGameplayInput& input,const R
     }
     const int steps=std::max(1,static_cast<int>(std::ceil(bounded*120.0)));
     const float h=static_cast<float>(bounded/steps);
+    const double walkBefore=p.State.WalkDistance;
     for (int i=0;i<steps;++i) {
         p.CarStep(h,controls,world);
         if (!p.State.InVehicle) p.PedStep(h,controls,world);
     }
+    // Average all accepted substeps BEFORE filtering. A rate limiter applied
+    // separately to alternating short/long slides biases speed toward their
+    // median and made a moving ped look idle. Exponential filtering preserves
+    // the mean and is stable across the 2/3-substep boundary near 60 Hz.
+    const float distance=static_cast<float>(p.State.WalkDistance-walkBefore);
+    const float actualSpeed=distance/static_cast<float>(bounded);
+    p.PedSpeed+=(actualSpeed-p.PedSpeed)*(-std::expm1(-18.0f*static_cast<float>(bounded)));
+    if (actualSpeed==0 && p.PedSpeed<0.001f) p.PedSpeed=0;
+    const float run=std::clamp((p.PedSpeed-2.0f)/3.5f,0.0f,1.0f);
+    p.Phase+=distance/(p.Clips[1].Stride*(1-run)+p.Clips[2].Stride*run);
+    p.Phase-=std::floor(p.Phase);
     ++p.State.Ticks; p.State.SimulatedSeconds+=bounded;
     p.Pose(static_cast<float>(bounded)); p.UpdateCamera(static_cast<float>(bounded),world);
 }

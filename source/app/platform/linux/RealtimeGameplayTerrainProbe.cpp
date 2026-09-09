@@ -52,6 +52,68 @@ static std::vector<float> LocalPose(const RealtimeGameplay& g) {
     }
     return p;
 }
+static void SlideFixtures(RealtimeGameplay& g,RealtimeGameplayWorld& w) {
+    std::string error;
+    WorldShotScene diagonal; Floor(diagonal,-20,30,7,7);
+    // x-y=3, with +Y the permitted slide when pressing +X.
+    Quad(diagonal,{-12,-15,7},{18,15,7},{18,15,12},{-12,-15,12});
+    Spawn(g,w,diagonal,-2); Frames(g,w,300,{.Forward=1});
+    auto p=g.State().Ped;
+    Check(p.Y>2 && p.X-p.Y<2.53f && p.Z<7.01f && g.State().LocomotionBlend>0.65f,"diagonal wall projects motion along contact plane without climbing");
+    // Add y=4: simultaneous independent constraints must stop the corner.
+    Quad(diagonal,{-20,4,7},{30,4,7},{30,4,12},{-20,4,12});
+    Require(w.Rebuild(diagonal,error),error); Frames(g,w,300,{.Forward=1});
+    p=g.State().Ped;
+    Frames(g,w,60,{.Forward=1});
+    Check(p.Y<3.67f && p.X-p.Y<2.53f && std::hypot(g.State().Ped.X-p.X,g.State().Ped.Y-p.Y)<0.001f &&
+          g.State().LocomotionBlend==0,"two-wall corner keeps both constraints and stops to idle");
+    // Independent analytic contact normals, including both windings, rounded
+    // edge and vertex boundaries. One triangle on z=0 with x,y >= 0.
+    WorldShotScene triangle; triangle.meshes.emplace_back(); triangle.meshes[0].tris=1;
+    triangle.meshes[0].pos={0,0,0,4,0,0,0,4,0};
+    Require(w.Rebuild(triangle,error),error);
+    auto cast=[&](RealtimeVec3 from,RealtimeVec3 to,RealtimeVec3 expected,float expectedFraction) {
+        float fraction=0; RealtimeVec3 n;
+        const bool hit=w.SweepSphere(from,to,1,fraction,false,INFINITY,&n);
+        Check(hit && std::abs(fraction-expectedFraction)<0.0001f &&
+              std::hypot(n.X-expected.X,n.Y-expected.Y,n.Z-expected.Z)<0.0001f,"analytic sphere face/edge/vertex contact normal and time");
+    };
+    cast({1,1,2},{1,1,-2},{0,0,1},0.25f);
+    cast({1,1,-2},{1,1,2},{0,0,-1},0.25f);
+    cast({1,-0.6f,2},{1,-0.6f,-2},{0,-0.6f,0.8f},0.30f);
+    const float z=std::sqrt(0.68f);
+    cast({-0.4f,-0.4f,2},{-0.4f,-0.4f,-2},{-0.4f,-0.4f,z},(2-z)/4);
+}
+static void RealDownhill(RealtimeGameplay& g,RealtimeGameplayWorld& w) {
+    char err[512]={}; std::string error; E2EPagerFrame frame{}; WorldShotScene scene;
+    Require(StreamPager_Update(1628.8f,-1915,30,scene,frame,err,sizeof(err)),err);
+    Require(w.Rebuild(scene,error),error);
+    RealtimeVec3 firstEnd{};
+    for (double hz:{59.7,60.0,120.0}) {
+        Require(g.Spawn(w,1628.52f,-1913.03f,30,-1.43f,error),error);
+        const int ticks=static_cast<int>(std::round(hz*8));
+        double distance=0,blend=0; int samples=0,air=0,idle=0; bool phase=true,clear=true;
+        for (int i=0;i<ticks;++i) {
+            const auto before=g.State(); g.Tick(1/hz,{.Forward=1},w); const auto& s=g.State();
+            const float advance=std::fmod(s.LocomotionPhase-before.LocomotionPhase+1,1);
+            phase &= advance>0 && advance<0.1f;
+            air+=!s.Grounded;
+            for (float z:{0.344f,0.61f,0.88f,1.15f,1.42f}) clear &= !w.SphereBlocked({s.Ped.X,s.Ped.Y,s.Ped.Z+z},0.34f);
+            if (i>ticks-static_cast<int>(hz*2)) {
+                distance+=(s.WalkDistance-before.WalkDistance)*hz; blend+=s.LocomotionBlend; ++samples;
+                idle+=std::string(s.Animation)=="IDLE_stance";
+            }
+        }
+        const auto& s=g.State();
+        std::printf("real-downhill hz=%.1f end=%.6f,%.6f,%.6f meanSpeed=%.6f meanBlend=%.6f idle=%d air=%d clear=%d phase=%d blocked=%llu\n",
+            hz,s.Ped.X,s.Ped.Y,s.Ped.Z,distance/samples,blend/samples,idle,air,clear,phase,(unsigned long long)s.BlockedSteps);
+        Check(distance/samples>1.85 && blend/samples>0.9 && !idle && !air && clear && phase,"real downhill slides continuously with displacement-driven walking pose");
+        if (hz==59.7) firstEnd=s.Ped;
+        else Check(std::hypot(s.Ped.X-firstEnd.X,s.Ped.Y-firstEnd.Y,s.Ped.Z-firstEnd.Z)<0.20f,"real downhill trajectory consistent across 59.7/60/120 Hz");
+        Frames(g,w,90);
+        Check(g.State().LocomotionBlend==0,"real downhill released controls settle to idle");
+    }
+}
 int main(int argc,char** argv) {
     std::setvbuf(stdout,nullptr,_IONBF,0);
     const char* dir=argc>1 ? argv[1]:"/game";
@@ -137,6 +199,18 @@ int main(int argc,char** argv) {
     std::printf("walk-run-walk-idle maxLocalVertexDelta=%.6f\n",jump);
     Check(jump<0.24f,"real IFP pose transitions are continuous");
     Check(phaseContinuous,"walk/run/idle changes preserve distance-driven foot cycle");
+    Spawn(g,w,flat);
+    double acceptedSpeed=0,animationSpeed=0;
+    for (int i=0;i<600;++i) {
+        const double before=g.State().WalkDistance;
+        Frames(g,w,1,{.Forward=i%5<3 ? 0.15f:1.0f});
+        if (i>=300) {
+            acceptedSpeed+=(g.State().WalkDistance-before)*60/300;
+            animationSpeed+=g.State().LocomotionBlend*2/300;
+        }
+    }
+    std::printf("alternating accepted movement meanSpeed=%.6f animationSpeed=%.6f\n",acceptedSpeed,animationSpeed);
+    Check(std::abs(acceptedSpeed-animationSpeed)<0.015 && acceptedSpeed>0.9,"animation filter preserves mean accepted movement instead of low-speed median");
     Spawn(g,w,Step(3),-2); Frames(g,w,45,{.Forward=1});
     prev=LocalPose(g); jump=0; float stoppedPhase=0; bool stableStop=true;
     for (int i=0;i<180;++i) {
@@ -148,6 +222,7 @@ int main(int argc,char** argv) {
     }
     std::printf("wall stop maxLocalVertexDelta=%.6f stoppedPhase=%.6f\n",jump,stoppedPhase);
     Check(jump<0.24f && stableStop && stoppedPhase>0.01f && g.State().LocomotionBlend==0,"wall stop blends to idle without resetting foot phase");
+    SlideFixtures(g,w);
     // A render-triangle field check, including binary IPL rows. Search the
     // nearby streamed district for two level patches separated by a real curb.
     char err[512]={}; E2ELoadInfo load{}; E2EPagerFrame frame{}; WorldShotScene visible;
@@ -183,6 +258,7 @@ int main(int argc,char** argv) {
     std::printf("field edges=%d spawnable=%d triangleTests=%llu\n",edges,candidates,(unsigned long long)w.TriangleTests());
     Check(field,"real streamed district curb traversed up and down");
     Check(BodyClear,"all terrain replay frames keep the complete controller sphere stack outside solid triangles");
+    RealDownhill(g,w);
     StreamPager_Shutdown();
     std::printf("realtime-gameplay-terrain %s failures=%d\n",Failures ? "FAIL":"PASS",Failures);
     return Failures ? 1:0;

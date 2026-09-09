@@ -31,9 +31,12 @@ public:
     bool SphereBlocked(RealtimeVec3 center, float radius) const;
     // Continuous sphere/triangle query; fraction is in [0,1]. Walkable queries
     // require both a walkable triangle and an upward-facing contact normal.
+    // Optional unit normal points from the contacted face/edge/vertex toward
+    // the sphere, opposing entry; winding does not determine its orientation.
     bool SweepSphere(RealtimeVec3 from, RealtimeVec3 to, float radius,
                      float& fraction, bool walkableOnly = false,
-                     float maxContactHeight = std::numeric_limits<float>::infinity()) const;
+                     float maxContactHeight = std::numeric_limits<float>::infinity(),
+                     RealtimeVec3* contactNormal = nullptr) const;
     std::size_t TriangleCount() const;
     std::uint64_t TriangleTests() const;
 

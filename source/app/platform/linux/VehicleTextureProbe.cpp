@@ -24,7 +24,7 @@ int main(int argc, char** argv) {
     CarPoseAudit audit{};
     Require(CarPose_Init(game, "landstal", 0, 0, offline, oldStats, audit, error, sizeof(error)), error);
     Require(CarPose_Init(game, "landstal", 0, 0, realtime, stats, audit, error, sizeof(error),
-                        CarPoseTextures::RealtimeVehicle), error);
+                        CarPoseTextures::RealtimeVehicle, {CarPoseGeometry::StoredAtomics}), error);
     std::printf("landstal triangles=%d offlineMissing=%d realtimeMissing=%d modelTextures=%d sharedTextures=%d totalTextures=%d images=%zu\n",
         stats.tris, Missing(offline), Missing(realtime), oldStats.textures, stats.sharedTextures, stats.textures, realtime.images.size());
     Require(stats.textures == oldStats.textures + stats.sharedTextures, "total dictionary texture stats");

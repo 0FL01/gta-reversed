@@ -24,6 +24,7 @@
 #pragma once
 
 #include <cstddef>
+#include <array>
 
 #include "app/platform/linux/WorldShot.h"
 
@@ -43,6 +44,11 @@ struct CarPoseStats {
     int fronts = 0; // front (steered) dummies among them
     int textures = 0; // loaded model + shared dictionary entries
     int sharedTextures = 0; // textures loaded from models/generic/vehicle.txd
+    int damagedAtomicsSkipped = 0;
+    int lodAtomicsSkipped = 0;
+    int nonRenderAtomicsSkipped = 0;
+    int extrasAvailable = 0;
+    int extrasSelected = 0;
     double steerDeg = 0.0; // --steer as passed
     double spinDeg = 0.0; // --spin as passed
     int chassisSame = 0; // 1 when the body audit frame LTM is bit-identical
@@ -59,15 +65,27 @@ struct CarPoseAudit {
 };
 
 enum class CarPoseTextures { ModelOnly, RealtimeVehicle };
+enum class CarPoseGeometry { FromTextureMode, StoredAtomics, PristineNear };
+struct CarPoseComponents {
+    CarPoseGeometry geometry = CarPoseGeometry::FromTextureMode;
+    // Forced instance choices, like CVehicleModelInfo::ms_compsToUse: -1 is
+    // none, 0..5 index the available extra1..extra6 atomics in descriptor order
+    // (missing frames do not consume indices). No weather/RNG selection here.
+    std::array<int, 2> extras{-1, -1};
+};
 // ModelOnly preserves the historical offline fixtures. RealtimeVehicle requires
 // the common vehicle TXD and uses upstream common-before-model name resolution.
+// FromTextureMode selects StoredAtomics for ModelOnly, PristineNear otherwise.
+// Bind/spin/steer caches MUST use identical component options and texture mode:
+// selection changes geoms (body count), followed by four wheel-kit groups.
 // scene owns decoded RGBA; later Init/Shutdown calls cannot invalidate its images.
 // Loads the car relative to gameDir (e.g. "/game") and poses the wheels by
 // steerDeg/spinDeg. On failure returns false with a message in err (never
 // car-ok). audit is filled on success (even for steer=spin=0).
 bool CarPose_Init(const char* gameDir, const char* model, double steerDeg, double spinDeg,
                   WorldShotScene& scene, CarPoseStats& stats, CarPoseAudit& audit, char* err,
-                  std::size_t errSize, CarPoseTextures textures = CarPoseTextures::ModelOnly);
+                  std::size_t errSize, CarPoseTextures textures = CarPoseTextures::ModelOnly,
+                  CarPoseComponents components = {});
 void CarPose_Shutdown();
 
 // DFF-derived kinematic constants for the drive slice (R6n): wheel radius

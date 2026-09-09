@@ -38,7 +38,7 @@ static void WheelAudit(const char* gameDir,const RealtimeGameplay& game) {
     char error[512]={};
     auto* saved=rw::TexDictionary::getCurrent();
     constexpr float pi=3.14159265358979323846f;
-    Check(CarPose_Init(gameDir,"landstal",state.Steer*180/pi,state.WheelSpin*180/pi,reference,stats,audit,error,sizeof(error)),error);
+    Check(CarPose_Init(gameDir,"landstal",state.Steer*180/pi,state.WheelSpin*180/pi,reference,stats,audit,error,sizeof(error),CarPoseTextures::RealtimeVehicle),error);
     CarPose_Shutdown(); rw::TexDictionary::setCurrent(saved);
     const auto& actors=game.Actors();
     const size_t base=actors.meshes.size()-reference.meshes.size();
