@@ -66,7 +66,7 @@ using uint64 = uint64_t;
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --shot-cs-duo <out.tga> | --shot-water <out.tga> [--hour H] [--water-file water1.dat] | --shot-shore <out.tga> [--hour H] | --shot-hud <out.tga> [--health H] [--armor A] | --shot-radar <out.tga> [--x X] [--y Y] | --zone-at X,Y | --shot-game <out.tga> [--health H] [--armor A] [--show-zone] [--wanted N] | --csanim-seq <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--frames 5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --shot-cs-duo <out.tga> | --shot-water <out.tga> [--hour H] [--water-file water1.dat] | --shot-shore <out.tga> [--hour H] | --shot-hud <out.tga> [--health H] [--armor A] | --shot-radar <out.tga> [--x X] [--y Y] | --zone-at X,Y | --shot-game <out.tga> [--health H] [--armor A] [--show-zone] [--wanted N] [--money M] | --csanim-seq <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--frames 5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -1375,6 +1375,10 @@ int RunShotRadar(int argc, char** argv) {
 // font2 0x5D star texels via GameShot_ApplyWanted) in the top-right corner.
 // Without the flag the pixels and the game-ok line are bit-identical to R6af;
 // --wanted 0 is likewise bit-identical (no overlay, proven by the checksum).
+// R6aj (round 38): optional --money M (-999999..9999999) overlays the money
+// readout (DrawMoney format "$%08d"/"-$%07d" via GameShot_ApplyMoney) in the
+// top-right corner under the clock. Without the flag the pixels and the
+// game-ok line are bit-identical to R6af; out-of-range input fails honestly.
 int RunShotGame(int argc, char** argv) {
     const char* outPath = ArgValue(argc, argv, "--shot-game", "game.tga");
     if (!outPath || outPath[0] == '\0') {
@@ -1423,6 +1427,48 @@ int RunShotGame(int argc, char** argv) {
                 return 1;
             }
             wanted = wArg[0] - '0';
+        }
+    }
+    // R6aj: optional money readout. Absent flag = legacy R6af path (hasMoney
+    // false, no overlay). Present flag requires a signed integer in
+    // -999999..9999999; anything else fails honestly (no TGA, no game-ok).
+    int money = 0;
+    bool hasMoney = false;
+    {
+        if (HasArg(argc, argv, "--money")) {
+            const char* mArg = ArgValue(argc, argv, "--money", nullptr);
+            bool ok = mArg && mArg[0] != '\0';
+            size_t pos = 0;
+            if (ok && mArg[0] == '-') {
+                pos = 1;
+                ok = mArg[1] != '\0';
+            }
+            size_t digits = 0;
+            for (; ok && mArg[pos] != '\0'; ++pos) {
+                if (mArg[pos] < '0' || mArg[pos] > '9') {
+                    ok = false;
+                    break;
+                }
+                ++digits;
+                if (digits > 7) {
+                    ok = false;
+                    break;
+                }
+            }
+            long val = 0;
+            if (ok && digits > 0) {
+                val = std::atol(mArg);
+                ok = val >= -999999L && val <= 9999999L;
+            } else {
+                ok = false;
+            }
+            if (!ok) {
+                (void)std::printf("game-fail bad --money '%s' (want -999999..9999999)\n",
+                                   mArg ? mArg : "(null)");
+                return 1;
+            }
+            money = static_cast<int>(val);
+            hasMoney = true;
         }
     }
     std::string gameDir = ResolveGameDir(argc, argv);
@@ -1543,6 +1589,7 @@ int RunShotGame(int argc, char** argv) {
     const bool showZone = HasArg(argc, argv, "--show-zone");
     ZoneLabelStats zoneStats{};
     WantedStats wantedStats{};
+    MoneyStats moneyStats{};
     if (wanted >= 0) {
         char werr[1024] = {};
         if (!GameShot_ApplyWanted(gameDir.c_str(), gamePixels, wanted, wantedStats, werr,
@@ -1558,6 +1605,23 @@ int RunShotGame(int argc, char** argv) {
                           wantedStats.posTop, wantedStats.cellH, wantedStats.drawn);
         (void)std::printf("wanted stars=%d starPixels=%ld\n", wantedStats.wanted,
                           wantedStats.starPixels);
+    }
+    if (hasMoney) {
+        char merr[1024] = {};
+        if (!GameShot_ApplyMoney(gameDir.c_str(), gamePixels, money, moneyStats, merr,
+                                 sizeof(merr))) {
+            (void)std::printf("game-fail money %s (game=%s)\n", merr,
+                              gameDir.c_str());
+            GameShot_Shutdown();
+            return 1;
+        }
+        (void)std::printf("moneyFmt=%s src=game_sa/Hud.cpp:DrawMoney\n", moneyStats.fmt);
+        (void)std::printf("money text=\"%s\" digits=%d moneyPixels=%ld\n", moneyStats.text,
+                          moneyStats.digits, moneyStats.moneyPixels);
+        (void)std::printf("moneyPos=right=%d,top=%d,cellH=%d layout=FROM_RIGHT(32)+GetYPosBasedOnHealth(STRETCH_Y(89),12)\n",
+                          moneyStats.posRight, moneyStats.posTop, moneyStats.cellH);
+        (void)std::printf("moneyColor=%d,%d,%d spec=HudColours(GREEN ge0/RED lt0)\n",
+                          moneyStats.inkR, moneyStats.inkG, moneyStats.inkB);
     }
     if (showZone) {
         char zerr[1024] = {};
@@ -1577,13 +1641,64 @@ int RunShotGame(int argc, char** argv) {
                           zoneStats.key, zoneStats.text, zoneStats.level);
     }
     uint64_t checksum = PixelsChecksum(gamePixels, gR, gG, gB, gN);
+    if (hasMoney && moneyStats.moneyPixels <= 200) {
+        (void)std::printf("game-fail thin money overlay moneyPixels=%ld (want >200)\n",
+                          moneyStats.moneyPixels);
+        GameShot_Shutdown();
+        return 1;
+    }
     if (!WriteTga24(outPath, 640, 480, gamePixels)) {
         (void)std::printf("game-fail write '%s'\n", outPath);
         GameShot_Shutdown();
         return 1;
     }
     OS_DebugOut("mad-sa-linux game shot");
-    if (showZone && wanted >= 0) {
+    if (showZone && wanted >= 0 && hasMoney) {
+        (void)std::printf(
+            "game-ok health=%d armor=%d hudPixels=%ld radarPixels=%ld baseChecksum=%llu "
+            "hudChecksum=%llu radarChecksum=%llu zoneLabel=1 wanted=%d money=%d checksum=%llu\n",
+            gst.hud.health, gst.hud.armor, gst.hud.hudPixels, gst.radarPixels,
+            static_cast<unsigned long long>(baseChecksum),
+            static_cast<unsigned long long>(hudChecksum),
+            static_cast<unsigned long long>(radarChecksum), wanted, money,
+            static_cast<unsigned long long>(checksum));
+    } else if (showZone && wanted >= 0) {
+        (void)std::printf(
+            "game-ok health=%d armor=%d hudPixels=%ld radarPixels=%ld baseChecksum=%llu "
+            "hudChecksum=%llu radarChecksum=%llu zoneLabel=1 wanted=%d checksum=%llu\n",
+            gst.hud.health, gst.hud.armor, gst.hud.hudPixels, gst.radarPixels,
+            static_cast<unsigned long long>(baseChecksum),
+            static_cast<unsigned long long>(hudChecksum),
+            static_cast<unsigned long long>(radarChecksum), wanted,
+            static_cast<unsigned long long>(checksum));
+    } else if (showZone && hasMoney) {
+        (void)std::printf(
+            "game-ok health=%d armor=%d hudPixels=%ld radarPixels=%ld baseChecksum=%llu "
+            "hudChecksum=%llu radarChecksum=%llu zoneLabel=1 money=%d checksum=%llu\n",
+            gst.hud.health, gst.hud.armor, gst.hud.hudPixels, gst.radarPixels,
+            static_cast<unsigned long long>(baseChecksum),
+            static_cast<unsigned long long>(hudChecksum),
+            static_cast<unsigned long long>(radarChecksum), money,
+            static_cast<unsigned long long>(checksum));
+    } else if (wanted >= 0 && hasMoney) {
+        (void)std::printf(
+            "game-ok health=%d armor=%d hudPixels=%ld radarPixels=%ld baseChecksum=%llu "
+            "hudChecksum=%llu radarChecksum=%llu wanted=%d money=%d checksum=%llu\n",
+            gst.hud.health, gst.hud.armor, gst.hud.hudPixels, gst.radarPixels,
+            static_cast<unsigned long long>(baseChecksum),
+            static_cast<unsigned long long>(hudChecksum),
+            static_cast<unsigned long long>(radarChecksum), wanted, money,
+            static_cast<unsigned long long>(checksum));
+    } else if (hasMoney) {
+        (void)std::printf(
+            "game-ok health=%d armor=%d hudPixels=%ld radarPixels=%ld baseChecksum=%llu "
+            "hudChecksum=%llu radarChecksum=%llu money=%d checksum=%llu\n",
+            gst.hud.health, gst.hud.armor, gst.hud.hudPixels, gst.radarPixels,
+            static_cast<unsigned long long>(baseChecksum),
+            static_cast<unsigned long long>(hudChecksum),
+            static_cast<unsigned long long>(radarChecksum), money,
+            static_cast<unsigned long long>(checksum));
+    } else if (showZone && wanted >= 0) {
         (void)std::printf(
             "game-ok health=%d armor=%d hudPixels=%ld radarPixels=%ld baseChecksum=%llu "
             "hudChecksum=%llu radarChecksum=%llu zoneLabel=1 wanted=%d checksum=%llu\n",
