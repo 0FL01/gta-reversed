@@ -1090,8 +1090,33 @@ void ShadeTriDuo(const RasterTri& t, int imgIdx, const float* matCol, DuoCtx& dc
                 dctx.pedCov[pix] = 1;
             }
             float z = l0 * t.zo[0] + l1 * t.zo[1] + l2 * t.zo[2];
+            // R6an fog (round 42): same math as ShadeTri above (scene --fog
+            // path) — dist = w_clip = 1/den, factor toward fogColor=SkyBot.
+            // R6an textured-fragment fog (same blend as ShadeTri).
+            const bool doFog =
+                ctx.env && ctx.env->fog && (ctx.env->farClp > ctx.env->fogSt);
+            float fogF = 0.0f;
+            if (doFog) {
+                const float dist = 1.0f / den;
+                float f = (dist - ctx.env->fogSt) / (ctx.env->farClp - ctx.env->fogSt);
+                if (f < 0.0f) {
+                    f = 0.0f;
+                } else if (f > 1.0f) {
+                    f = 1.0f;
+                }
+                fogF = f;
+            }
             float shade = (l0 * t.so[0] + l1 * t.so[1] + l2 * t.so[2]) / den;
+            // Legacy: `shade` is the interpolated 0.32+0.68*NdotL grey
+            // factor. With a timecyc env the `s` slot carries raw
+            // max(NdotL,0) (see SubmitTriDuo) and the per-channel light is
+            // ambient+sun*NdotL from timecyc.dat — same as ShadeTri.
             float li[3] = { shade, shade, shade };
+            if (ctx.env) {
+                li[0] = ctx.env->amb[0] + ctx.env->sun[0] * shade;
+                li[1] = ctx.env->amb[1] + ctx.env->sun[1] * shade;
+                li[2] = ctx.env->amb[2] + ctx.env->sun[2] * shade;
+            }
             float r, g, b;
             if (img) {
                 float u = (l0 * t.uo[0] + l1 * t.uo[1] + l2 * t.uo[2]) / den;
@@ -1137,6 +1162,17 @@ void ShadeTriDuo(const RasterTri& t, int imgIdx, const float* matCol, DuoCtx& dc
                 r = li[0] * matCol[0] * (tx[0] / 255.0f);
                 g = li[1] * matCol[1] * (tx[1] / 255.0f);
                 b = li[2] * matCol[2] * (tx[2] / 255.0f);
+                if (doFog) {
+                    const float fr = ctx.env->fogColor[0] / 255.0f;
+                    const float fg = ctx.env->fogColor[1] / 255.0f;
+                    const float fb = ctx.env->fogColor[2] / 255.0f;
+                    r = r + (fr - r) * fogF;
+                    g = g + (fg - g) * fogF;
+                    b = b + (fb - b) * fogF;
+                    if (fogF > 0.0f) {
+                        ++ctx.st->foggedPixels;
+                    }
+                }
                 ctx.zbuf[pix] = z;
                 ++ctx.st->texPixels;
                 uint8_t* dst = ctx.px + pix * 4;
@@ -1161,6 +1197,17 @@ void ShadeTriDuo(const RasterTri& t, int imgIdx, const float* matCol, DuoCtx& dc
                 r = li[0] * 0.5f;
                 g = li[1] * 0.5f;
                 b = li[2] * 0.5f;
+                if (doFog) {
+                    const float fr = ctx.env->fogColor[0] / 255.0f;
+                    const float fg = ctx.env->fogColor[1] / 255.0f;
+                    const float fb = ctx.env->fogColor[2] / 255.0f;
+                    r = r + (fr - r) * fogF;
+                    g = g + (fg - g) * fogF;
+                    b = b + (fb - b) * fogF;
+                    if (fogF > 0.0f) {
+                        ++ctx.st->foggedPixels;
+                    }
+                }
                 ctx.zbuf[pix] = z;
                 ++ctx.st->fallbackPixels;
                 uint8_t* dst = ctx.px + pix * 4;
@@ -1179,6 +1226,17 @@ void ShadeTriDuo(const RasterTri& t, int imgIdx, const float* matCol, DuoCtx& dc
                 r = li[0] * matCol[0];
                 g = li[1] * matCol[1];
                 b = li[2] * matCol[2];
+                if (doFog) {
+                    const float fr = ctx.env->fogColor[0] / 255.0f;
+                    const float fg = ctx.env->fogColor[1] / 255.0f;
+                    const float fb = ctx.env->fogColor[2] / 255.0f;
+                    r = r + (fr - r) * fogF;
+                    g = g + (fg - g) * fogF;
+                    b = b + (fb - b) * fogF;
+                    if (fogF > 0.0f) {
+                        ++ctx.st->foggedPixels;
+                    }
+                }
                 ctx.zbuf[pix] = z;
                 ++ctx.st->flatPixels;
                 uint8_t* dst = ctx.px + pix * 4;
@@ -1209,7 +1267,14 @@ void SubmitTriDuo(const float* mvp, const float p[3][3], const float nrm[3][3],
         cv[k].u = uv[k][0];
         cv[k].v = uv[k][1];
         float d = nrm[k][0] * light[0] + nrm[k][1] * light[1] + nrm[k][2] * light[2];
-        cv[k].s = 0.32f + 0.68f * (d > 0.0f ? d : 0.0f);
+        // R6an (round 42): with a timecyc env the `s` slot carries raw
+        // max(NdotL,0) for the per-channel ambient+sun light in ShadeTriDuo
+        // (same as SubmitTri); null env keeps the legacy 0.32+0.68 factor.
+        if (dctx.base.env) {
+            cv[k].s = d > 0.0f ? d : 0.0f;
+        } else {
+            cv[k].s = 0.32f + 0.68f * (d > 0.0f ? d : 0.0f);
+        }
     }
     ClipVert poly[16];
     int m = ClipTriangle(cv, poly);
@@ -1252,18 +1317,47 @@ void SubmitTriDuo(const float* mvp, const float p[3][3], const float nrm[3][3],
 
 } // namespace
 
-void TexSample_RenderDuo(const WorldShotScene& scene, int carMeshes, int width, int height,
-                         const float eye[3], const float target[3],
-                         std::vector<uint8_t>& outRGBA, TexFrameStats& stats,
-                         TexDuoStats& duo) {
+namespace {
+// R6an (round 42): shared Duo body; env == null keeps the legacy look
+// bit-for-bit, non-null env paints the timecyc sky gradient and shades with
+// the per-channel ambient+sun light + fog (same path as scene --fog).
+void RenderDuoImpl(const WorldShotScene& scene, int carMeshes, int width, int height,
+                   const float eye[3], const float target[3], const TexTimeEnv* env,
+                   std::vector<uint8_t>& outRGBA, TexFrameStats& stats, TexDuoStats& duo) {
     duo = TexDuoStats{};
     stats = TexFrameStats{};
     outRGBA.resize(static_cast<size_t>(width) * static_cast<size_t>(height) * 4);
-    for (size_t i = 0; i < outRGBA.size(); i += 4) {
-        outRGBA[i] = 13;
-        outRGBA[i + 1] = 18;
-        outRGBA[i + 2] = 31;
-        outRGBA[i + 3] = 255;
+    if (env) {
+        // Timecyc sky: vertical SkyBot->SkyTop gradient, painted per pixel
+        // BEFORE geometry (bottom-up pixels: row 0 = frame bottom = SkyBot).
+        for (int y = 0; y < height; ++y) {
+            const float f =
+                height <= 1 ? 0.0f : static_cast<float>(y) / static_cast<float>(height - 1);
+            int ch[3];
+            for (int c = 0; c < 3; ++c) {
+                const float v = static_cast<float>(env->skyBot[c]) +
+                                (static_cast<float>(env->skyTop[c]) -
+                                 static_cast<float>(env->skyBot[c])) *
+                                    f;
+                int iv = static_cast<int>(v + 0.5f);
+                ch[c] = iv < 0 ? 0 : (iv > 255 ? 255 : iv);
+            }
+            uint8_t* row = outRGBA.data() + static_cast<size_t>(y) * width * 4;
+            for (int x = 0; x < width; ++x) {
+                row[x * 4 + 0] = static_cast<uint8_t>(ch[0]);
+                row[x * 4 + 1] = static_cast<uint8_t>(ch[1]);
+                row[x * 4 + 2] = static_cast<uint8_t>(ch[2]);
+                row[x * 4 + 3] = 255;
+            }
+        }
+    } else {
+        // Background matches the old GL clear color (0.05,0.07,0.12).
+        for (size_t i = 0; i < outRGBA.size(); i += 4) {
+            outRGBA[i] = 13;
+            outRGBA[i + 1] = 18;
+            outRGBA[i + 2] = 31;
+            outRGBA[i + 3] = 255;
+        }
     }
     std::vector<float> zbuf(static_cast<size_t>(width) * static_cast<size_t>(height), 1.0f);
     std::vector<uint8_t> carCov(static_cast<size_t>(width) * static_cast<size_t>(height), 0);
@@ -1276,7 +1370,7 @@ void TexSample_RenderDuo(const WorldShotScene& scene, int carMeshes, int width, 
     dctx.base.zbuf = zbuf.data();
     dctx.base.scene = &scene;
     dctx.base.st = &stats;
-    dctx.base.env = nullptr;
+    dctx.base.env = env;
     dctx.carCov = carCov.data();
     dctx.pedCov = pedCov.data();
     dctx.win = win.data();
@@ -1356,6 +1450,22 @@ void TexSample_RenderDuo(const WorldShotScene& scene, int carMeshes, int width, 
     duo.carPixels = carPx;
     duo.pedPixels = pedPx;
     duo.overlap = ov;
+}
+
+} // namespace
+
+void TexSample_RenderDuo(const WorldShotScene& scene, int carMeshes, int width, int height,
+                         const float eye[3], const float target[3],
+                         std::vector<uint8_t>& outRGBA, TexFrameStats& stats,
+                         TexDuoStats& duo) {
+    RenderDuoImpl(scene, carMeshes, width, height, eye, target, nullptr, outRGBA, stats, duo);
+}
+
+void TexSample_RenderDuoTC(const WorldShotScene& scene, int carMeshes, int width, int height,
+                           const float eye[3], const float target[3], const TexTimeEnv& env,
+                           std::vector<uint8_t>& outRGBA, TexFrameStats& stats,
+                           TexDuoStats& duo) {
+    RenderDuoImpl(scene, carMeshes, width, height, eye, target, &env, outRGBA, stats, duo);
 }
 
 // --- Crowd render (R6u): shared-depth 3-actor frame, Duo generalised ---

@@ -136,6 +136,20 @@ void TexSample_RenderDuo(const WorldShotScene& scene, int carMeshes, int width, 
                           std::vector<uint8_t>& outRGBA, TexFrameStats& stats,
                           TexDuoStats& duo);
 
+// Round 42 (R6an): Duo render with a timecyc env (same scene-as---fog path).
+// Identical to TexSample_RenderDuo except the background is the vertical
+// SkyBot->SkyTop gradient, per-channel light is ambient+sun*NdotL, and every
+// geometry pixel blends toward fogColor=SkyBot by
+// factor=clamp((dist-FogSt)/(FarClp-FogSt),0,1) with dist = view-space depth
+// (w_clip = 1/den, the same denominator the z-buffer test uses) — the exact
+// ShadeTri math of the scene --fog path (foggedPixels counts geometry pixels
+// written with factor > 0). Coverage/owner/depth rules are untouched.
+// TexSample_RenderDuo above keeps the legacy look bit-for-bit (null env).
+void TexSample_RenderDuoTC(const WorldShotScene& scene, int carMeshes, int width, int height,
+                           const float eye[3], const float target[3], const TexTimeEnv& env,
+                           std::vector<uint8_t>& outRGBA, TexFrameStats& stats,
+                           TexDuoStats& duo);
+
 // Crowd render (R6u, round 23): ONE shared-depth CPU frame over a merged
 // 3-ped scene, generalising RenderDuo from 2 actors to N=3 by composition
 // (not stitching). Meshes [0,meshEnd0) belong to actor 0, meshes
