@@ -45,6 +45,7 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
         app/platform/linux/CrowdShot.cpp
         app/platform/linux/CsDuoShot.cpp
         app/platform/linux/TimeCycle.cpp
+        app/platform/linux/WaterLevel.cpp
         app/platform/linux/DriveSim.cpp
         app/platform/linux/Handling.cpp
         app/platform/linux/WalkSim.cpp
