@@ -1389,6 +1389,13 @@ int RunShotRadar(int argc, char** argv) {
 // TimeCycle_LoadWeatherHour exact-token path); the timecyc-load and
 // game-ok lines carry weather=W hour=H. Without the flag the pixels and
 // the game-ok line are bit-identical to R6al/R6af.
+// R6an (round 42): optional --fog (only with --hour, like --shot-scene:
+// bare --fog fails honestly with "game-fail --fog needs --hour") renders
+// the shore base through the scene --fog rasterizer path (TexTimeEnv from
+// the same hour/weather row: fog-load farClp/FogSt/fogColor + foggedPct in
+// gamefog-ok, fog=1 in game-ok); HUD/radar/wanted/money/zone overlays go
+// on top unfogged (fogOrder=base-only). Without the flag the pixels and
+// the game-ok line are bit-identical to R6am/R6al/R6af.
 int RunShotGame(int argc, char** argv) {
     const char* outPath = ArgValue(argc, argv, "--shot-game", "game.tga");
     if (!outPath || outPath[0] == '\0') {
@@ -1539,6 +1546,15 @@ int RunShotGame(int argc, char** argv) {
         (void)std::printf("game-fail --weather needs --hour H (0-23)\n");
         return 1;
     }
+    // R6an (round 42): optional distance fog on the shore base. Only with
+    // --hour (like --shot-scene --fog: bare --fog fails honestly with no
+    // TGA and no game-ok). Without the flag every pixel and log line below
+    // stays bit-for-bit.
+    const bool wantFog = HasArg(argc, argv, "--fog");
+    if (wantFog && !hasHour) {
+        (void)std::printf("game-fail --fog needs --hour\n");
+        return 1;
+    }
     std::string gameDir = ResolveGameDir(argc, argv);
     std::vector<uint8> basePixels;
     std::vector<uint8> hudPixels;
@@ -1548,14 +1564,13 @@ int RunShotGame(int argc, char** argv) {
     GameShotStats gst{};
     char gameErr[1024] = {};
     bool gameRenderOk = false;
-    if (hasHour && hasWeather) {
-        gameRenderOk = GameShot_RenderWeatherHour(gameDir.c_str(), health, armor, weather, hour,
-                                                  basePixels, hudPixels, radarFull, gamePixels,
-                                                  gst, gameErr, sizeof(gameErr));
-    } else if (hasHour) {
-        gameRenderOk = GameShot_RenderHour(gameDir.c_str(), health, armor, hour, basePixels,
-                                           hudPixels, radarFull, gamePixels, gst, gameErr,
-                                           sizeof(gameErr));
+    // R6an: wantFog rides the same WeatherHour call (it implies hasHour, so
+    // the legacy no-hour branch below is unreachable with fog and stays
+    // bit-for-bit). With wantFog=false the call is identical to round 41.
+    if (hasHour) {
+        gameRenderOk = GameShot_RenderWeatherHourFog(
+            gameDir.c_str(), health, armor, weather, hour, wantFog, basePixels, hudPixels,
+            radarFull, gamePixels, gst, gameErr, sizeof(gameErr));
     } else {
         gameRenderOk = GameShot_Render(gameDir.c_str(), health, armor, basePixels, hudPixels,
                                        radarFull, gamePixels, gst, gameErr, sizeof(gameErr));
@@ -1601,6 +1616,14 @@ int RunShotGame(int argc, char** argv) {
             tcp.dir[2], tcp.skyTop[0], tcp.skyTop[1], tcp.skyTop[2], tcp.skyBot[0],
             tcp.skyBot[1], tcp.skyBot[2], tcp.sunCore[0], tcp.sunCore[1], tcp.sunCore[2],
             tcp.sampleName);
+        // R6an: same fog-load line as --shot-scene --fog (same timecyc row
+        // bytes: FarClp/FogSt tokens, fog color = SkyBot).
+        if (wantFog) {
+            (void)std::printf("fog-load farClp=%.2f fogSt=%.2f fogColor=%d,%d,%d\n",
+                              static_cast<double>(tcp.farClp), static_cast<double>(tcp.fogSt),
+                              tcp.skyBot[0], tcp.skyBot[1], tcp.skyBot[2]);
+            (void)std::printf("fogFormula=clamp((dist-FogSt)/(FarClp-FogSt),0,1)\n");
+        }
     }
     (void)std::printf(
         "texshore-ok tris=%d sampledTri=%d texelFetch=%ld greyFallback=%d flatTri=%d "
@@ -1802,9 +1825,16 @@ int RunShotGame(int argc, char** argv) {
     // R6am (round 41): weather prefix for the game-ok line. Empty without
     // --weather (legacy logs stay byte-identical: " %shour" collapses to
     // " hour"); "weather=W " with the flag (=> " weather=W hour=H").
-    char weatherPrefix[80] = {};
-    if (hasWeather) {
-        (void)std::snprintf(weatherPrefix, sizeof(weatherPrefix), "weather=%s ", weather);
+    // R6an (round 42): with --fog the prefix starts with "fog=1 " (=> "
+    // fog=1 hour=H" / " fog=1 weather=W hour=H"); without the flag the
+    // legacy lines below stay byte-identical.
+    char hourPrefix[96] = {};
+    if (wantFog && hasWeather) {
+        (void)std::snprintf(hourPrefix, sizeof(hourPrefix), "fog=1 weather=%s ", weather);
+    } else if (wantFog) {
+        (void)std::snprintf(hourPrefix, sizeof(hourPrefix), "fog=1 ");
+    } else if (hasWeather) {
+        (void)std::snprintf(hourPrefix, sizeof(hourPrefix), "weather=%s ", weather);
     }
     if (hasMoney && moneyStats.moneyPixels <= 200) {
         (void)std::printf("game-fail thin money overlay moneyPixels=%ld (want >200)\n",
@@ -1830,7 +1860,7 @@ int RunShotGame(int argc, char** argv) {
                 gst.hud.health, gst.hud.armor, gst.hud.hudPixels, gst.radarPixels,
                 static_cast<unsigned long long>(baseChecksum),
                 static_cast<unsigned long long>(hudChecksum),
-                static_cast<unsigned long long>(radarChecksum), wanted, money, weatherPrefix, hour,
+                static_cast<unsigned long long>(radarChecksum), wanted, money, hourPrefix, hour,
                 static_cast<unsigned long long>(checksum));
         } else if (showZone && wanted >= 0) {
             (void)std::printf(
@@ -1839,7 +1869,7 @@ int RunShotGame(int argc, char** argv) {
                 gst.hud.health, gst.hud.armor, gst.hud.hudPixels, gst.radarPixels,
                 static_cast<unsigned long long>(baseChecksum),
                 static_cast<unsigned long long>(hudChecksum),
-                static_cast<unsigned long long>(radarChecksum), wanted, weatherPrefix, hour,
+                static_cast<unsigned long long>(radarChecksum), wanted, hourPrefix, hour,
                 static_cast<unsigned long long>(checksum));
         } else if (showZone && hasMoney) {
             (void)std::printf(
@@ -1848,7 +1878,7 @@ int RunShotGame(int argc, char** argv) {
                 gst.hud.health, gst.hud.armor, gst.hud.hudPixels, gst.radarPixels,
                 static_cast<unsigned long long>(baseChecksum),
                 static_cast<unsigned long long>(hudChecksum),
-                static_cast<unsigned long long>(radarChecksum), money, weatherPrefix, hour,
+                static_cast<unsigned long long>(radarChecksum), money, hourPrefix, hour,
                 static_cast<unsigned long long>(checksum));
         } else if (wanted >= 0 && hasMoney) {
             (void)std::printf(
@@ -1857,7 +1887,7 @@ int RunShotGame(int argc, char** argv) {
                 gst.hud.health, gst.hud.armor, gst.hud.hudPixels, gst.radarPixels,
                 static_cast<unsigned long long>(baseChecksum),
                 static_cast<unsigned long long>(hudChecksum),
-                static_cast<unsigned long long>(radarChecksum), wanted, money, weatherPrefix, hour,
+                static_cast<unsigned long long>(radarChecksum), wanted, money, hourPrefix, hour,
                 static_cast<unsigned long long>(checksum));
         } else if (hasMoney) {
             (void)std::printf(
@@ -1866,7 +1896,7 @@ int RunShotGame(int argc, char** argv) {
                 gst.hud.health, gst.hud.armor, gst.hud.hudPixels, gst.radarPixels,
                 static_cast<unsigned long long>(baseChecksum),
                 static_cast<unsigned long long>(hudChecksum),
-                static_cast<unsigned long long>(radarChecksum), money, weatherPrefix, hour,
+                static_cast<unsigned long long>(radarChecksum), money, hourPrefix, hour,
                 static_cast<unsigned long long>(checksum));
         } else if (showZone && wanted >= 0) {
             (void)std::printf(
@@ -1875,7 +1905,7 @@ int RunShotGame(int argc, char** argv) {
                 gst.hud.health, gst.hud.armor, gst.hud.hudPixels, gst.radarPixels,
                 static_cast<unsigned long long>(baseChecksum),
                 static_cast<unsigned long long>(hudChecksum),
-                static_cast<unsigned long long>(radarChecksum), wanted, weatherPrefix, hour,
+                static_cast<unsigned long long>(radarChecksum), wanted, hourPrefix, hour,
                 static_cast<unsigned long long>(checksum));
         } else if (showZone) {
             (void)std::printf(
@@ -1884,7 +1914,7 @@ int RunShotGame(int argc, char** argv) {
                 gst.hud.health, gst.hud.armor, gst.hud.hudPixels, gst.radarPixels,
                 static_cast<unsigned long long>(baseChecksum),
                 static_cast<unsigned long long>(hudChecksum),
-                static_cast<unsigned long long>(radarChecksum), weatherPrefix, hour,
+                static_cast<unsigned long long>(radarChecksum), hourPrefix, hour,
                 static_cast<unsigned long long>(checksum));
         } else if (wanted >= 0) {
             (void)std::printf(
@@ -1893,7 +1923,7 @@ int RunShotGame(int argc, char** argv) {
                 gst.hud.health, gst.hud.armor, gst.hud.hudPixels, gst.radarPixels,
                 static_cast<unsigned long long>(baseChecksum),
                 static_cast<unsigned long long>(hudChecksum),
-                static_cast<unsigned long long>(radarChecksum), wanted, weatherPrefix, hour,
+                static_cast<unsigned long long>(radarChecksum), wanted, hourPrefix, hour,
                 static_cast<unsigned long long>(checksum));
         } else {
             (void)std::printf(
@@ -1902,7 +1932,7 @@ int RunShotGame(int argc, char** argv) {
                 gst.hud.health, gst.hud.armor, gst.hud.hudPixels, gst.radarPixels,
                 static_cast<unsigned long long>(baseChecksum),
                 static_cast<unsigned long long>(hudChecksum),
-                static_cast<unsigned long long>(radarChecksum), weatherPrefix, hour,
+                static_cast<unsigned long long>(radarChecksum), hourPrefix, hour,
                 static_cast<unsigned long long>(checksum));
         }
     } else if (showZone && wanted >= 0 && hasMoney) {
@@ -1986,6 +2016,25 @@ int RunShotGame(int argc, char** argv) {
             static_cast<unsigned long long>(hudChecksum),
             static_cast<unsigned long long>(radarChecksum),
             static_cast<unsigned long long>(checksum));
+    }
+    // R6an: fog metrics for the base (same definitions as the scene
+    // fogshot-ok: foggedPct over GEOMETRY pixels, background excluded from
+    // both sides; framePct over the whole frame for transparency). The
+    // overlays above (HUD/radar/wanted/money/zone) are applied after the
+    // fogged base and are never fogged themselves: fogOrder=base-only.
+    if (wantFog) {
+        const long geomPixels = gst.hud.texStats.texPixels + gst.hud.texStats.fallbackPixels +
+                                gst.hud.texStats.flatPixels;
+        const double foggedPct =
+            geomPixels == 0 ? 0.0
+                            : 100.0 * static_cast<double>(gst.hud.texStats.foggedPixels) /
+                                  static_cast<double>(geomPixels);
+        const double framePct = 100.0 * static_cast<double>(gst.hud.texStats.foggedPixels) /
+                                static_cast<double>(640ULL * 480ULL);
+        (void)std::printf("gamefog-ok hour=%d weather=%s foggedPixels=%ld geomPixels=%ld "
+                          "foggedPct=%.2f framePct=%.2f fogOrder=base-only checksum=%llu\n",
+                          hour, weather, gst.hud.texStats.foggedPixels, geomPixels, foggedPct,
+                          framePct, static_cast<unsigned long long>(checksum));
     }
     (void)std::printf("gameshot-ok out=%s nonblack=%llu/%llu avg=%llu,%llu,%llu checksum=%llu\n",
                        outPath, static_cast<unsigned long long>(gN),
