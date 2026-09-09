@@ -561,3 +561,152 @@ bool MenuShot_RenderSelected(const char* gameDir, const char* lang, int selected
                              std::size_t errSize) {
     return RenderWithSelected(gameDir, lang, selectedIx, outRGBA, stats, err, errSize);
 }
+
+// --- Round 32 (R6ad) HUD helpers: same engine/plugins/glyph path, no menu. ---
+
+static bool s_hudRwInit = false;
+
+static bool HudRwInitEngine() {
+    if (s_hudRwInit) {
+        return true;
+    }
+    // Tolerant like CarPose: ShoreShot_Init (StreamPager) may have already
+    // brought the engine up in this process; reuse it instead of failing.
+    if (rw::Engine::state != rw::Engine::Dead) {
+        rw::Texture::setLoadTextures(false);
+        s_hudRwInit = true;
+        return true;
+    }
+    if (!rw::Engine::init(nil)) {
+        return false;
+    }
+    rw::ps2::registerPDSPlugin(40);
+    rw::ps2::registerPluginPDSPipes();
+    rw::registerMeshPlugin();
+    rw::registerNativeDataPlugin();
+    rw::registerAtomicRightsPlugin();
+    rw::registerMaterialRightsPlugin();
+    rw::xbox::registerVertexFormatPlugin();
+    rw::registerSkinPlugin();
+    rw::registerUserDataPlugin();
+    rw::registerHAnimPlugin();
+    rw::registerMatFXPlugin();
+    rw::registerUVAnimPlugin();
+    rw::ps2::registerADCPlugin();
+    if (!rw::Engine::open(nil) || !rw::Engine::start()) {
+        return false;
+    }
+    rw::Texture::setLoadTextures(false);
+    s_hudRwInit = true;
+    return true;
+}
+
+bool MenuShot_LoadHudFont(const char* gameDir, MenuHudFont& font, char* err, std::size_t errSize) {
+    font = MenuHudFont{};
+    if (!gameDir || !gameDir[0]) {
+        SetErr(err, errSize, "no game dir");
+        return false;
+    }
+    OS_SetFilePathOffset(gameDir);
+    std::vector<uint8> txdBytes;
+    if (!ReadWholeFile("models/fonts.txd", txdBytes) || txdBytes.empty()) {
+        SetErr(err, errSize, "cannot read models/fonts.txd");
+        return false;
+    }
+    if (!HudRwInitEngine()) {
+        SetErr(err, errSize, "librw Engine::init failed");
+        return false;
+    }
+    rw::StreamMemory stream;
+    stream.open(txdBytes.data(), static_cast<uint32>(txdBytes.size()));
+    rw::TexDictionary* txd = nil;
+    if (rw::findChunk(&stream, rw::ID_TEXDICTIONARY, nil, nil)) {
+        txd = rw::TexDictionary::streamRead(&stream);
+    }
+    stream.close();
+    if (!txd) {
+        SetErr(err, errSize, "fonts.txd parse failed");
+        return false;
+    }
+    const char* wantTex = "font2";
+    rw::Texture* tex = txd->find(wantTex);
+    if (!tex) {
+        txd->destroy();
+        SetErr(err, errSize, "fonts.txd has no font2");
+        return false;
+    }
+    TexImage decoded;
+    const bool decOk = TexSample_Decode(tex, decoded);
+    txd->destroy();
+    if (!decOk || decoded.rgba.empty() || decoded.w != 512 || decoded.h != 512) {
+        SetErr(err, errSize, "font2 decode failed (want 512x512)");
+        return false;
+    }
+    std::vector<uint8> fontsDat;
+    if (!ReadWholeFile("data/fonts.dat", fontsDat) || fontsDat.empty()) {
+        SetErr(err, errSize, "cannot read data/fonts.dat");
+        return false;
+    }
+    FontMetrics metrics;
+    if (!ParseFontsDat(fontsDat, metrics)) {
+        SetErr(err, errSize, "data/fonts.dat parse failed");
+        return false;
+    }
+    (void)std::snprintf(font.name, sizeof(font.name), "%s", wantTex);
+    font.w = decoded.w;
+    font.h = decoded.h;
+    font.texW = decoded.w;
+    font.texH = decoded.h;
+    font.rgba = std::move(decoded.rgba);
+    for (int i = 0; i < 208; ++i) {
+        font.prop[i] = metrics.prop[i];
+    }
+    font.unprop = metrics.unprop;
+    font.space = metrics.space;
+    font.ok = true;
+    return true;
+}
+
+int MenuShot_DrawTextRight(std::vector<uint8_t>& px, int fbW, int fbH, const MenuHudFont& font,
+                           const char* text, int xRight, int yTop, int cellDstH, uint8_t cr,
+                           uint8_t cg, uint8_t cb) {
+    if (!font.ok || !text || fbW != kWidth || fbH != kHeight || cellDstH <= 0) {
+        return 0;
+    }
+    FontMetrics m;
+    for (int i = 0; i < 208; ++i) {
+        m.prop[i] = font.prop[i];
+    }
+    m.unprop = font.unprop;
+    m.space = font.space;
+    m.ok = true;
+    TexImage img;
+    (void)std::snprintf(img.name, sizeof(img.name), "%s", font.name);
+    img.w = font.texW;
+    img.h = font.texH;
+    img.filter = 0;
+    img.rgba = font.rgba; // one 1MB copy per call; HUD draws few strings
+    // Total advance first (same math as LineWidthPx, no GXT tokens on HUD).
+    long totalAdv = 0;
+    for (const char* p = text; *p; ++p) {
+        totalAdv += AdvanceFor(static_cast<uint8>(*p), m);
+    }
+    const int totalDst = static_cast<int>(totalAdv * cellDstH / 40);
+    int x = xRight - totalDst;
+    int drawn = 0;
+    for (const char* p = text; *p; ++p) {
+        const uint8 ch = static_cast<uint8>(*p);
+        const int adv = AdvanceFor(ch, m);
+        if (ch == ' ') {
+            x += adv * cellDstH / 40;
+            continue;
+        }
+        const int advDst = adv * cellDstH / 40;
+        bool empty = false;
+        if (BlitGlyph(px, img, x, yTop, advDst, cellDstH, adv, ch, cr, cg, cb, empty)) {
+            ++drawn;
+        }
+        x += advDst;
+    }
+    return drawn;
+}

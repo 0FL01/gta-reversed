@@ -46,4 +46,26 @@ bool MenuShot_Render(const char* gameDir, const char* lang, std::vector<uint8_t>
 bool MenuShot_RenderSelected(const char* gameDir, const char* lang, int selectedIx,
                              std::vector<uint8_t>& outRGBA, MenuShotStats& stats, char* err,
                              std::size_t errSize);
+// Round 32 (R6ad): HUD digit support on the SAME glyph path. Loads font2
+// texels + fonts.dat metrics without rendering a menu frame, then draws
+// right-aligned ASCII strings (same cells/tint/alpha-over as the menu).
+// Additive only: MenuShot_Render/RenderSelected are untouched bit-for-bit.
+struct MenuHudFont {
+    char name[32] = {};
+    int w = 0;
+    int h = 0;
+    int prop[208] = {};
+    int unprop = 27;
+    int space = 10;
+    std::vector<uint8_t> rgba; // font texels, top row first (font.w*font.h*4)
+    int texW = 0;
+    int texH = 0;
+    bool ok = false;
+};
+bool MenuShot_LoadHudFont(const char* gameDir, MenuHudFont& font, char* err, std::size_t errSize);
+// Draws ASCII text right-aligned (last glyph ends at xRight, exclusive) in
+// top-down framebuffer coords on bottom-up RGBA. Returns drawn glyph count.
+int MenuShot_DrawTextRight(std::vector<uint8_t>& px, int fbW, int fbH, const MenuHudFont& font,
+                           const char* text, int xRight, int yTop, int cellDstH, uint8_t cr,
+                           uint8_t cg, uint8_t cb);
 void MenuShot_Shutdown();
