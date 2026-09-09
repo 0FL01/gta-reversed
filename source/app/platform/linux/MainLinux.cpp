@@ -52,6 +52,7 @@ using uint64 = uint64_t;
 #include "app/platform/linux/CsDuoShot.h"
 #include "app/platform/linux/TimeCycle.h"
 #include "app/platform/linux/WaterLevel.h"
+#include "app/platform/linux/ShoreShot.h"
 #include "app/platform/linux/DriveSim.h"
 #include "app/platform/linux/Handling.h"
 #include "app/platform/linux/WalkSim.h"
@@ -61,7 +62,7 @@ using uint64 = uint64_t;
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --shot-cs-duo <out.tga> | --shot-water <out.tga> [--hour H] [--water-file water1.dat] | --csanim-seq <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--frames 5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --shot-cs-duo <out.tga> | --shot-water <out.tga> [--hour H] [--water-file water1.dat] | --shot-shore <out.tga> [--hour H] | --csanim-seq <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--frames 5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -880,6 +881,198 @@ int RunShotWater(int argc, char** argv) {
         "water-ok quads=%d rendered=%d waterPixels=%ld checksum=%llu\n", water.rows,
         waterTris, waterPixels, static_cast<unsigned long long>(checksum));
     WaterLevel_Shutdown();
+    return 0;
+}
+
+// R6ac: coastal composition (round 31). Pager world around the fixed pier
+// center + water.dat sea colored by --hour (EXTRASUNNY_LA), rendered in ONE
+// shared-depth CPU call (TexSample_RenderDuo: world = actor 0, water =
+// actor 1). shore-ok requires M>=4, T>2000, Qw>0, Wp>5000, Gp>5000 with
+// Wp = exact WaterRGBA pixels (water color proof) and Gp = world depth
+// winners (world geometry proof); otherwise shore-fail with no TGA.
+int RunShotShore(int argc, char** argv) {
+    const char* outPath = ArgValue(argc, argv, "--shot-shore", "shore.tga");
+    if (!outPath || outPath[0] == '\0') {
+        (void)std::printf("shore-fail bad args shot-shore='%s'\n",
+                           outPath ? outPath : "(null)");
+        return 1;
+    }
+    int hour = 12;
+    const char* hourArg = ArgValue(argc, argv, "--hour", nullptr);
+    if (hourArg) {
+        size_t len = std::strlen(hourArg);
+        bool digits = len > 0 && len <= 2;
+        for (size_t i = 0; digits && i < len; ++i) {
+            if (hourArg[i] < '0' || hourArg[i] > '9') {
+                digits = false;
+            }
+        }
+        int h = digits ? std::atoi(hourArg) : -1;
+        if (!digits || h < 0 || h > 23) {
+            (void)std::printf("shore-fail bad --hour '%s' (want 0-23)\n", hourArg);
+            return 1;
+        }
+        hour = h;
+    }
+    const int width = 640;
+    const int height = 480;
+    auto getPlatformDisplay = reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(
+        eglGetProcAddress("eglGetPlatformDisplayEXT")
+    );
+    if (!getPlatformDisplay) {
+        (void)std::printf("shore-fail no eglGetPlatformDisplayEXT\n");
+        return 1;
+    }
+#ifndef EGL_PLATFORM_SURFACELESS_MESA
+#define EGL_PLATFORM_SURFACELESS_MESA 0x31DD
+#endif
+    EGLDisplay display = getPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
+    if (display == EGL_NO_DISPLAY) {
+        (void)std::printf("shore-fail no surfaceless display 0x%x\n", eglGetError());
+        return 1;
+    }
+    if (!eglInitialize(display, nullptr, nullptr)) {
+        (void)std::printf("shore-fail egl init 0x%x\n", eglGetError());
+        return 1;
+    }
+    const EGLint configAttrs[] = {
+        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
+        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+        EGL_DEPTH_SIZE, 24,
+        EGL_NONE
+    };
+    EGLConfig config = nullptr;
+    EGLint configCount = 0;
+    if (!eglChooseConfig(display, configAttrs, &config, 1, &configCount) || configCount < 1) {
+        (void)std::printf("shore-fail choose config 0x%x\n", eglGetError());
+        eglTerminate(display);
+        return 1;
+    }
+    const EGLint pbufferAttrs[] = { EGL_WIDTH, width, EGL_HEIGHT, height, EGL_NONE };
+    EGLSurface surface = eglCreatePbufferSurface(display, config, pbufferAttrs);
+    if (surface == EGL_NO_SURFACE) {
+        (void)std::printf("shore-fail pbuffer 0x%x\n", eglGetError());
+        eglTerminate(display);
+        return 1;
+    }
+    (void)eglBindAPI(EGL_OPENGL_API);
+    EGLContext context = eglCreateContext(display, config, EGL_NO_CONTEXT, nullptr);
+    if (context == EGL_NO_CONTEXT) {
+        (void)std::printf("shore-fail context 0x%x\n", eglGetError());
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    if (!eglMakeCurrent(display, surface, surface, context)) {
+        (void)std::printf("shore-fail make current 0x%x\n", eglGetError());
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    const char* glVersion = reinterpret_cast<const char*>(glGetString(GL_VERSION));
+    (void)std::printf("shore-gl %s\n", glVersion ? glVersion : "(null)");
+    std::string gameDir = ResolveGameDir(argc, argv);
+    WorldShotScene scene{};
+    ShoreShotStats sst{};
+    E2ELoadInfo loadInfo{};
+    E2EPagerFrame pagerFrame{};
+    char shoreErr[640] = {};
+    if (!ShoreShot_Init(gameDir.c_str(), hour, scene, sst, loadInfo, pagerFrame, shoreErr,
+                         sizeof(shoreErr))) {
+        (void)std::printf("shore-fail load %s (game=%s)\n", shoreErr, gameDir.c_str());
+        ShoreShot_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    (void)std::printf(
+        "shore-load center=%.0f,%.0f models=%d mtris=%d waterRows=%d waterQuads=%d waterTris=%d "
+        "file=%s iplTotal=%d kept=%d bbox=[%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f]\n",
+        static_cast<double>(sst.centerX), static_cast<double>(sst.centerY), sst.models,
+        sst.mtris, sst.waterRows, sst.waterQuads, sst.waterTris, sst.waterFile,
+        loadInfo.iplTotal, loadInfo.iplKept, scene.bboxMin[0], scene.bboxMin[1],
+        scene.bboxMin[2], scene.bboxMax[0], scene.bboxMax[1], scene.bboxMax[2]);
+    (void)std::printf("shore-water hour=%d waterColor=%d,%d,%d,%d\n", sst.hour,
+                       sst.waterRGBA[0], sst.waterRGBA[1], sst.waterRGBA[2],
+                       sst.waterRGBA[3]);
+    (void)std::printf("shore-cam eye=%.1f,%.1f,%.1f target=%.1f,%.1f,%.1f fov=60\n",
+                       sst.eye[0], sst.eye[1], sst.eye[2], sst.target[0], sst.target[1],
+                       sst.target[2]);
+    if (sst.models < 4 || sst.mtris <= 2000 || sst.waterQuads <= 0) {
+        (void)std::printf("shore-fail gate models=%d(>=4) mtris=%d(>2000) waterQuads=%d(>0)\n",
+                           sst.models, sst.mtris, sst.waterQuads);
+        ShoreShot_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    std::vector<uint8> pixels;
+    TexFrameStats texStats{};
+    TexDuoStats duo{};
+    TexSample_RenderDuo(scene, sst.worldMeshes, width, height, sst.eye, sst.target, pixels,
+                        texStats, duo);
+    uint64_t sumR = 0;
+    uint64_t sumG = 0;
+    uint64_t sumB = 0;
+    uint64_t nonBlack = 0;
+    uint64_t checksum = PixelsChecksum(pixels, sumR, sumG, sumB, nonBlack);
+    const long waterPixels =
+        WaterLevel_CountExact(pixels, sst.waterRGBA[0], sst.waterRGBA[1], sst.waterRGBA[2]);
+    const long worldPixels = duo.carPixels;
+    (void)std::printf(
+        "texshore-ok tris=%d sampledTri=%d texelFetch=%ld greyFallback=%d flatTri=%d "
+        "texPixels=%ld flatPixels=%ld firstTex=%s render=cpu shared-z=1\n",
+        texStats.tris, texStats.sampledTri, texStats.texelFetch, texStats.fallbackTri,
+        texStats.flatTri, texStats.texPixels, texStats.flatPixels,
+        texStats.haveFirst ? texStats.firstTex : "-");
+    (void)std::printf("shoreduo-ok worldMeshes=%d worldPixels=%ld waterPixelsDuo=%ld overlap=%ld\n",
+                       sst.worldMeshes, worldPixels, duo.pedPixels, duo.overlap);
+    if (nonBlack == 0) {
+        (void)std::printf("shore-fail black frame\n");
+        ShoreShot_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    if (waterPixels <= 5000 || worldPixels <= 5000) {
+        (void)std::printf("shore-fail dry frame waterPixels=%ld(>5000) worldPixels=%ld(>5000)\n",
+                           waterPixels, worldPixels);
+        ShoreShot_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    if (!WriteTga24(outPath, width, height, pixels)) {
+        (void)std::printf("shore-fail write '%s'\n", outPath);
+        ShoreShot_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    eglDestroyContext(display, context);
+    eglDestroySurface(display, surface);
+    eglTerminate(display);
+    OS_DebugOut("mad-sa-linux shore shot");
+    (void)std::printf(
+        "shore-ok center=%.0f,%.0f models=%d mtris=%d waterQuads=%d waterPixels=%ld "
+        "worldPixels=%ld checksum=%llu\n",
+        static_cast<double>(sst.centerX), static_cast<double>(sst.centerY), sst.models,
+        sst.mtris, sst.waterQuads, waterPixels, worldPixels,
+        static_cast<unsigned long long>(checksum));
+    ShoreShot_Shutdown();
     return 0;
 }
 
@@ -5367,6 +5560,9 @@ int main(int argc, char** argv) {
     }
     if (HasArg(argc, argv, "--shot-cs-duo")) {
         return RunShotCsDuo(argc, argv);
+    }
+    if (HasArg(argc, argv, "--shot-shore")) {
+        return RunShotShore(argc, argv);
     }
     if (HasArg(argc, argv, "--shot-water")) {
         return RunShotWater(argc, argv);
