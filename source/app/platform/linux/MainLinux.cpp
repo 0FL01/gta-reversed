@@ -45,13 +45,14 @@ using uint64 = uint64_t;
 #include "app/platform/linux/RadioDecode.h"
 #include "app/platform/linux/SkinPed.h"
 #include "app/platform/linux/IfpAnim.h"
+#include "app/platform/linux/CarPose.h"
 
 #include <sys/resource.h>
 
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --list-anims | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --list-anims | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -2004,6 +2005,205 @@ int RunAnimSeq(int argc, char** argv) {
     return 0;
 }
 
+// Round 14 (R6l): car wheels steer + spin. Loads one car DFF (default
+// --model landstal) with its per-model TXD, finds the wheel dummy frames by
+// their stored hierarchy names, applies --steer (front-pair yaw, degrees)
+// and --spin (all-wheel roll, degrees) as extra local matrices over the DFF
+// transforms (CarPose: the retail RpAtomicClone instancing of the stored
+// `wheel` mesh onto every dummy, front steer like m_fSteerAngle, roll like
+// m_wheelRotation), and renders through the same CPU orbit rasterizer. Every
+// vertex comes from DFF bytes, every angle from argv; the body audit frame
+// must stay bit-identical (whole-body rotation instead of wheels fails).
+int RunShotCar(int argc, char** argv) {
+    const char* outPath = ArgValue(argc, argv, "--shot-car", "car.tga");
+    const char* model = ArgValue(argc, argv, "--model", "landstal");
+    const char* steerArg = ArgValue(argc, argv, "--steer", "0");
+    const char* spinArg = ArgValue(argc, argv, "--spin", "0");
+    double steerDeg = std::atof(steerArg ? steerArg : "0");
+    double spinDeg = std::atof(spinArg ? spinArg : "0");
+    if (!outPath || outPath[0] == '\0' || !model || model[0] == '\0' ||
+        !std::isfinite(steerDeg) || !std::isfinite(spinDeg)) {
+        (void)std::printf("car-fail bad args shot-car='%s' model='%s' steer='%s' spin='%s'\n",
+                           outPath ? outPath : "(null)", model ? model : "(null)",
+                           steerArg ? steerArg : "(null)", spinArg ? spinArg : "(null)");
+        return 1;
+    }
+    const int width = 640;
+    const int height = 480;
+    auto getPlatformDisplay = reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(
+        eglGetProcAddress("eglGetPlatformDisplayEXT")
+    );
+    if (!getPlatformDisplay) {
+        (void)std::printf("car-fail no eglGetPlatformDisplayEXT\n");
+        return 1;
+    }
+#ifndef EGL_PLATFORM_SURFACELESS_MESA
+#define EGL_PLATFORM_SURFACELESS_MESA 0x31DD
+#endif
+    EGLDisplay display = getPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
+    if (display == EGL_NO_DISPLAY) {
+        (void)std::printf("car-fail no surfaceless display 0x%x\n", eglGetError());
+        return 1;
+    }
+    if (!eglInitialize(display, nullptr, nullptr)) {
+        (void)std::printf("car-fail egl init 0x%x\n", eglGetError());
+        return 1;
+    }
+    const EGLint configAttrs[] = {
+        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
+        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+        EGL_DEPTH_SIZE, 24,
+        EGL_NONE
+    };
+    EGLConfig config = nullptr;
+    EGLint configCount = 0;
+    if (!eglChooseConfig(display, configAttrs, &config, 1, &configCount) || configCount < 1) {
+        (void)std::printf("car-fail choose config 0x%x\n", eglGetError());
+        eglTerminate(display);
+        return 1;
+    }
+    const EGLint pbufferAttrs[] = { EGL_WIDTH, width, EGL_HEIGHT, height, EGL_NONE };
+    EGLSurface surface = eglCreatePbufferSurface(display, config, pbufferAttrs);
+    if (surface == EGL_NO_SURFACE) {
+        (void)std::printf("car-fail pbuffer 0x%x\n", eglGetError());
+        eglTerminate(display);
+        return 1;
+    }
+    (void)eglBindAPI(EGL_OPENGL_API);
+    EGLContext context = eglCreateContext(display, config, EGL_NO_CONTEXT, nullptr);
+    if (context == EGL_NO_CONTEXT) {
+        (void)std::printf("car-fail context 0x%x\n", eglGetError());
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    if (!eglMakeCurrent(display, surface, surface, context)) {
+        (void)std::printf("car-fail make current 0x%x\n", eglGetError());
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    const char* glVersion = reinterpret_cast<const char*>(glGetString(GL_VERSION));
+    (void)std::printf("car-gl %s\n", glVersion ? glVersion : "(null)");
+    std::string gameDir = ResolveGameDir(argc, argv);
+    WorldShotScene scene{};
+    CarPoseStats cst{};
+    CarPoseAudit audit{};
+    char carErr[512] = {};
+    if (!CarPose_Init(gameDir.c_str(), model, steerDeg, spinDeg, scene, cst, audit, carErr,
+                       sizeof(carErr))) {
+        (void)std::printf("car-fail load %s (game=%s model=%s steer=%s spin=%s)\n", carErr,
+                           gameDir.c_str(), model, steerArg, spinArg);
+        CarPose_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    (void)std::printf(
+        "car-load model=%s src=%s txd=%s textures=%d geoms=%d frames=%d "
+        "bbox=[%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f]\n",
+        cst.model, cst.src, cst.txd, cst.textures, cst.geoms, cst.frames,
+        scene.bboxMin[0], scene.bboxMin[1], scene.bboxMin[2],
+        scene.bboxMax[0], scene.bboxMax[1], scene.bboxMax[2]
+    );
+    {
+        std::string wl;
+        for (int i = 0; i < cst.wheels && i < 4; ++i) {
+            char cell[40];
+            (void)std::snprintf(cell, sizeof(cell), "%s%s", i ? "," : "",
+                                 cst.wheelNames[i]);
+            wl += cell;
+        }
+        (void)std::printf("wheels=%s\n", wl.c_str());
+    }
+    (void)std::printf("car-pose steer=%.3f spin=%.3f fronts=%d wheels=%d bodyTris=%d wheelTris=%d\n",
+                       cst.steerDeg, cst.spinDeg, cst.fronts, cst.wheels, cst.bodyTris,
+                       cst.wheelTris);
+    if (!cst.chassisSame) {
+        (void)std::printf("car-fail body moved during wheel pose (audit frame changed)\n");
+        CarPose_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    std::vector<uint8> pixels;
+    TexFrameStats texStats{};
+    DrawWorldFrame(scene, width, height, 60.0f, nullptr, pixels, texStats);
+    uint64_t sumR = 0;
+    uint64_t sumG = 0;
+    uint64_t sumB = 0;
+    uint64_t nonBlack = 0;
+    uint64_t checksum = PixelsChecksum(pixels, sumR, sumG, sumB, nonBlack);
+    uint64_t total = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
+    if (nonBlack == 0) {
+        (void)std::printf("car-fail black frame\n");
+        CarPose_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    if (!WriteTga24(outPath, width, height, pixels)) {
+        (void)std::printf("car-fail write '%s'\n", outPath);
+        CarPose_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    eglDestroyContext(display, context);
+    eglDestroySurface(display, surface);
+    eglTerminate(display);
+    OS_DebugOut("mad-sa-linux car shot");
+    (void)std::printf(
+        "texcar-ok tris=%d sampledTri=%d texelFetch=%ld greyFallback=%d flatTri=%d texPixels=%ld "
+        "uv=[%.3f,%.3f]x[%.3f,%.3f] firstTex=%s texel=%d,%d,%d,%d pixel=%d,%d,%d render=cpu\n",
+        texStats.tris, texStats.sampledTri, texStats.texelFetch, texStats.fallbackTri, texStats.flatTri,
+        texStats.texPixels, texStats.haveUV ? texStats.uvMin[0] : 0.0f,
+        texStats.haveUV ? texStats.uvMax[0] : 0.0f, texStats.haveUV ? texStats.uvMin[1] : 0.0f,
+        texStats.haveUV ? texStats.uvMax[1] : 0.0f, texStats.haveFirst ? texStats.firstTex : "-",
+        texStats.firstTexel[0], texStats.firstTexel[1], texStats.firstTexel[2],
+        texStats.firstTexel[3], texStats.firstPixel[0], texStats.firstPixel[1],
+        texStats.firstPixel[2]
+    );
+    {
+        char b[12 * 24 + 1] = {};
+        char a[12 * 24 + 1] = {};
+        size_t bo = 0, ao = 0;
+        for (int i = 0; i < 12; ++i) {
+            bo += static_cast<size_t>(std::snprintf(b + bo, sizeof(b) - bo, "%s%.5f",
+                                                     i ? "," : "", audit.before[i]));
+            ao += static_cast<size_t>(std::snprintf(a + ao, sizeof(a) - ao, "%s%.5f",
+                                                     i ? "," : "", audit.after[i]));
+        }
+        (void)std::printf("wheelAudit=%s:before=%s:after=%s:body=%s:same=%d\n", audit.wheel, b,
+                           a, audit.body, audit.bodySame);
+        (void)std::printf("car-ok model=%s wheels=%d steer=%.3f spin=%.3f checksum=%llu "
+                           "wheelAudit=%s:before=%s:after=%s:body=%s:same=%d\n",
+                           cst.model, cst.wheels, cst.steerDeg, cst.spinDeg,
+                           static_cast<unsigned long long>(checksum), audit.wheel, b, a,
+                           audit.body, audit.bodySame);
+    }
+    (void)std::printf(
+        "carshot-ok out=%s nonblack=%llu/%llu avg=%llu,%llu,%llu checksum=%llu\n", outPath,
+        static_cast<unsigned long long>(nonBlack), static_cast<unsigned long long>(total),
+        static_cast<unsigned long long>(sumR / total),
+        static_cast<unsigned long long>(sumG / total),
+        static_cast<unsigned long long>(sumB / total), static_cast<unsigned long long>(checksum)
+    );
+    CarPose_Shutdown();
+    return 0;
+}
+
 // Round 12 helper: enumerate the ped IFP bank (names as stored).
 int RunListAnims(int argc, char** argv) {
     std::string gameDir = ResolveGameDir(argc, argv);
@@ -2280,6 +2480,9 @@ int main(int argc, char** argv) {
     }
     if (HasArg(argc, argv, "--anim-seq")) {
         return RunAnimSeq(argc, argv);
+    }
+    if (HasArg(argc, argv, "--shot-car")) {
+        return RunShotCar(argc, argv);
     }
     if (HasArg(argc, argv, "--list-anims")) {
         return RunListAnims(argc, argv);
