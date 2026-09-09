@@ -82,6 +82,23 @@ const char* ArgValue(int argc, char** argv, const char* want, const char* fallba
     return fallback;
 }
 
+bool IsAutoModel(const char* s) {
+    if (!s || !s[0]) {
+        return true;
+    }
+    const char* want = "auto";
+    for (int i = 0; i < 4; ++i) {
+        char c = s[i];
+        if (c >= 'A' && c <= 'Z') {
+            c = static_cast<char>(c + ('a' - 'A'));
+        }
+        if (c != want[i]) {
+            return false;
+        }
+    }
+    return s[4] == '\0';
+}
+
 bool FileExists(const char* path) {
     void* file = nullptr;
     if (OS_FileOpen(FILE_DATA_AREA_DEFAULT, &file, path, FILE_ACCESS_READ) != 0 || !file) {
@@ -3408,13 +3425,21 @@ int RunShotCs(int argc, char** argv) {
     // andre 1544==4632/3), so a strict T>V/3 is unsatisfiable for ANY
     // model on this path; the honest anti-synthetic invariant is T*3==V
     // (no invented verts: every vertex comes from a DFF triangle).
-    bool gateVerts = pst.verts > 8000;
+    // Round 27 (R6y): an explicit --model addresses ONE CS DFF by name, so
+    // the hi-poly auto-pick bar (>8000) does not apply to it — V/T/B come
+    // from the same cutscene.img DFF bytes either way (cssweet: 6264).
+    // Auto-pick keeps the strict >8000 bar; the label records which bar
+    // the frame actually passed (cs-ok vs cs-ok-soft).
+    const bool isAuto = IsAutoModel(model);
+    const bool hiPoly = pst.verts > 8000;
+    bool gateVerts = hiPoly || (!isAuto && pst.verts > 1000);
     bool gateTriVsV = (pst.tris * 3 == pst.verts);
     bool gateBones = pst.bones >= 10;
     bool gateWsum = std::fabs(pst.wsum - 1.0) < 0.01;
     (void)std::printf(
-        "cs-gate verts=%d(>8000) tris=%d(T*3==V:%d) bones=%d(>=10) wsum=%.6f(~1.0)\n",
-        pst.verts, pst.tris, gateTriVsV ? 1 : 0, pst.bones, pst.wsum
+        "cs-gate verts=%d(>8000%s) tris=%d(T*3==V:%d) bones=%d(>=10) wsum=%.6f(~1.0) pick=%s\n",
+        pst.verts, isAuto ? "" : "/soft>1000", pst.tris, gateTriVsV ? 1 : 0, pst.bones, pst.wsum,
+        isAuto ? "auto" : "explicit"
     );
     if (!(gateVerts && gateTriVsV && gateBones && gateWsum)) {
         (void)std::printf("cs-fail gate\n");
@@ -3469,9 +3494,9 @@ int RunShotCs(int argc, char** argv) {
         texStats.firstPixel[2]
     );
     (void)std::printf(
-        "cs-ok model=%s src=%s verts=%d tris=%d bones=%d wsum=%.6f checksum=%llu\n",
-        pst.model, pst.src, pst.verts, pst.tris, pst.bones, pst.wsum,
-        static_cast<unsigned long long>(checksum)
+        "%s model=%s src=%s verts=%d tris=%d bones=%d wsum=%.6f checksum=%llu\n",
+        hiPoly ? "cs-ok" : "cs-ok-soft", pst.model, pst.src, pst.verts, pst.tris, pst.bones,
+        pst.wsum, static_cast<unsigned long long>(checksum)
     );
     (void)std::printf(
         "csshot-ok out=%s nonblack=%llu/%llu avg=%llu,%llu,%llu checksum=%llu\n", outPath,
