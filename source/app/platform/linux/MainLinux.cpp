@@ -56,7 +56,7 @@ using uint64 = uint64_t;
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -637,6 +637,9 @@ int RunShotScene(int argc, char** argv) {
     // bit-for-bit; a given H (integer 0-23) reads EXTRASUNNY_LA from
     // data/timecyc.dat and relights the frame (no interpolation: the floor
     // sample row is used as-is).
+    // R6r: optional --weather W selects any timecyc section by name (without
+    // the `////////////` prefix, e.g. CLOUDY_LA). Without --weather the
+    // default EXTRASUNNY_LA path above stays bit-for-bit.
     int hour = -1;
     const char* hourArg = ArgValue(argc, argv, "--hour", nullptr);
     if (hourArg) {
@@ -653,6 +656,28 @@ int RunShotScene(int argc, char** argv) {
             return 1;
         }
         hour = h;
+    }
+    const char* weatherArg = ArgValue(argc, argv, "--weather", nullptr);
+    char weatherName[64] = {};
+    const char* weather = "EXTRASUNNY_LA";
+    if (weatherArg) {
+        size_t wlen = std::strlen(weatherArg);
+        bool wok = wlen > 0 && wlen < sizeof(weatherName);
+        for (size_t i = 0; wok && i < wlen; ++i) {
+            const char c = weatherArg[i];
+            wok = (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+        }
+        if (!wok) {
+            (void)std::printf("sceneshot-fail bad --weather '%s' (want SECTION like CLOUDY_LA)\n",
+                              weatherArg);
+            return 1;
+        }
+        (void)std::snprintf(weatherName, sizeof(weatherName), "%s", weatherArg);
+        weather = weatherName;
+    }
+    if (weatherArg && hour < 0) {
+        (void)std::printf("sceneshot-fail --weather needs --hour H (0-23)\n");
+        return 1;
     }
     const int width = 640;
     const int height = 480;
@@ -743,9 +768,9 @@ int RunShotScene(int argc, char** argv) {
     if (hour >= 0) {
         TimeCycleParams tcp{};
         char tcErr[256] = {};
-        if (!TimeCycle_LoadHour(gameDir.c_str(), hour, tcp, tcErr, sizeof(tcErr))) {
-            (void)std::printf("sceneshot-fail timecyc %s (game=%s hour=%d)\n", tcErr,
-                              gameDir.c_str(), hour);
+        if (!TimeCycle_LoadWeatherHour(gameDir.c_str(), weather, hour, tcp, tcErr, sizeof(tcErr))) {
+            (void)std::printf("sceneshot-fail timecyc %s (game=%s weather=%s hour=%d)\n", tcErr,
+                              gameDir.c_str(), weather, hour);
             SceneShot_Shutdown();
             eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
             eglDestroyContext(display, context);
@@ -761,9 +786,9 @@ int RunShotScene(int argc, char** argv) {
         }
         timeEnvPtr = &timeEnv;
         (void)std::printf(
-            "timecyc-load weather=EXTRASUNNY_LA hour=%d amb=%d,%d,%d dir=%d,%d,%d "
+            "timecyc-load weather=%s hour=%d amb=%d,%d,%d dir=%d,%d,%d "
             "skytop=%d,%d,%d skybot=%d,%d,%d suncore=%d,%d,%d sample=%s sunDir=fixed spec=off\n",
-            hour, tcp.amb[0], tcp.amb[1], tcp.amb[2], tcp.dir[0], tcp.dir[1], tcp.dir[2],
+            weather, hour, tcp.amb[0], tcp.amb[1], tcp.amb[2], tcp.dir[0], tcp.dir[1], tcp.dir[2],
             tcp.skyTop[0], tcp.skyTop[1], tcp.skyTop[2], tcp.skyBot[0], tcp.skyBot[1],
             tcp.skyBot[2], tcp.sunCore[0], tcp.sunCore[1], tcp.sunCore[2], tcp.sampleName
         );
