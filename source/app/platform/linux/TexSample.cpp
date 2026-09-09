@@ -499,6 +499,7 @@ struct RasterCtx {
     float* zbuf = nullptr;
     const WorldShotScene* scene = nullptr;
     TexFrameStats* st = nullptr;
+    const TexTimeEnv* env = nullptr; // null = legacy look (bit-for-bit)
 };
 
 void ShadeTri(const RasterTri& t, int imgIdx, const float* matCol, RasterCtx& ctx) {
@@ -570,6 +571,15 @@ void ShadeTri(const RasterTri& t, int imgIdx, const float* matCol, RasterCtx& ct
             // zo stores z/w per vertex; screen-space lerp of z/w IS the
             // fragment's ndc depth (dividing by den again would give z_clip).
             float shade = (l0 * t.so[0] + l1 * t.so[1] + l2 * t.so[2]) / den;
+            // Legacy: `shade` is the interpolated 0.32+0.68*NdotL grey
+            // factor. Timecyc: the `s` slot carries interpolated NdotL and
+            // the per-channel light is ambient+sun*NdotL from timecyc.dat.
+            float li[3] = { shade, shade, shade };
+            if (ctx.env) {
+                li[0] = ctx.env->amb[0] + ctx.env->sun[0] * shade;
+                li[1] = ctx.env->amb[1] + ctx.env->sun[1] * shade;
+                li[2] = ctx.env->amb[2] + ctx.env->sun[2] * shade;
+            }
             float r, g, b;
             if (img) {
                 float u = (l0 * t.uo[0] + l1 * t.uo[1] + l2 * t.uo[2]) / den;
@@ -613,9 +623,9 @@ void ShadeTri(const RasterTri& t, int imgIdx, const float* matCol, RasterCtx& ct
                 if (!(z < zslot)) {
                     continue;
                 }
-                r = shade * matCol[0] * (tx[0] / 255.0f);
-                g = shade * matCol[1] * (tx[1] / 255.0f);
-                b = shade * matCol[2] * (tx[2] / 255.0f);
+                r = li[0] * matCol[0] * (tx[0] / 255.0f);
+                g = li[1] * matCol[1] * (tx[1] / 255.0f);
+                b = li[2] * matCol[2] * (tx[2] / 255.0f);
                 ctx.zbuf[static_cast<size_t>(y) * ctx.w + x] = z;
                 ++ctx.st->texPixels;
                 if (ctx.st->haveFirst && ctx.st->firstPixel[0] == 0 &&
@@ -643,9 +653,9 @@ void ShadeTri(const RasterTri& t, int imgIdx, const float* matCol, RasterCtx& ct
                 if (!(z < zslot)) {
                     continue;
                 }
-                r = shade * 0.5f;
-                g = shade * 0.5f;
-                b = shade * 0.5f;
+                r = li[0] * 0.5f;
+                g = li[1] * 0.5f;
+                b = li[2] * 0.5f;
                 ctx.zbuf[static_cast<size_t>(y) * ctx.w + x] = z;
                 ++ctx.st->fallbackPixels;
                 uint8_t* dst = ctx.px + (static_cast<size_t>(y) * ctx.w + x) * 4;
@@ -662,9 +672,9 @@ void ShadeTri(const RasterTri& t, int imgIdx, const float* matCol, RasterCtx& ct
                 if (!(z < zslot)) {
                     continue;
                 }
-                r = shade * matCol[0];
-                g = shade * matCol[1];
-                b = shade * matCol[2];
+                r = li[0] * matCol[0];
+                g = li[1] * matCol[1];
+                b = li[2] * matCol[2];
                 ctx.zbuf[static_cast<size_t>(y) * ctx.w + x] = z;
                 ++ctx.st->flatPixels;
                 uint8_t* dst = ctx.px + (static_cast<size_t>(y) * ctx.w + x) * 4;
@@ -683,9 +693,12 @@ void ShadeTri(const RasterTri& t, int imgIdx, const float* matCol, RasterCtx& ct
 }
 
 // Submits one world-space triangle with UV/shade to clip + scan.
+// With a null env the `s` slot carries the legacy 0.32+0.68*NdotL factor;
+// with a timecyc env it carries raw max(NdotL,0) and ShadeTri applies the
+// per-channel ambient+sun light instead.
 void SubmitTri(const float* mvp, const float p[3][3], const float nrm[3][3], const float uv[3][2],
-               int imgIdx, const float* matCol, const float* light, int width, int height,
-               RasterCtx& ctx) {
+               int imgIdx, const float* matCol, const float* light, const TexTimeEnv* env,
+               int width, int height, RasterCtx& ctx) {
     ClipVert cv[3];
     for (int k = 0; k < 3; ++k) {
         float clip[4];
@@ -697,7 +710,11 @@ void SubmitTri(const float* mvp, const float p[3][3], const float nrm[3][3], con
         cv[k].u = uv[k][0];
         cv[k].v = uv[k][1];
         float d = nrm[k][0] * light[0] + nrm[k][1] * light[1] + nrm[k][2] * light[2];
-        cv[k].s = 0.32f + 0.68f * (d > 0.0f ? d : 0.0f);
+        if (env) {
+            cv[k].s = d > 0.0f ? d : 0.0f;
+        } else {
+            cv[k].s = 0.32f + 0.68f * (d > 0.0f ? d : 0.0f);
+        }
     }
     ClipVert poly[16];
     int m = ClipTriangle(cv, poly);
@@ -738,15 +755,40 @@ void SubmitTri(const float* mvp, const float p[3][3], const float nrm[3][3], con
 }
 
 void RenderScene(const WorldShotScene& scene, int width, int height, const float* mvp,
-                 bool spin, float angleRad, const float* center, std::vector<uint8_t>& outRGBA,
-                 TexFrameStats& stats) {
+                 bool spin, float angleRad, const float* center, const TexTimeEnv* env,
+                 std::vector<uint8_t>& outRGBA, TexFrameStats& stats) {
     outRGBA.resize(static_cast<size_t>(width) * static_cast<size_t>(height) * 4);
-    // Background matches the old GL clear color (0.05,0.07,0.12).
-    for (size_t i = 0; i < outRGBA.size(); i += 4) {
-        outRGBA[i] = 13;
-        outRGBA[i + 1] = 18;
-        outRGBA[i + 2] = 31;
-        outRGBA[i + 3] = 255;
+    if (env) {
+        // Timecyc sky: vertical SkyBot->SkyTop gradient, painted per pixel
+        // BEFORE geometry (bottom-up pixels: row 0 = frame bottom = SkyBot).
+        for (int y = 0; y < height; ++y) {
+            const float f =
+                height <= 1 ? 0.0f : static_cast<float>(y) / static_cast<float>(height - 1);
+            int ch[3];
+            for (int c = 0; c < 3; ++c) {
+                const float v = static_cast<float>(env->skyBot[c]) +
+                                (static_cast<float>(env->skyTop[c]) -
+                                 static_cast<float>(env->skyBot[c])) *
+                                    f;
+                int iv = static_cast<int>(v + 0.5f);
+                ch[c] = iv < 0 ? 0 : (iv > 255 ? 255 : iv);
+            }
+            uint8_t* row = outRGBA.data() + static_cast<size_t>(y) * width * 4;
+            for (int x = 0; x < width; ++x) {
+                row[x * 4 + 0] = static_cast<uint8_t>(ch[0]);
+                row[x * 4 + 1] = static_cast<uint8_t>(ch[1]);
+                row[x * 4 + 2] = static_cast<uint8_t>(ch[2]);
+                row[x * 4 + 3] = 255;
+            }
+        }
+    } else {
+        // Background matches the old GL clear color (0.05,0.07,0.12).
+        for (size_t i = 0; i < outRGBA.size(); i += 4) {
+            outRGBA[i] = 13;
+            outRGBA[i + 1] = 18;
+            outRGBA[i + 2] = 31;
+            outRGBA[i + 3] = 255;
+        }
     }
     std::vector<float> zbuf(static_cast<size_t>(width) * static_cast<size_t>(height), 1.0f);
     RasterCtx ctx;
@@ -756,6 +798,7 @@ void RenderScene(const WorldShotScene& scene, int width, int height, const float
     ctx.zbuf = zbuf.data();
     ctx.scene = &scene;
     ctx.st = &stats;
+    ctx.env = env;
     stats = TexFrameStats{};
     ctx.st = &stats;
     float light[3] = { 0.45f, -0.55f, 0.70f };
@@ -816,16 +859,37 @@ void RenderScene(const WorldShotScene& scene, int width, int height, const float
                 matCol[1] = mesh.triCol[t * 3 + 1];
                 matCol[2] = mesh.triCol[t * 3 + 2];
             }
-            SubmitTri(mvp, p, n, uv, imgIdx, matCol, light, width, height, ctx);
+            SubmitTri(mvp, p, n, uv, imgIdx, matCol, light, env, width, height, ctx);
         }
     }
 }
 
 } // namespace
 
+namespace {
+// Shared orbit camera; env == null keeps the legacy look bit-for-bit.
+void RenderOrbitImpl(const WorldShotScene& scene, int width, int height, float angleDeg,
+                     const float* eyeOverrideOrNull, const TexTimeEnv* env,
+                     std::vector<uint8_t>& outRGBA, TexFrameStats& stats);
+} // namespace
+
 void TexSample_RenderOrbit(const WorldShotScene& scene, int width, int height, float angleDeg,
                            const float* eyeOverrideOrNull, std::vector<uint8_t>& outRGBA,
                            TexFrameStats& stats) {
+    RenderOrbitImpl(scene, width, height, angleDeg, eyeOverrideOrNull, nullptr, outRGBA, stats);
+}
+
+void TexSample_RenderOrbitTC(const WorldShotScene& scene, int width, int height, float angleDeg,
+                             const float* eyeOverrideOrNull, const TexTimeEnv& env,
+                             std::vector<uint8_t>& outRGBA, TexFrameStats& stats) {
+    RenderOrbitImpl(scene, width, height, angleDeg, eyeOverrideOrNull, &env, outRGBA, stats);
+}
+
+namespace {
+
+void RenderOrbitImpl(const WorldShotScene& scene, int width, int height, float angleDeg,
+                     const float* eyeOverrideOrNull, const TexTimeEnv* env,
+                     std::vector<uint8_t>& outRGBA, TexFrameStats& stats) {
     float center[3] = {
         0.5f * (scene.bboxMin[0] + scene.bboxMax[0]),
         0.5f * (scene.bboxMin[1] + scene.bboxMax[1]),
@@ -864,9 +928,11 @@ void TexSample_RenderOrbit(const WorldShotScene& scene, int width, int height, f
     BuildView(eye, center, view);
     float mvp[16];
     Mul44(proj, view, mvp);
-    RenderScene(scene, width, height, mvp, true, angleDeg * 3.14159265f / 180.0f, center, outRGBA,
-                stats);
+    RenderScene(scene, width, height, mvp, true, angleDeg * 3.14159265f / 180.0f, center, env,
+                outRGBA, stats);
 }
+
+} // namespace
 
 void TexSample_RenderPath(const WorldShotScene& scene, int width, int height, const float eye[3],
                           const float target[3], std::vector<uint8_t>& outRGBA,
@@ -882,5 +948,5 @@ void TexSample_RenderPath(const WorldShotScene& scene, int width, int height, co
     float mvp[16];
     Mul44(proj, view, mvp);
     float origin[3] = { 0.0f, 0.0f, 0.0f };
-    RenderScene(scene, width, height, mvp, false, 0.0f, origin, outRGBA, stats);
+    RenderScene(scene, width, height, mvp, false, 0.0f, origin, nullptr, outRGBA, stats);
 }

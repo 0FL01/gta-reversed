@@ -71,15 +71,34 @@ struct TexFrameStats {
     bool haveFirst = false;
 };
 
+// Time-of-day lighting from timecyc.dat (R6m). amb/sun are 0..1 (Amb/Dir
+// bytes / 255); skyTop/skyBot are raw bytes for the background gradient.
+// The light direction is NOT part of this struct: it stays at the legacy
+// fixed vector (sunDir=fixed), and there is no specular term (spec=off).
+struct TexTimeEnv {
+    float amb[3] = { 0.0f, 0.0f, 0.0f };
+    float sun[3] = { 0.0f, 0.0f, 0.0f };
+    uint8_t skyTop[3] = { 0, 0, 0 };
+    uint8_t skyBot[3] = { 0, 0, 0 };
+};
+
 // Software rasterizer over a WorldShotScene (triangle soup + per-tri UV,
 // texture indices and material colors). Orbit = fit-sphere frustum +
 // Z-turntable (shot/scene modes); Path = fixed 60deg frustum along
 // eye->target (e2e mode). Output is bottom-up RGBA (glReadPixels layout)
 // so the existing TGA writer applies unchanged. Deterministic: fixed
 // traversal order, float math, no threads.
+//
+// The Render* variants with a null env keep the legacy look bit-for-bit
+// (solid clear-color background, shade = 0.32+0.68*NdotL). RenderOrbitTC
+// with a timecyc env paints the vertical SkyTop->SkyBot gradient first and
+// shades texel*(ambient+sun*NdotL) per channel instead.
 void TexSample_RenderOrbit(const WorldShotScene& scene, int width, int height, float angleDeg,
                            const float* eyeOverrideOrNull, std::vector<uint8_t>& outRGBA,
                            TexFrameStats& stats);
+void TexSample_RenderOrbitTC(const WorldShotScene& scene, int width, int height, float angleDeg,
+                             const float* eyeOverrideOrNull, const TexTimeEnv& env,
+                             std::vector<uint8_t>& outRGBA, TexFrameStats& stats);
 void TexSample_RenderPath(const WorldShotScene& scene, int width, int height, const float eye[3],
                           const float target[3], std::vector<uint8_t>& outRGBA,
                           TexFrameStats& stats);
