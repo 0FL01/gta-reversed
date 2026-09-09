@@ -51,6 +51,7 @@ using uint64 = uint64_t;
 #include "app/platform/linux/CrowdShot.h"
 #include "app/platform/linux/CsDuoShot.h"
 #include "app/platform/linux/TimeCycle.h"
+#include "app/platform/linux/WaterLevel.h"
 #include "app/platform/linux/DriveSim.h"
 #include "app/platform/linux/Handling.h"
 #include "app/platform/linux/WalkSim.h"
@@ -60,7 +61,7 @@ using uint64 = uint64_t;
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --shot-cs-duo <out.tga> | --csanim-seq <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--frames 5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --shot-cs-duo <out.tga> | --shot-water <out.tga> [--hour H] | --csanim-seq <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--frames 5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -454,6 +455,14 @@ void DrawWorldFrame(const WorldShotScene& scene, int width, int height, float an
     TexSample_RenderOrbit(scene, width, height, angleDeg, camEyeOverride, outPixels, stats);
 }
 
+// Forward declarations for the R6b path-frame helpers (defined below
+// RunShotScene; the R6aa water mode reuses the same fixed-frustum
+// eye->target CPU path over its water scene).
+void DrawE2EFrame(const WorldShotScene& scene, int width, int height, const float* eye,
+                  const float* target, std::vector<uint8>& outPixels, TexFrameStats& stats);
+uint64_t PixelsChecksum(const std::vector<uint8>& pixels, uint64_t& sumR, uint64_t& sumG,
+                        uint64_t& sumB, uint64_t& nonBlack);
+
 int RunShot(int argc, char** argv) {
     const char* outPath = ArgValue(argc, argv, "--shot", "out.tga");
     const char* framesArg = ArgValue(argc, argv, "--frames", "120");
@@ -624,6 +633,200 @@ int RunShot(int argc, char** argv) {
         static_cast<unsigned long long>(checksum)
     );
     WorldShot_Shutdown();
+    return 0;
+}
+
+// R6aa: real sea water from data/water.dat (round 29). Parses every water
+// row through OS_File* (water.dat slice only, water1.dat untouched),
+// colors the visible polys with the flat WaterRGBA bytes of the matching
+// EXTRASUNNY_LA timecyc row (--hour, default 12 = Midday), and renders one
+// CPU frame over the LA shore quad x[-1584,-1360] y[-1826,-1642] (z=0).
+// No procedural plane, no invented color: water-ok requires Wp>20000 exact
+// WaterRGBA pixels and fails otherwise (no TGA, no water-ok on any path).
+int RunShotWater(int argc, char** argv) {
+    const char* outPath = ArgValue(argc, argv, "--shot-water", "water.tga");
+    if (!outPath || outPath[0] == '\0') {
+        (void)std::printf("water-fail bad args shot-water='%s'\n",
+                           outPath ? outPath : "(null)");
+        return 1;
+    }
+    int hour = 12;
+    const char* hourArg = ArgValue(argc, argv, "--hour", nullptr);
+    if (hourArg) {
+        size_t len = std::strlen(hourArg);
+        bool digits = len > 0 && len <= 2;
+        for (size_t i = 0; digits && i < len; ++i) {
+            if (hourArg[i] < '0' || hourArg[i] > '9') {
+                digits = false;
+            }
+        }
+        int h = digits ? std::atoi(hourArg) : -1;
+        if (!digits || h < 0 || h > 23) {
+            (void)std::printf("water-fail bad --hour '%s' (want 0-23)\n", hourArg);
+            return 1;
+        }
+        hour = h;
+    }
+    const int width = 640;
+    const int height = 480;
+    auto getPlatformDisplay = reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(
+        eglGetProcAddress("eglGetPlatformDisplayEXT")
+    );
+    if (!getPlatformDisplay) {
+        (void)std::printf("water-fail no eglGetPlatformDisplayEXT\n");
+        return 1;
+    }
+#ifndef EGL_PLATFORM_SURFACELESS_MESA
+#define EGL_PLATFORM_SURFACELESS_MESA 0x31DD
+#endif
+    EGLDisplay display = getPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
+    if (display == EGL_NO_DISPLAY) {
+        (void)std::printf("water-fail no surfaceless display 0x%x\n", eglGetError());
+        return 1;
+    }
+    if (!eglInitialize(display, nullptr, nullptr)) {
+        (void)std::printf("water-fail egl init 0x%x\n", eglGetError());
+        return 1;
+    }
+    const EGLint configAttrs[] = {
+        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
+        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+        EGL_DEPTH_SIZE, 24,
+        EGL_NONE
+    };
+    EGLConfig config = nullptr;
+    EGLint configCount = 0;
+    if (!eglChooseConfig(display, configAttrs, &config, 1, &configCount) || configCount < 1) {
+        (void)std::printf("water-fail choose config 0x%x\n", eglGetError());
+        eglTerminate(display);
+        return 1;
+    }
+    const EGLint pbufferAttrs[] = { EGL_WIDTH, width, EGL_HEIGHT, height, EGL_NONE };
+    EGLSurface surface = eglCreatePbufferSurface(display, config, pbufferAttrs);
+    if (surface == EGL_NO_SURFACE) {
+        (void)std::printf("water-fail pbuffer 0x%x\n", eglGetError());
+        eglTerminate(display);
+        return 1;
+    }
+    (void)eglBindAPI(EGL_OPENGL_API);
+    EGLContext context = eglCreateContext(display, config, EGL_NO_CONTEXT, nullptr);
+    if (context == EGL_NO_CONTEXT) {
+        (void)std::printf("water-fail context 0x%x\n", eglGetError());
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    if (!eglMakeCurrent(display, surface, surface, context)) {
+        (void)std::printf("water-fail make current 0x%x\n", eglGetError());
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    const char* glVersion = reinterpret_cast<const char*>(glGetString(GL_VERSION));
+    (void)std::printf("water-gl %s\n", glVersion ? glVersion : "(null)");
+    std::string gameDir = ResolveGameDir(argc, argv);
+    WaterLevelData water{};
+    char waterErr[512] = {};
+    if (!WaterLevel_Load(gameDir.c_str(), water, waterErr, sizeof(waterErr))) {
+        (void)std::printf("water-fail load %s (game=%s)\n", waterErr, gameDir.c_str());
+        WaterLevel_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    (void)std::printf(
+        "water-load rows=%d quads=%d tris=%d invis=%d skipped=%d file=data/water.dat "
+        "water1=untouched bbox=[%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f]\n",
+        water.rows, water.quads, water.tris, water.invis, water.skipped,
+        water.bboxMin[0], water.bboxMin[1], water.bboxMin[2], water.bboxMax[0],
+        water.bboxMax[1], water.bboxMax[2]);
+    TimeCycleParams tcp{};
+    char tcErr[256] = {};
+    if (!TimeCycle_LoadHour(gameDir.c_str(), hour, tcp, tcErr, sizeof(tcErr))) {
+        (void)std::printf("water-fail timecyc %s (game=%s hour=%d)\n", tcErr,
+                          gameDir.c_str(), hour);
+        WaterLevel_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    (void)std::printf(
+        "timecyc-load weather=EXTRASUNNY_LA hour=%d amb=%d,%d,%d dir=%d,%d,%d "
+        "skytop=%d,%d,%d skybot=%d,%d,%d suncore=%d,%d,%d sample=%s sunDir=fixed spec=off\n",
+        hour, tcp.amb[0], tcp.amb[1], tcp.amb[2], tcp.dir[0], tcp.dir[1], tcp.dir[2],
+        tcp.skyTop[0], tcp.skyTop[1], tcp.skyTop[2], tcp.skyBot[0], tcp.skyBot[1],
+        tcp.skyBot[2], tcp.sunCore[0], tcp.sunCore[1], tcp.sunCore[2], tcp.sampleName);
+    (void)std::printf("waterColor=%d,%d,%d,%d\n", tcp.water[0], tcp.water[1],
+                      tcp.water[2], tcp.water[3]);
+    WorldShotScene scene{};
+    int waterTris = 0;
+    char buildErr[256] = {};
+    if (!WaterLevel_BuildScene(water, tcp.water, scene, waterTris, buildErr,
+                               sizeof(buildErr))) {
+        (void)std::printf("water-fail build %s\n", buildErr);
+        WaterLevel_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    // Fixed camera over the LA shore quad x[-1584,-1360] y[-1826,-1642]
+    // (z=0, first water.dat row): steep 70deg-down tilt (Z-up lookAt
+    // degenerates at nadir, so never exactly straight down).
+    const float eye[3] = { -1470.0f, -1760.0f, 110.0f };
+    const float target[3] = { -1470.0f, -1720.0f, 0.0f };
+    (void)std::printf("waterCam=eye=%.1f,%.1f,%.1f target=%.1f,%.1f,%.1f fov=60\n",
+                      eye[0], eye[1], eye[2], target[0], target[1], target[2]);
+    std::vector<uint8> pixels;
+    TexFrameStats texStats{};
+    DrawE2EFrame(scene, width, height, eye, target, pixels, texStats);
+    uint64_t sumR = 0;
+    uint64_t sumG = 0;
+    uint64_t sumB = 0;
+    uint64_t nonBlack = 0;
+    uint64_t checksum = PixelsChecksum(pixels, sumR, sumG, sumB, nonBlack);
+    const long waterPixels =
+        WaterLevel_CountExact(pixels, tcp.water[0], tcp.water[1], tcp.water[2]);
+    (void)std::printf(
+        "texwater-ok tris=%d sampledTri=%d texelFetch=%ld greyFallback=%d flatTri=%d "
+        "texPixels=%ld flatPixels=%ld firstTex=- render=cpu shared-z=1\n",
+        texStats.tris, texStats.sampledTri, texStats.texelFetch, texStats.fallbackTri,
+        texStats.flatTri, texStats.texPixels, texStats.flatPixels);
+    if (waterPixels <= 20000) {
+        (void)std::printf("water-fail dry frame waterPixels=%ld (want >20000)\n",
+                          waterPixels);
+        WaterLevel_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    if (!WriteTga24(outPath, width, height, pixels)) {
+        (void)std::printf("water-fail write '%s'\n", outPath);
+        WaterLevel_Shutdown();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    eglDestroyContext(display, context);
+    eglDestroySurface(display, surface);
+    eglTerminate(display);
+    OS_DebugOut("mad-sa-linux water shot");
+    (void)std::printf(
+        "water-ok quads=%d rendered=%d waterPixels=%ld checksum=%llu\n", water.rows,
+        waterTris, waterPixels, static_cast<unsigned long long>(checksum));
+    WaterLevel_Shutdown();
     return 0;
 }
 
@@ -5111,6 +5314,9 @@ int main(int argc, char** argv) {
     }
     if (HasArg(argc, argv, "--shot-cs-duo")) {
         return RunShotCsDuo(argc, argv);
+    }
+    if (HasArg(argc, argv, "--shot-water")) {
+        return RunShotWater(argc, argv);
     }
     if (HasArg(argc, argv, "--shot-cs-anim")) {
         return RunShotCsAnim(argc, argv);
