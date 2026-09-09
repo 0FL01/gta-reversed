@@ -462,3 +462,183 @@ bool HudShot_RenderWeatherHourFog(const char* gameDir, int health, int armor, co
 void HudShot_Shutdown() {
     ShoreShot_Shutdown();
 }
+
+// Round 43 (R6ao): drive-HUD assets + blit. Same texel sources and same
+// integer blit math as HudShot_RenderWeatherHourFog sections 2-4 (hud.txd
+// radardisc-or-first-decoded selection, font2 HUD font, BlitBar with the
+// game tints, MenuShot_DrawTextRight two-pass shadow+ink). No shore base.
+bool HudShot_LoadDriveAssets(const char* gameDir, HudDriveAssets& out, char* err,
+                             std::size_t errSize) {
+    out = HudDriveAssets{};
+    if (!gameDir || !gameDir[0]) {
+        SetErr(err, errSize, "no game dir");
+        return false;
+    }
+    OS_SetFilePathOffset(gameDir);
+    std::vector<uint8> txdBytes;
+    if (!ReadWholeFile("models/hud.txd", txdBytes) || txdBytes.empty()) {
+        SetErr(err, errSize, "cannot read models/hud.txd");
+        return false;
+    }
+    if (!HudShotRwInit()) {
+        SetErr(err, errSize, "librw Engine::init failed");
+        return false;
+    }
+    rw::StreamMemory stream;
+    stream.open(txdBytes.data(), static_cast<uint32>(txdBytes.size()));
+    rw::TexDictionary* txd = nil;
+    if (rw::findChunk(&stream, rw::ID_TEXDICTIONARY, nil, nil)) {
+        txd = rw::TexDictionary::streamRead(&stream);
+    }
+    stream.close();
+    if (!txd) {
+        SetErr(err, errSize, "hud.txd parse failed");
+        return false;
+    }
+    struct NamedImg {
+        char name[32] = {};
+        TexImage img;
+        bool decoded = false;
+    };
+    std::vector<NamedImg> named;
+    FORLIST(link, txd->textures) {
+        rw::Texture* t = LLLinkGetData(link, rw::Texture, inDict);
+        NamedImg ni;
+        (void)std::snprintf(ni.name, sizeof(ni.name), "%s", t->name);
+        TexImage img;
+        if (TexSample_Decode(t, img) && !img.rgba.empty()) {
+            ni.img = std::move(img);
+            ni.decoded = true;
+        }
+        named.push_back(std::move(ni));
+    }
+    const char* wantBars[] = { "healthbar", "armourbar", "armorbar", "health",
+                               "armour",    "armor",     "bar",      nullptr };
+    const TexImage* barImg = nullptr;
+    {
+        const TexImage* fallback = nullptr;
+        const TexImage* radardisc = nullptr;
+        const char* fallbackName = nullptr;
+        const char* radarName = nullptr;
+        for (const NamedImg& ni : named) {
+            if (!ni.decoded) {
+                continue;
+            }
+            if (!fallback) {
+                fallback = &ni.img;
+                fallbackName = ni.name;
+            }
+            char low[32] = {};
+            Lower32(ni.name, low);
+            if (std::strcmp(low, "radardisc") == 0 && !radardisc) {
+                radardisc = &ni.img;
+                radarName = ni.name;
+            }
+            for (int w = 0; wantBars[w]; ++w) {
+                if (std::strcmp(low, wantBars[w]) == 0) {
+                    barImg = &ni.img;
+                    (void)std::snprintf(out.barTex, sizeof(out.barTex), "%s", ni.name);
+                    break;
+                }
+            }
+            if (barImg) {
+                break;
+            }
+        }
+        if (!barImg && radardisc) {
+            barImg = radardisc;
+            (void)std::snprintf(out.barTex, sizeof(out.barTex), "%s", radarName);
+        }
+        if (!barImg && fallback) {
+            barImg = fallback;
+            (void)std::snprintf(out.barTex, sizeof(out.barTex), "%s", fallbackName);
+        }
+    }
+    int decodable = 0;
+    for (const NamedImg& ni : named) {
+        if (ni.decoded) {
+            ++decodable;
+        }
+    }
+    out.sprites = decodable;
+    if (!barImg) {
+        SetErr(err, errSize, "hud.txd has no decodable sprite for bars");
+        txd->destroy();
+        return false;
+    }
+    out.barW = barImg->w;
+    out.barH = barImg->h;
+    out.bar = *barImg;
+    txd->destroy();
+    {
+        char ferr[512] = {};
+        if (!MenuShot_LoadHudFont(gameDir, out.font, ferr, sizeof(ferr))) {
+            char msg[640];
+            (void)std::snprintf(msg, sizeof(msg), "hud font: %s", ferr);
+            SetErr(err, errSize, msg);
+            return false;
+        }
+    }
+    return true;
+}
+
+int HudShot_BlitDriveHud(std::vector<uint8_t>& px, const HudDriveAssets& assets, int health,
+                         int armor, int hour, const char* spdText) {
+    if (px.size() != static_cast<std::size_t>(kFbW) * kFbH * 4) {
+        return -1;
+    }
+    if (assets.bar.rgba.empty() || !assets.font.ok) {
+        return -1;
+    }
+    if (health < 0 || health > 255 || armor < 0 || armor > 255) {
+        return -1;
+    }
+    if (hour < 0 || hour > 23) {
+        return -1;
+    }
+    const int hc = health > 100 ? 100 : health;
+    const int ac = armor > 100 ? 100 : armor;
+    const int fillW1 = (hc * kHealthMaxW + 50) / 100;
+    const int fillW2 = (ac * kArmourMaxW + 50) / 100;
+    BlitBar(px, assets.bar, kHealthX0, kHealthY0, kHealthMaxW, kBarH, fillW1, kHealthTint);
+    BlitBar(px, assets.bar, kArmourX0, kArmourY0, kArmourMaxW, kBarH, fillW2, kArmourTint);
+    char hText[16] = {};
+    char aText[16] = {};
+    char clockText[16] = {};
+    (void)std::snprintf(hText, sizeof(hText), "%d", health);
+    (void)std::snprintf(aText, sizeof(aText), "%d", armor);
+    (void)std::snprintf(clockText, sizeof(clockText), "%02d:00", hour);
+    (void)MenuShot_DrawTextRight(px, kFbW, kFbH, assets.font, hText, kHealthX0 - kDigitGap,
+                                 kHealthY0 - 6, kDigitH, 0, 0, 0);
+    (void)MenuShot_DrawTextRight(px, kFbW, kFbH, assets.font, aText, kArmourX0 - kDigitGap,
+                                 kArmourY0 - 6, kDigitH, 0, 0, 0);
+    (void)MenuShot_DrawTextRight(px, kFbW, kFbH, assets.font, clockText, kRight, kClockY0,
+                                 kClockH, 0, 0, 0);
+    (void)MenuShot_DrawTextRight(px, kFbW, kFbH, assets.font, hText, kHealthX0 - kDigitGap - 1,
+                                 kHealthY0 - 7, kDigitH, 255, 255, 255);
+    (void)MenuShot_DrawTextRight(px, kFbW, kFbH, assets.font, aText, kArmourX0 - kDigitGap - 1,
+                                 kArmourY0 - 7, kDigitH, 255, 255, 255);
+    (void)MenuShot_DrawTextRight(px, kFbW, kFbH, assets.font, clockText, kRight - 1,
+                                 kClockY0 - 1, kClockH, 255, 255, 255);
+    if (!spdText || !spdText[0]) {
+        return 0;
+    }
+    // SPD row below the clock: same right edge, same two-pass order.
+    // NOTE: MenuShot_DrawTextRight counts ink glyphs only (space advances
+    // without ink, as in the R6ah zone label where glyphs=12 but ink=11).
+    (void)MenuShot_DrawTextRight(px, kFbW, kFbH, assets.font, spdText, kDriveHudSpdRight,
+                                 kDriveHudSpdTop, kDriveHudSpdH, 0, 0, 0);
+    const int ink = MenuShot_DrawTextRight(px, kFbW, kFbH, assets.font, spdText,
+                                           kDriveHudSpdRight - 1, kDriveHudSpdTop - 1,
+                                           kDriveHudSpdH, 255, 255, 255);
+    int wantInk = 0;
+    for (const char* p = spdText; *p; ++p) {
+        if (*p != ' ') {
+            ++wantInk;
+        }
+    }
+    if (ink != wantInk || wantInk <= 0) {
+        return -1;
+    }
+    return ink;
+}

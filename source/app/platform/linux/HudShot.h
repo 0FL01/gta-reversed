@@ -28,6 +28,7 @@
 #include <string>
 #include <vector>
 
+#include "app/platform/linux/MenuShot.h"
 #include "app/platform/linux/ShoreShot.h"
 #include "app/platform/linux/TexSample.h"
 
@@ -102,7 +103,39 @@ bool HudShot_RenderWeatherHour(const char* gameDir, int health, int armor, const
 // overlay on top is unfogged (base-only order). wantFog=false is
 // bit-identical to HudShot_RenderWeatherHour.
 bool HudShot_RenderWeatherHourFog(const char* gameDir, int health, int armor, const char* weather,
-                                  int hour, bool wantFog, std::vector<uint8_t>& basePixels,
-                                  std::vector<uint8_t>& hudPixels, HudShotStats& stats, char* err,
-                                  std::size_t errSize);
+                                   int hour, bool wantFog, std::vector<uint8_t>& basePixels,
+                                   std::vector<uint8_t>& hudPixels, HudShotStats& stats, char* err,
+                                   std::size_t errSize);
+// Round 43 (R6ao): drive-HUD overlay assets + blit for --drive --hud.
+// Loads the SAME bar backing (hud.txd radardisc-or-first-decoded selection)
+// and the SAME font2 HUD font as HudShot_RenderWeatherHourFog, without
+// rendering any shore base. HudShot_BlitDriveHud paints the SAME
+// health/armour bars + H/A digits + clock ("%02d:00" of hour) as the HudShot
+// overlay plus one extra right-aligned SPD readout (font2 texels, same
+// two-pass shadow+ink order) onto a 640x480 bottom-up RGBA drive frame in
+// place. No procedural glyphs: every bar texel is hud.txd bytes, every digit
+// is font2 bytes. Without these calls HudShot_Render* output is untouched.
+struct HudDriveAssets {
+    TexImage bar; // decoded bar backing texels (hud.txd bytes)
+    char barTex[32] = {}; // backing sprite name (want "radardisc")
+    int barW = 0;
+    int barH = 0;
+    MenuHudFont font; // font2 HUD font (fonts.txd + fonts.dat bytes)
+    int sprites = 0; // decodable hud.txd sprites counted (want 69)
+};
+bool HudShot_LoadDriveAssets(const char* gameDir, HudDriveAssets& out, char* err,
+                             std::size_t errSize);
+// Fixed drive-HUD layout at 640x480 (top-down): same right edge / bar boxes
+// / digit + clock rows as the HudShot overlay, SPD row below the clock.
+constexpr int kDriveHudHealth = 137;
+constexpr int kDriveHudArmor = 60;
+constexpr int kDriveHudHour = 12;
+constexpr int kDriveHudSpdRight = 608;
+constexpr int kDriveHudSpdTop = 80;
+constexpr int kDriveHudSpdH = 24;
+// Blits bars + H/A digits + clock + spdText (nullable, e.g. "SPD 016").
+// Returns font2 ink glyphs drawn for spdText (0 when null/empty); fails
+// honestly (returns -1) when the SPD row draws no ink.
+int HudShot_BlitDriveHud(std::vector<uint8_t>& px, const HudDriveAssets& assets, int health,
+                         int armor, int hour, const char* spdText);
 void HudShot_Shutdown();
