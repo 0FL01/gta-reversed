@@ -179,6 +179,15 @@ bool RwInitEngine() {
     if (s_rwInit) {
         return true;
     }
+    // Tolerant across slices in one process (DuoShot composes CarPose +
+    // IfpAnim, which register the identical plugin set): when another
+    // slice already brought the engine up, reuse it instead of failing
+    // (check first to avoid the librw RWERROR print on double init).
+    if (rw::Engine::state != rw::Engine::Dead) {
+        rw::Texture::setLoadTextures(false);
+        s_rwInit = true;
+        return true;
+    }
     if (!rw::Engine::init(nil)) {
         return false;
     }
