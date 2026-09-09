@@ -50,6 +50,30 @@ struct GameShotStats {
     long radarPixels = 0; // disc pixels copied into the game frame (want >20000)
 };
 
+// Round 47 (R6as): shared 1:1 radar-disc blit (game layout + drive-hud path).
+// Source disc center (RadarMap frame, top-down) and destination disc center
+// (game/HUD frame, top-down) are the retail geometry from GameShot.h:
+// kRadarSrcCx/kRadarSrcCy = 320,240 (RadarMap.cpp kDiscCx/kDiscCy),
+// kGameRadarDstCx/kGameRadarDstCy = 87,409 (CHud::DrawRadar /
+// TransformRadarPointToScreenSpace at 640x480). Copies every in-circle texel
+// 1:1 with clipping, no resampling, no procedural pixels. Used by
+// GameShot_RenderWeatherHourFog below and by RunDrive --radar (same composite
+// path, different disc center world coords via RadarMap_Render).
+constexpr int kGameRadarDstCx = 87;
+constexpr int kGameRadarDstCy = 409;
+constexpr int kRadarSrcCx = 320;
+constexpr int kRadarSrcCy = 240;
+constexpr int kFbWGame = 640;
+constexpr int kFbHGame = 480;
+
+// Blits the radar disc from radarFull (640x480 bottom-up RGBA from
+// RadarMap_Render) into dst (640x480 bottom-up RGBA) in place. discR is the
+// RadarMap disc radius. copiedOut counts in-circle pixels written (want
+// >20000). Returns false with err set on bad sizes; never modifies dst on
+// failure.
+bool GameShot_BlitRadarDisc(std::vector<uint8_t>& dst, const std::vector<uint8_t>& radarFull,
+                            int discR, long& copiedOut, char* err, std::size_t errSize);
+
 // Bit-identical etalons the composition MUST reproduce (gates, not inputs):
 // shore base (round 31), HUD overlay at default 137/60 (round 32), radar disc
 // at the pier 836,-1866 (round 33).
