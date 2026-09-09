@@ -1357,3 +1357,365 @@ void TexSample_RenderDuo(const WorldShotScene& scene, int carMeshes, int width, 
     duo.pedPixels = pedPx;
     duo.overlap = ov;
 }
+
+// --- Crowd render (R6u): shared-depth 3-actor frame, Duo generalised ---
+// Duplicates the Duo shading math exactly (same light, same background,
+// same wrap/alpha/depth rules); the ONLY change is three per-pixel
+// coverage bits + winner id in {0,1,2}. The Duo path above is untouched.
+
+namespace {
+
+struct CrowdCtx {
+    RasterCtx base;
+    uint8_t* cov[3] = { nullptr, nullptr, nullptr }; // per-actor coverage
+    int8_t* win = nullptr; // per-pixel depth winner: -1 bg, 0/1/2 actor
+};
+
+void ShadeTriCrowd(const RasterTri& t, int imgIdx, const float* matCol, CrowdCtx& dctx,
+                   int actor) {
+    RasterCtx& ctx = dctx.base;
+    const WorldShotImage* img = imgIdx >= 0 ? &ctx.scene->images[imgIdx] : nullptr;
+    uint32_t filter = img ? img->filter : 0;
+    uint32_t uMode = (filter >> 8) & 0xF;
+    uint32_t vMode = (filter >> 12) & 0xF;
+    float minX = t.sx[0], maxX = t.sx[0], minY = t.sy[0], maxY = t.sy[0];
+    for (int k = 1; k < 3; ++k) {
+        if (t.sx[k] < minX) {
+            minX = t.sx[k];
+        }
+        if (t.sx[k] > maxX) {
+            maxX = t.sx[k];
+        }
+        if (t.sy[k] < minY) {
+            minY = t.sy[k];
+        }
+        if (t.sy[k] > maxY) {
+            maxY = t.sy[k];
+        }
+    }
+    int x0 = static_cast<int>(std::floor(minX));
+    int x1 = static_cast<int>(std::ceil(maxX));
+    int y0 = static_cast<int>(std::floor(minY));
+    int y1 = static_cast<int>(std::ceil(maxY));
+    if (x0 < 0) {
+        x0 = 0;
+    }
+    if (y0 < 0) {
+        y0 = 0;
+    }
+    if (x1 > ctx.w) {
+        x1 = ctx.w;
+    }
+    if (y1 > ctx.h) {
+        y1 = ctx.h;
+    }
+    if (x0 >= x1 || y0 >= y1) {
+        return;
+    }
+    float area =
+        (t.sx[1] - t.sx[0]) * (t.sy[2] - t.sy[0]) - (t.sx[2] - t.sx[0]) * (t.sy[1] - t.sy[0]);
+    if (area == 0.0f) {
+        return;
+    }
+    for (int y = y0; y < y1; ++y) {
+        for (int x = x0; x < x1; ++x) {
+            float px = static_cast<float>(x) + 0.5f;
+            float py = static_cast<float>(y) + 0.5f;
+            float e0 = (t.sx[1] - t.sx[0]) * (py - t.sy[0]) - (t.sy[1] - t.sy[0]) * (px - t.sx[0]);
+            float e1 = (t.sx[2] - t.sx[1]) * (py - t.sy[1]) - (t.sy[2] - t.sy[1]) * (px - t.sx[1]);
+            float e2 = (t.sx[0] - t.sx[2]) * (py - t.sy[2]) - (t.sy[0] - t.sy[2]) * (px - t.sx[2]);
+            if (!((e0 >= 0.0f && e1 >= 0.0f && e2 >= 0.0f) ||
+                  (e0 <= 0.0f && e1 <= 0.0f && e2 <= 0.0f))) {
+                continue;
+            }
+            float l0 = e1 / area;
+            float l1 = e2 / area;
+            float l2 = e0 / area;
+            float den = l0 * t.o[0] + l1 * t.o[1] + l2 * t.o[2];
+            if (den <= 1e-12f) {
+                continue;
+            }
+            const size_t pix = static_cast<size_t>(y) * ctx.w + x;
+            // Projected: valid fragment for this actor, before the depth
+            // test (even on alpha-cutout below). Overlap counts below use
+            // these bits; the shared zbuf decides the visible winner.
+            if (actor >= 0 && actor < 3) {
+                dctx.cov[actor][pix] = 1;
+            }
+            float z = l0 * t.zo[0] + l1 * t.zo[1] + l2 * t.zo[2];
+            float shade = (l0 * t.so[0] + l1 * t.so[1] + l2 * t.so[2]) / den;
+            float li[3] = { shade, shade, shade };
+            float r, g, b;
+            if (img) {
+                float u = (l0 * t.uo[0] + l1 * t.uo[1] + l2 * t.uo[2]) / den;
+                float v = (l0 * t.vo[0] + l1 * t.vo[1] + l2 * t.vo[2]) / den;
+                if (!ctx.st->haveUV) {
+                    ctx.st->uvMin[0] = ctx.st->uvMax[0] = u;
+                    ctx.st->uvMin[1] = ctx.st->uvMax[1] = v;
+                    ctx.st->haveUV = true;
+                } else {
+                    if (u < ctx.st->uvMin[0]) {
+                        ctx.st->uvMin[0] = u;
+                    }
+                    if (u > ctx.st->uvMax[0]) {
+                        ctx.st->uvMax[0] = u;
+                    }
+                    if (v < ctx.st->uvMin[1]) {
+                        ctx.st->uvMin[1] = v;
+                    }
+                    if (v > ctx.st->uvMax[1]) {
+                        ctx.st->uvMax[1] = v;
+                    }
+                }
+                bool bh = false;
+                int ix = WrapAxis(u, img->w, uMode, bh);
+                int iy = WrapAxis(v, img->h, vMode, bh);
+                const uint8_t* tx = img->rgba.data() + (static_cast<size_t>(iy) * img->w + ix) * 4;
+                ++ctx.st->texelFetch;
+                if (!ctx.st->haveFirst) {
+                    (void)std::snprintf(ctx.st->firstTex, sizeof(ctx.st->firstTex), "%s",
+                                        img->name);
+                    ctx.st->firstTexel[0] = tx[0];
+                    ctx.st->firstTexel[1] = tx[1];
+                    ctx.st->firstTexel[2] = tx[2];
+                    ctx.st->firstTexel[3] = tx[3];
+                    ctx.st->haveFirst = true;
+                }
+                if (tx[3] < 128) {
+                    continue;
+                }
+                if (!(z < ctx.zbuf[pix])) {
+                    continue;
+                }
+                r = li[0] * matCol[0] * (tx[0] / 255.0f);
+                g = li[1] * matCol[1] * (tx[1] / 255.0f);
+                b = li[2] * matCol[2] * (tx[2] / 255.0f);
+                ctx.zbuf[pix] = z;
+                ++ctx.st->texPixels;
+                uint8_t* dst = ctx.px + pix * 4;
+                int ri = static_cast<int>(r * 255.0f + 0.5f);
+                int gi = static_cast<int>(g * 255.0f + 0.5f);
+                int bi = static_cast<int>(b * 255.0f + 0.5f);
+                dst[0] = static_cast<uint8_t>(ri < 0 ? 0 : (ri > 255 ? 255 : ri));
+                dst[1] = static_cast<uint8_t>(gi < 0 ? 0 : (gi > 255 ? 255 : gi));
+                dst[2] = static_cast<uint8_t>(bi < 0 ? 0 : (bi > 255 ? 255 : bi));
+                dst[3] = 255;
+                if (ctx.st->haveFirst && ctx.st->firstPixel[0] == 0 &&
+                    ctx.st->firstPixel[1] == 0 && ctx.st->firstPixel[2] == 0) {
+                    ctx.st->firstPixel[0] = dst[0];
+                    ctx.st->firstPixel[1] = dst[1];
+                    ctx.st->firstPixel[2] = dst[2];
+                }
+                dctx.win[pix] = static_cast<int8_t>(actor);
+            } else if (imgIdx == -2) {
+                if (!(z < ctx.zbuf[pix])) {
+                    continue;
+                }
+                r = li[0] * 0.5f;
+                g = li[1] * 0.5f;
+                b = li[2] * 0.5f;
+                ctx.zbuf[pix] = z;
+                ++ctx.st->fallbackPixels;
+                uint8_t* dst = ctx.px + pix * 4;
+                int ri = static_cast<int>(r * 255.0f + 0.5f);
+                int gi = static_cast<int>(g * 255.0f + 0.5f);
+                int bi = static_cast<int>(b * 255.0f + 0.5f);
+                dst[0] = static_cast<uint8_t>(ri < 0 ? 0 : (ri > 255 ? 255 : ri));
+                dst[1] = static_cast<uint8_t>(gi < 0 ? 0 : (gi > 255 ? 255 : gi));
+                dst[2] = static_cast<uint8_t>(bi < 0 ? 0 : (bi > 255 ? 255 : bi));
+                dst[3] = 255;
+                dctx.win[pix] = static_cast<int8_t>(actor);
+            } else {
+                if (!(z < ctx.zbuf[pix])) {
+                    continue;
+                }
+                r = li[0] * matCol[0];
+                g = li[1] * matCol[1];
+                b = li[2] * matCol[2];
+                ctx.zbuf[pix] = z;
+                ++ctx.st->flatPixels;
+                uint8_t* dst = ctx.px + pix * 4;
+                int ri = static_cast<int>(r * 255.0f + 0.5f);
+                int gi = static_cast<int>(g * 255.0f + 0.5f);
+                int bi = static_cast<int>(b * 255.0f + 0.5f);
+                dst[0] = static_cast<uint8_t>(ri < 0 ? 0 : (ri > 255 ? 255 : ri));
+                dst[1] = static_cast<uint8_t>(gi < 0 ? 0 : (gi > 255 ? 255 : gi));
+                dst[2] = static_cast<uint8_t>(bi < 0 ? 0 : (bi > 255 ? 255 : bi));
+                dst[3] = 255;
+                dctx.win[pix] = static_cast<int8_t>(actor);
+            }
+        }
+    }
+}
+
+void SubmitTriCrowd(const float* mvp, const float p[3][3], const float nrm[3][3],
+                    const float uv[3][2], int imgIdx, const float* matCol, const float* light,
+                    int width, int height, CrowdCtx& dctx, int actor) {
+    ClipVert cv[3];
+    for (int k = 0; k < 3; ++k) {
+        float clip[4];
+        XformPoint(mvp, p[k], clip);
+        cv[k].x = clip[0];
+        cv[k].y = clip[1];
+        cv[k].z = clip[2];
+        cv[k].w = clip[3];
+        cv[k].u = uv[k][0];
+        cv[k].v = uv[k][1];
+        float d = nrm[k][0] * light[0] + nrm[k][1] * light[1] + nrm[k][2] * light[2];
+        cv[k].s = 0.32f + 0.68f * (d > 0.0f ? d : 0.0f);
+    }
+    ClipVert poly[16];
+    int m = ClipTriangle(cv, poly);
+    if (m < 3) {
+        return;
+    }
+    RasterCtx& ctx = dctx.base;
+    ++ctx.st->tris;
+    if (imgIdx >= 0) {
+        ++ctx.st->sampledTri;
+    } else if (imgIdx == -2) {
+        ++ctx.st->fallbackTri;
+    } else {
+        ++ctx.st->flatTri;
+    }
+    for (int i = 1; i + 1 < m; ++i) {
+        const ClipVert* q[3] = { &poly[0], &poly[i], &poly[i + 1] };
+        RasterTri t;
+        bool bad = false;
+        for (int k = 0; k < 3; ++k) {
+            if (q[k]->w <= 1e-9f) {
+                bad = true;
+                break;
+            }
+            float inv = 1.0f / q[k]->w;
+            t.sx[k] = (q[k]->x * inv * 0.5f + 0.5f) * width;
+            t.sy[k] = (q[k]->y * inv * 0.5f + 0.5f) * height;
+            t.o[k] = inv;
+            t.uo[k] = q[k]->u * inv;
+            t.vo[k] = q[k]->v * inv;
+            t.so[k] = q[k]->s * inv;
+            t.zo[k] = q[k]->z * inv;
+        }
+        if (bad) {
+            continue;
+        }
+        ShadeTriCrowd(t, imgIdx, matCol, dctx, actor);
+    }
+}
+
+} // namespace
+
+void TexSample_RenderCrowd(const WorldShotScene& scene, int meshEnd0, int meshEnd1, int width,
+                           int height, const float eye[3], const float target[3],
+                           std::vector<uint8_t>& outRGBA, TexFrameStats& stats,
+                           TexCrowdStats& crowd) {
+    crowd = TexCrowdStats{};
+    stats = TexFrameStats{};
+    outRGBA.resize(static_cast<size_t>(width) * static_cast<size_t>(height) * 4);
+    for (size_t i = 0; i < outRGBA.size(); i += 4) {
+        outRGBA[i] = 13;
+        outRGBA[i + 1] = 18;
+        outRGBA[i + 2] = 31;
+        outRGBA[i + 3] = 255;
+    }
+    const size_t npix = static_cast<size_t>(width) * static_cast<size_t>(height);
+    std::vector<float> zbuf(npix, 1.0f);
+    std::vector<uint8_t> cov0(npix, 0), cov1(npix, 0), cov2(npix, 0);
+    std::vector<int8_t> win(npix, -1);
+    CrowdCtx dctx;
+    dctx.base.w = width;
+    dctx.base.h = height;
+    dctx.base.px = outRGBA.data();
+    dctx.base.zbuf = zbuf.data();
+    dctx.base.scene = &scene;
+    dctx.base.st = &stats;
+    dctx.base.env = nullptr;
+    dctx.cov[0] = cov0.data();
+    dctx.cov[1] = cov1.data();
+    dctx.cov[2] = cov2.data();
+    dctx.win = win.data();
+    float aspect = static_cast<float>(width) / static_cast<float>(height);
+    const float nearPlane = 1.0f;
+    const float farPlane = 6000.0f;
+    const float halfH = nearPlane * 0.57735027f;
+    float proj[16];
+    BuildFrustum(-halfH * aspect, halfH * aspect, -halfH, halfH, nearPlane, farPlane, proj);
+    float view[16];
+    BuildView(eye, target, view);
+    float mvp[16];
+    Mul44(proj, view, mvp);
+    float light[3] = { 0.45f, -0.55f, 0.70f };
+    Normalize3f(light);
+    const int nMesh = static_cast<int>(scene.meshes.size());
+    int e0 = meshEnd0 < 0 ? 0 : meshEnd0;
+    int e1 = meshEnd1 < e0 ? e0 : meshEnd1;
+    if (e0 > nMesh) {
+        e0 = nMesh;
+    }
+    if (e1 > nMesh) {
+        e1 = nMesh;
+    }
+    for (size_t mi = 0; mi < scene.meshes.size(); ++mi) {
+        const WorldShotMesh& mesh = scene.meshes[mi];
+        const int actor = (static_cast<int>(mi) < e0) ? 0 : ((static_cast<int>(mi) < e1) ? 1 : 2);
+        size_t vcount = mesh.pos.size() / 3;
+        if (vcount % 3 != 0 || mesh.tris <= 0) {
+            continue;
+        }
+        bool hasUV = mesh.uv.size() == mesh.pos.size() / 3 * 2;
+        bool hasImg = mesh.triImg.size() == static_cast<size_t>(mesh.tris);
+        bool hasCol = mesh.triCol.size() == static_cast<size_t>(mesh.tris) * 3;
+        for (int t = 0; t < mesh.tris; ++t) {
+            float p[3][3], n[3][3], uv[3][2];
+            for (int k = 0; k < 3; ++k) {
+                size_t vi = static_cast<size_t>(t) * 3 + k;
+                p[k][0] = mesh.pos[vi * 3];
+                p[k][1] = mesh.pos[vi * 3 + 1];
+                p[k][2] = mesh.pos[vi * 3 + 2];
+                n[k][0] = mesh.nrm[vi * 3];
+                n[k][1] = mesh.nrm[vi * 3 + 1];
+                n[k][2] = mesh.nrm[vi * 3 + 2];
+                if (hasUV) {
+                    uv[k][0] = mesh.uv[vi * 2];
+                    uv[k][1] = mesh.uv[vi * 2 + 1];
+                } else {
+                    uv[k][0] = 0.0f;
+                    uv[k][1] = 0.0f;
+                }
+            }
+            int imgIdx = hasImg ? mesh.triImg[t] : -1;
+            if (imgIdx >= 0 &&
+                (imgIdx >= static_cast<int>(scene.images.size()) ||
+                 scene.images[imgIdx].rgba.empty())) {
+                imgIdx = -2;
+            }
+            float matCol[3] = { mesh.color[0], mesh.color[1], mesh.color[2] };
+            if (hasCol) {
+                matCol[0] = mesh.triCol[t * 3];
+                matCol[1] = mesh.triCol[t * 3 + 1];
+                matCol[2] = mesh.triCol[t * 3 + 2];
+            }
+            SubmitTriCrowd(mvp, p, n, uv, imgIdx, matCol, light, width, height, dctx, actor);
+        }
+    }
+    long px[3] = { 0, 0, 0 };
+    long ov12 = 0, ovAll = 0;
+    for (size_t i = 0; i < npix; ++i) {
+        if (win[i] >= 0 && win[i] < 3) {
+            ++px[win[i]];
+        }
+        const int bits =
+            (cov0[i] ? 1 : 0) + (cov1[i] ? 1 : 0) + (cov2[i] ? 1 : 0);
+        if (bits >= 2) {
+            ++ov12;
+        }
+        if (bits == 3) {
+            ++ovAll;
+        }
+    }
+    crowd.pix[0] = px[0];
+    crowd.pix[1] = px[1];
+    crowd.pix[2] = px[2];
+    crowd.overlap12 = ov12;
+    crowd.overlapAll = ovAll;
+}

@@ -132,6 +132,30 @@ struct TexDuoStats {
     long overlap = 0; // pixels where both actors projected (shared-z proof)
 };
 void TexSample_RenderDuo(const WorldShotScene& scene, int carMeshes, int width, int height,
-                         const float eye[3], const float target[3],
-                         std::vector<uint8_t>& outRGBA, TexFrameStats& stats,
-                         TexDuoStats& duo);
+                          const float eye[3], const float target[3],
+                          std::vector<uint8_t>& outRGBA, TexFrameStats& stats,
+                          TexDuoStats& duo);
+
+// Crowd render (R6u, round 23): ONE shared-depth CPU frame over a merged
+// 3-ped scene, generalising RenderDuo from 2 actors to N=3 by composition
+// (not stitching). Meshes [0,meshEnd0) belong to actor 0, meshes
+// [meshEnd0,meshEnd1) to actor 1, the rest to actor 2. Same legacy look as
+// the Duo path (no timecyc env, no turntable, fixed 60deg frustum along
+// eye->target, same light/background/wrap/alpha/depth rules, fixed mesh
+// order, float math, no threads: deterministic); the ONLY difference is
+// per-actor coverage bits for three actors + the depth winner. Coverage of
+// EVERY valid fragment (inside-test + den>eps, before the depth test, even
+// on alpha-cutout) sets that actor's coverage bit; the depth winner sets
+// the per-pixel owner. pix[i] counts depth winners owned by actor i;
+// overlap12 counts pixels where >=2 actors projected; overlapAll counts
+// pixels where all three projected (shared-z proof). Legacy Render* and
+// RenderDuo paths are untouched bit-for-bit.
+struct TexCrowdStats {
+    long pix[3] = { 0, 0, 0 }; // depth winners per actor
+    long overlap12 = 0; // pixels where >=2 actors projected
+    long overlapAll = 0; // pixels where all 3 actors projected
+};
+void TexSample_RenderCrowd(const WorldShotScene& scene, int meshEnd0, int meshEnd1, int width,
+                           int height, const float eye[3], const float target[3],
+                           std::vector<uint8_t>& outRGBA, TexFrameStats& stats,
+                           TexCrowdStats& crowd);
