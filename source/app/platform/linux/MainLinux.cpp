@@ -48,13 +48,14 @@ using uint64 = uint64_t;
 #include "app/platform/linux/CarPose.h"
 #include "app/platform/linux/TimeCycle.h"
 #include "app/platform/linux/DriveSim.h"
+#include "app/platform/linux/WalkSim.h"
 
 #include <sys/resource.h>
 
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] | --list-anims | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -2648,6 +2649,400 @@ int RunDrive(int argc, char** argv) {
     return 0;
 }
 
+// Round 17 (R6o): distance-bound walk. Ped (IfpAnim DFF/TXD, lerp+slerp)
+// rides a caller-supplied XY polyline; Z comes only from the COL raycast
+// (pedZ = groundH - footMinZ, footMinZ = phase-0 aabbAnim min-Z from IFP/DFF
+// bytes), yaw from the segment (+Y forward), phase from distance/strideLen
+// (strideLen = Root travel per WALK_civi cycle from IFP bytes at runtime),
+// chase-cam behind-above, world from the existing StreamPager, pixels from
+// the existing CPU rasterizer. Phase never comes from wall-clock.
+int RunWalk(int argc, char** argv) {
+    const char* pathArg = ArgValue(argc, argv, "--path", nullptr);
+    const char* model = ArgValue(argc, argv, "--model", "andre");
+    const char* animReq = ArgValue(argc, argv, "--anim", "WALK_civi");
+    const char* outArg = ArgValue(argc, argv, "--out", "walk");
+    if (!model || model[0] == '\0' || !animReq || animReq[0] == '\0' || !outArg ||
+        outArg[0] == '\0') {
+        (void)std::printf("walk-fail bad args model='%s' anim='%s' out='%s'\n",
+                           model ? model : "(null)", animReq ? animReq : "(null)",
+                           outArg ? outArg : "(null)");
+        return 1;
+    }
+    // Default stroll: short airport sidewalk (~52m) apron lasairprt4
+    // @1645.38,-2292.76 (h=-2.20 tri) -> terminal lasairprterm1_LAS
+    // (h=4.27/4.26, span 6.47m). Fixed here, heights come from the COL
+    // raycast below (no constant Z).
+    std::string pathStr =
+        pathArg ? pathArg : "1645.38,-2292.76:1660.00,-2270.00:1675.00,-2250.00";
+    std::vector<std::pair<double, double>> ctrl;
+    {
+        size_t pos = 0;
+        while (pos <= pathStr.size()) {
+            size_t end = pathStr.find(':', pos);
+            std::string tok =
+                pathStr.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+            pos = end == std::string::npos ? pathStr.size() + 1 : end + 1;
+            size_t b = tok.find_first_not_of(" \t");
+            size_t e = tok.find_last_not_of(" \t");
+            if (b == std::string::npos) {
+                (void)std::printf("walk-fail bad --path '%s' (empty point)\n", pathStr.c_str());
+                return 1;
+            }
+            tok = tok.substr(b, e - b + 1);
+            double x = 0.0, y = 0.0;
+            if (std::sscanf(tok.c_str(), "%lf , %lf", &x, &y) != 2 || !std::isfinite(x) ||
+                !std::isfinite(y)) {
+                (void)std::printf("walk-fail bad --path '%s' (want Ax,Ay:Bx,By:...)\n",
+                                   pathStr.c_str());
+                return 1;
+            }
+            ctrl.emplace_back(x, y);
+            if (pos > pathStr.size()) {
+                break;
+            }
+        }
+    }
+    if (ctrl.size() < 2) {
+        (void)std::printf("walk-fail need >= 2 path points (got %d)\n",
+                           static_cast<int>(ctrl.size()));
+        return 1;
+    }
+    const char* wpArg = ArgValue(argc, argv, "--waypoints", nullptr);
+    int waypoints = wpArg ? std::atoi(wpArg) : static_cast<int>(ctrl.size());
+    int framesPerLeg = std::atoi(ArgValue(argc, argv, "--frames-per-leg", "3"));
+    if (waypoints < 3 || waypoints > 64 || framesPerLeg < 1 || framesPerLeg > 120) {
+        (void)std::printf("walk-fail bad args waypoints='%s' frames-per-leg='%s' (want W 3..64, F 1..120)\n",
+                           ArgValue(argc, argv, "--waypoints", "3"),
+                           ArgValue(argc, argv, "--frames-per-leg", "3"));
+        return 1;
+    }
+    std::string prefix = outArg;
+    if (!prefix.empty() && prefix.back() == '/') {
+        prefix += "walk";
+    }
+    const int width = 640;
+    const int height = 480;
+    auto getPlatformDisplay = reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(
+        eglGetProcAddress("eglGetPlatformDisplayEXT")
+    );
+    if (!getPlatformDisplay) {
+        (void)std::printf("walk-fail no eglGetPlatformDisplayEXT\n");
+        return 1;
+    }
+#ifndef EGL_PLATFORM_SURFACELESS_MESA
+#define EGL_PLATFORM_SURFACELESS_MESA 0x31DD
+#endif
+    EGLDisplay display = getPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
+    if (display == EGL_NO_DISPLAY) {
+        (void)std::printf("walk-fail no surfaceless display 0x%x\n", eglGetError());
+        return 1;
+    }
+    if (!eglInitialize(display, nullptr, nullptr)) {
+        (void)std::printf("walk-fail egl init 0x%x\n", eglGetError());
+        return 1;
+    }
+    const EGLint configAttrs[] = {
+        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
+        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+        EGL_DEPTH_SIZE, 24,
+        EGL_NONE
+    };
+    EGLConfig config = nullptr;
+    EGLint configCount = 0;
+    if (!eglChooseConfig(display, configAttrs, &config, 1, &configCount) || configCount < 1) {
+        (void)std::printf("walk-fail choose config 0x%x\n", eglGetError());
+        eglTerminate(display);
+        return 1;
+    }
+    const EGLint pbufferAttrs[] = { EGL_WIDTH, width, EGL_HEIGHT, height, EGL_NONE };
+    EGLSurface surface = eglCreatePbufferSurface(display, config, pbufferAttrs);
+    if (surface == EGL_NO_SURFACE) {
+        (void)std::printf("walk-fail pbuffer 0x%x\n", eglGetError());
+        eglTerminate(display);
+        return 1;
+    }
+    (void)eglBindAPI(EGL_OPENGL_API);
+    EGLContext context = eglCreateContext(display, config, EGL_NO_CONTEXT, nullptr);
+    if (context == EGL_NO_CONTEXT) {
+        (void)std::printf("walk-fail context 0x%x\n", eglGetError());
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    if (!eglMakeCurrent(display, surface, surface, context)) {
+        (void)std::printf("walk-fail make current 0x%x\n", eglGetError());
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    const char* glVersion = reinterpret_cast<const char*>(glGetString(GL_VERSION));
+    (void)std::printf("walk-gl %s\n", glVersion ? glVersion : "(null)");
+    std::string gameDir = ResolveGameDir(argc, argv);
+    // 1. Clip constants from IFP/DFF bytes (no head constants).
+    WalkClip clip{};
+    {
+        char cErr[512] = {};
+        if (!WalkSim_Clip(gameDir.c_str(), model, animReq, clip, cErr, sizeof(cErr))) {
+            (void)std::printf("walk-fail clip %s (game=%s model=%s anim=%s)\n", cErr,
+                               gameDir.c_str(), model, animReq);
+            eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            eglDestroyContext(display, context);
+            eglDestroySurface(display, surface);
+            eglTerminate(display);
+            return 1;
+        }
+    }
+    (void)std::printf(
+        "walk-load model=%s anim=%s src=%s bankSrc=%s bones=%d mapped=%d wsum=%.6f "
+        "footMinZ=%.6f footMaxZ=%.6f root0=(%.4f,%.4f,%.4f) root1=(%.4f,%.4f,%.4f)\n",
+        clip.model, clip.anim, clip.src, clip.bankSrc, clip.bones, clip.mapped, clip.wsum,
+        clip.footMinZ, clip.footMaxZ, clip.root0[0], clip.root0[1], clip.root0[2],
+        clip.root1[0], clip.root1[1], clip.root1[2]);
+    (void)std::printf("walk-clip strideLen=%.6f (clip total=%.4f, rootTravel=%.6f)\n",
+                       clip.strideLen, clip.total, clip.strideLen);
+    // 2. World (pager + COL) around the walk corridor.
+    E2ELoadInfo load{};
+    {
+        char wErr[512] = {};
+        if (!WalkSim_InitWorld(gameDir.c_str(), load, wErr, sizeof(wErr))) {
+            (void)std::printf("walk-fail world-init %s (game=%s)\n", wErr, gameDir.c_str());
+            eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            eglDestroyContext(display, context);
+            eglDestroySurface(display, surface);
+            eglTerminate(display);
+            return 1;
+        }
+    }
+    (void)std::printf("walk-world iplTotal=%d kept=%d ide=%d ideFiles=%d iplFiles=%d cell=300 "
+                       "R=300 H=100 cap=80\n",
+                       load.iplTotal, load.iplKept, load.ideModels, load.ideFiles, load.iplFiles);
+    constexpr double kCamD = 5.0;
+    constexpr double kCamH = 2.5;
+    (void)std::printf("walk-formula phaseFormula=(distTravelled/strideLen)mod1 pedZ=ground-footMinZ "
+                       "footMinZ=%.6f camD=%.1f camH=%.1f strideLen=%.6f\n",
+                       clip.footMinZ, kCamD, kCamH, clip.strideLen);
+    {
+        std::string ps;
+        for (size_t i = 0; i < ctrl.size(); ++i) {
+            char cell[64];
+            (void)std::snprintf(cell, sizeof(cell), "%s%.2f,%.2f", i ? ":" : "", ctrl[i].first,
+                                 ctrl[i].second);
+            ps += cell;
+        }
+        (void)std::printf("walk-path controls=%d waypoints=%d framesPerLeg=%d path=%s\n",
+                           static_cast<int>(ctrl.size()), waypoints, framesPerLeg, ps.c_str());
+    }
+    // 3. Distance sample (yaw/phase/dist from path + IFP stride).
+    std::vector<WalkWaypoint> wps;
+    {
+        char sErr[512] = {};
+        if (!WalkSim_Sample(ctrl, waypoints, clip.strideLen, clip.total, wps, sErr,
+                             sizeof(sErr))) {
+            (void)std::printf("walk-fail sample %s\n", sErr);
+            WalkSim_ShutdownWorld();
+            eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            eglDestroyContext(display, context);
+            eglDestroySurface(display, surface);
+            eglTerminate(display);
+            return 1;
+        }
+    }
+    // 4. Ground every waypoint (COL raycast only, no constant heights).
+    bool groundClear = true;
+    double zMin = 0.0, zMax = 0.0;
+    for (int i = 0; i < waypoints; ++i) {
+        WalkWaypoint& w = wps[static_cast<size_t>(i)];
+        double h = -50.0;
+        char gm[32] = {};
+        char gp[8] = {};
+        bool hit = WalkSim_Ground(w.x, w.y, h, gm, sizeof(gm), gp, sizeof(gp));
+        w.groundH = h;
+        (void)std::snprintf(w.groundModel, sizeof(w.groundModel), "%s", gm[0] ? gm : "-");
+        (void)std::snprintf(w.groundPrim, sizeof(w.groundPrim), "%s", gp[0] ? gp : "none");
+        if (!hit || !std::isfinite(h) || h < -50.0 || h > 500.0) {
+            groundClear = false;
+        }
+        w.pedZ = h - clip.footMinZ;
+        if (i == 0) {
+            zMin = zMax = w.pedZ;
+        } else {
+            if (w.pedZ < zMin) {
+                zMin = w.pedZ;
+            }
+            if (w.pedZ > zMax) {
+                zMax = w.pedZ;
+            }
+        }
+        (void)std::printf("walk-wp i=%d x=%.2f y=%.2f ground=%.2f model=%s prim=%s pedZ=%.2f "
+                           "yaw=%.3f phase=%.6f timeAbs=%.6f dist=%.2f\n",
+                           i, w.x, w.y, w.groundH, w.groundModel, w.groundPrim, w.pedZ, w.yawPath,
+                           w.phase, w.timeAbs, w.dist);
+    }
+    (void)std::printf("walk-heights min=%.2f max=%.2f span=%.2f\n", zMin, zMax, zMax - zMin);
+    if (!groundClear) {
+        (void)std::printf("walk-fail ground miss (need COL hit on every waypoint)\n");
+        WalkSim_ShutdownWorld();
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(display, context);
+        eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    // 5. Walk the waypoints: page + distance-phase pose + merge + chase, one TGA each.
+    std::vector<uint64_t> checksums;
+    checksums.reserve(static_cast<size_t>(waypoints));
+    TexFrameStats texAgg{};
+    int totalFrames = 0;
+    bool failed = false;
+    for (int i = 0; i < waypoints && !failed; ++i) {
+        const WalkWaypoint& w = wps[static_cast<size_t>(i)];
+        WorldShotScene worldScene{};
+        E2EPagerFrame pf{};
+        char pErr[512] = {};
+        if (!WalkSim_Page(w.x, w.y, w.pedZ, worldScene, pf, pErr, sizeof(pErr))) {
+            (void)std::printf("walk-fail pager wp=%d %s\n", i, pErr);
+            failed = true;
+            break;
+        }
+        (void)std::printf("walk-pager wp=%d cam=%.2f,%.2f,%.2f yaw=%.3f active=%d loaded=%d "
+                           "evicted=%d instances=%d models=%d cached=%d tris=%d fallback=%d\n",
+                           i, w.x, w.y, w.pedZ, w.yawPath, pf.activeCells, pf.loadedCells,
+                           pf.evictedCells, pf.instances, pf.modelsUnique, pf.cacheModels, pf.tris,
+                           pf.fallback);
+        for (int e = 0; e < pf.evictedShown; ++e) {
+            (void)std::printf("walk-evict wp=%d sector=(%d,%d) dist=%d\n", i, pf.evictedCX[e],
+                               pf.evictedCY[e], pf.evictedDist[e]);
+        }
+        WorldShotScene pedScene{};
+        IfpAnimStats pedStats{};
+        {
+            char cErr[512] = {};
+            if (!WalkSim_Ped(gameDir.c_str(), model, animReq, w.phase, pedScene, pedStats, cErr,
+                              sizeof(cErr))) {
+                (void)std::printf("walk-fail ped wp=%d %s\n", i, cErr);
+                failed = true;
+                break;
+            }
+        }
+        (void)std::printf("walk-pose wp=%d phase=%.6f timeAbs=%.6f mapped=%d unmapped=%d "
+                           "wsum=%.6f root=(%.4f,%.4f,%.4f) interp=lerp+slerp\n",
+                           i, w.phase, w.timeAbs, pedStats.mapped, pedStats.unmapped, pedStats.wsum,
+                           pedStats.rootWorld[0], pedStats.rootWorld[1], pedStats.rootWorld[2]);
+        WorldShotScene frame{};
+        WalkSim_Merge(worldScene, pedScene, w.x, w.y, w.pedZ, w.yawBody, frame);
+        float eye[3], target[3];
+        WalkSim_Chase(w.x, w.y, w.groundH, w.yawPath, kCamD, kCamH, eye, target);
+        (void)std::printf("walk-cam wp=%d eye=%.2f,%.2f,%.2f target=%.2f,%.2f,%.2f\n", i, eye[0],
+                           eye[1], eye[2], target[0], target[1], target[2]);
+        for (int f = 0; f < framesPerLeg; ++f) {
+            SDL_Event event = {};
+            while (SDL_PollEvent(&event)) {
+            }
+        }
+        totalFrames += framesPerLeg;
+        std::vector<uint8> pixels;
+        TexFrameStats texStats{};
+        TexSample_RenderPath(frame, width, height, eye, target, pixels, texStats);
+        texAgg.tris += texStats.tris;
+        texAgg.sampledTri += texStats.sampledTri;
+        texAgg.fallbackTri += texStats.fallbackTri;
+        texAgg.flatTri += texStats.flatTri;
+        texAgg.texelFetch += texStats.texelFetch;
+        texAgg.texPixels += texStats.texPixels;
+        texAgg.fallbackPixels += texStats.fallbackPixels;
+        texAgg.flatPixels += texStats.flatPixels;
+        uint64_t sumR = 0, sumG = 0, sumB = 0, nonBlack = 0;
+        uint64_t checksum = PixelsChecksum(pixels, sumR, sumG, sumB, nonBlack);
+        uint64_t total = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
+        if (nonBlack == 0) {
+            (void)std::printf("walk-fail black frame wp=%d\n", i);
+            failed = true;
+            break;
+        }
+        char outPath[1024];
+        (void)std::snprintf(outPath, sizeof(outPath), "%s_W%d.tga", prefix.c_str(), i);
+        if (!WriteTga24(outPath, width, height, pixels)) {
+            (void)std::printf("walk-fail write '%s'\n", outPath);
+            failed = true;
+            break;
+        }
+        checksums.push_back(checksum);
+        (void)std::printf("walk-shot wp=%d out=%s pedTris=%d worldTris=%d nonblack=%llu/%llu "
+                           "checksum=%llu\n",
+                           i, outPath, pedScene.stats.triangles, pf.tris,
+                           static_cast<unsigned long long>(nonBlack),
+                           static_cast<unsigned long long>(total),
+                           static_cast<unsigned long long>(checksum));
+    }
+    int sectorsLoaded = 0, sectorsEvicted = 0, modelsPeak = 0, trisPeak = 0;
+    StreamPager_Counters(sectorsLoaded, sectorsEvicted, modelsPeak, trisPeak);
+    eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    eglDestroyContext(display, context);
+    eglDestroySurface(display, surface);
+    eglTerminate(display);
+    if (failed) {
+        WalkSim_ShutdownWorld();
+        return 1;
+    }
+    // 6. Honest distance gates (no separate pictures).
+    double distTotal = wps.back().dist;
+    double expectCycles = (clip.strideLen > 0.0) ? distTotal / clip.strideLen : 0.0;
+    // Actually scrolled cycles from the phases handed to the interpolator:
+    // unwrapped_i = floor(dist_i/stride) + phase_i, Cc = unwrapped_last - unwrapped_first.
+    double actualCycles = 0.0;
+    for (int i = 1; i < waypoints; ++i) {
+        double fPrev = std::floor(wps[static_cast<size_t>(i - 1)].dist / clip.strideLen);
+        double fCur = std::floor(wps[static_cast<size_t>(i)].dist / clip.strideLen);
+        double uPrev = fPrev + wps[static_cast<size_t>(i - 1)].phase;
+        double uCur = fCur + wps[static_cast<size_t>(i)].phase;
+        actualCycles += (uCur - uPrev);
+    }
+    if (waypoints == 1) {
+        actualCycles = 0.0;
+    }
+    double cycErr =
+        (expectCycles > 1e-9) ? std::fabs(actualCycles - expectCycles) / expectCycles : 1.0;
+    bool gateCycles = cycErr < 0.01;
+    bool gateDistinct = true;
+    for (size_t i = 0; i < checksums.size() && gateDistinct; ++i) {
+        for (size_t j = i + 1; j < checksums.size(); ++j) {
+            if (checksums[i] == checksums[j]) {
+                gateDistinct = false;
+                break;
+            }
+        }
+    }
+    double span = zMax - zMin;
+    if (!(gateCycles && gateDistinct && groundClear)) {
+        (void)std::printf("walk-fail gate cycErr=%.6f(<0.01) distinct=%d groundClear=%d "
+                           "actual=%.6f expect=%.6f\n",
+                           cycErr, gateDistinct ? 1 : 0, groundClear ? 1 : 0, actualCycles,
+                           expectCycles);
+        WalkSim_ShutdownWorld();
+        return 1;
+    }
+    std::string cs;
+    for (size_t i = 0; i < checksums.size(); ++i) {
+        char cell[32];
+        (void)std::snprintf(cell, sizeof(cell), "%s%llu", i ? "," : "",
+                             static_cast<unsigned long long>(checksums[i]));
+        cs += cell;
+    }
+    double phaseEnd = wps.back().phase;
+    OS_DebugOut("mad-sa-linux walk");
+    (void)std::printf("walk-ok waypoints=%d frames=%d model=%s anim=%s distTotal=%.3f cycles=%.6f "
+                       "phaseEnd=%.6f checksums=%s\n",
+                       waypoints, totalFrames, clip.model, clip.anim, distTotal, actualCycles,
+                       phaseEnd, cs.c_str());
+    (void)std::printf("walk-verify distTotal=%.3f strideLen=%.6f expectCycles=%.6f "
+                       "actualCycles=%.6f relErr=%.6f span=%.2f\n",
+                       distTotal, clip.strideLen, expectCycles, actualCycles, cycErr, span);
+    WalkSim_ShutdownWorld();
+    return 0;
+}
+
 // Round 12 helper: enumerate the ped IFP bank (names as stored).
 int RunListAnims(int argc, char** argv) {
     std::string gameDir = ResolveGameDir(argc, argv);
@@ -2930,6 +3325,9 @@ int main(int argc, char** argv) {
     }
     if (HasArg(argc, argv, "--drive")) {
         return RunDrive(argc, argv);
+    }
+    if (HasArg(argc, argv, "--walk")) {
+        return RunWalk(argc, argv);
     }
     if (HasArg(argc, argv, "--list-anims")) {
         return RunListAnims(argc, argv);
