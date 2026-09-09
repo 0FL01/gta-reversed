@@ -53,6 +53,7 @@ using uint64 = uint64_t;
 #include "app/platform/linux/TimeCycle.h"
 #include "app/platform/linux/WaterLevel.h"
 #include "app/platform/linux/ShoreShot.h"
+#include "app/platform/linux/HudShot.h"
 #include "app/platform/linux/DriveSim.h"
 #include "app/platform/linux/Handling.h"
 #include "app/platform/linux/WalkSim.h"
@@ -62,7 +63,7 @@ using uint64 = uint64_t;
 namespace {
 void PrintUsage(const char* prog) {
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --shot-cs-duo <out.tga> | --shot-water <out.tga> [--hour H] [--water-file water1.dat] | --shot-shore <out.tga> [--hour H] | --csanim-seq <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--frames 5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --shot-cs-duo <out.tga> | --shot-water <out.tga> [--hour H] [--water-file water1.dat] | --shot-shore <out.tga> [--hour H] | --shot-hud <out.tga> [--health H] [--armor A] | --csanim-seq <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--frames 5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -1073,6 +1074,130 @@ int RunShotShore(int argc, char** argv) {
         sst.mtris, sst.waterQuads, waterPixels, worldPixels,
         static_cast<unsigned long long>(checksum));
     ShoreShot_Shutdown();
+    return 0;
+}
+
+// R6ad: HUD bars over the shore frame (round 32). The base is the existing
+// shore composition at the fixed hour 12 (same ShoreShot_Init inputs and the
+// same TexSample_RenderDuo call as --shot-shore, so the base checksum must
+// equal the shore etalon bit-for-bit); the overlay is a CPU 2D blit of
+// health/armour bars from real models/hud.txd texels (tinted by the game HUD
+// colours) plus H/A digits from the existing font2 glyph blit. Wanted stars
+// are off this round. No GL on this path (pure CPU), so no EGL setup.
+int RunShotHud(int argc, char** argv) {
+    const char* outPath = ArgValue(argc, argv, "--shot-hud", "hud.tga");
+    if (!outPath || outPath[0] == '\0') {
+        (void)std::printf("hud-fail bad args shot-hud='%s'\n",
+                           outPath ? outPath : "(null)");
+        return 1;
+    }
+    int health = 137;
+    int armor = 60;
+    {
+        const char* hArg = ArgValue(argc, argv, "--health", "137");
+        const char* aArg = ArgValue(argc, argv, "--armor", "60");
+        auto parse0255 = [](const char* s, int& v) {
+            if (!s || !s[0]) {
+                return false;
+            }
+            size_t len = std::strlen(s);
+            if (len == 0 || len > 3) {
+                return false;
+            }
+            for (size_t i = 0; i < len; ++i) {
+                if (s[i] < '0' || s[i] > '9') {
+                    return false;
+                }
+            }
+            v = std::atoi(s);
+            return v >= 0 && v <= 255;
+        };
+        if (!parse0255(hArg, health) || !parse0255(aArg, armor)) {
+            (void)std::printf("hud-fail bad --health '%s' / --armor '%s' (want 0-255)\n",
+                               hArg ? hArg : "(null)", aArg ? aArg : "(null)");
+            return 1;
+        }
+    }
+    std::string gameDir = ResolveGameDir(argc, argv);
+    std::vector<uint8> basePixels;
+    std::vector<uint8> hudPixels;
+    HudShotStats hst{};
+    char hudErr[768] = {};
+    if (!HudShot_Render(gameDir.c_str(), health, armor, basePixels, hudPixels, hst, hudErr,
+                        sizeof(hudErr))) {
+        (void)std::printf("hud-fail load %s (game=%s)\n", hudErr, gameDir.c_str());
+        HudShot_Shutdown();
+        return 1;
+    }
+    const ShoreShotStats& sst = hst.shore;
+    (void)std::printf(
+        "shore-load center=%.0f,%.0f models=%d mtris=%d waterRows=%d waterQuads=%d waterTris=%d "
+        "file=%s iplTotal=%d kept=%d bbox=[%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f]\n",
+        static_cast<double>(sst.centerX), static_cast<double>(sst.centerY), sst.models,
+        sst.mtris, sst.waterRows, sst.waterQuads, sst.waterTris, sst.waterFile,
+        hst.loadInfo.iplTotal, hst.loadInfo.iplKept, sst.bboxMin[0], sst.bboxMin[1],
+        sst.bboxMin[2], sst.bboxMax[0], sst.bboxMax[1], sst.bboxMax[2]);
+    (void)std::printf("shore-water hour=%d waterColor=%d,%d,%d,%d\n", sst.hour,
+                       sst.waterRGBA[0], sst.waterRGBA[1], sst.waterRGBA[2],
+                       sst.waterRGBA[3]);
+    (void)std::printf("shore-cam eye=%.1f,%.1f,%.1f target=%.1f,%.1f,%.1f fov=60\n",
+                       sst.eye[0], sst.eye[1], sst.eye[2], sst.target[0], sst.target[1],
+                       sst.target[2]);
+    (void)std::printf(
+        "texshore-ok tris=%d sampledTri=%d texelFetch=%ld greyFallback=%d flatTri=%d "
+        "texPixels=%ld flatPixels=%ld firstTex=%s render=cpu shared-z=1\n",
+        hst.texStats.tris, hst.texStats.sampledTri, hst.texStats.texelFetch,
+        hst.texStats.fallbackTri, hst.texStats.flatTri, hst.texStats.texPixels,
+        hst.texStats.flatPixels, hst.texStats.haveFirst ? hst.texStats.firstTex : "-");
+    (void)std::printf("shoreduo-ok worldMeshes=%d worldPixels=%ld waterPixelsDuo=%ld overlap=%ld\n",
+                       sst.worldMeshes, hst.duo.carPixels, hst.duo.pedPixels, hst.duo.overlap);
+    for (const HudTexInfo& ti : hst.sprites) {
+        (void)std::printf("hudtex name=%s %dx%d\n", ti.name, ti.w, ti.h);
+    }
+    (void)std::printf("hud-load sprites=%d barTex=%s fontTex=%s\n",
+                       static_cast<int>(hst.sprites.size()), hst.barTex, hst.fontTex);
+    (void)std::printf("hud-clock text=\"%s\" glyphs=%d\n", hst.clockText, hst.digits);
+    uint64_t bR = 0, bG = 0, bB = 0, bN = 0;
+    uint64_t hR = 0, hG = 0, hB = 0, hN = 0;
+    uint64_t baseChecksum = PixelsChecksum(basePixels, bR, bG, bB, bN);
+    uint64_t checksum = PixelsChecksum(hudPixels, hR, hG, hB, hN);
+    const int baseMatchesShore = (baseChecksum == kHudShoreEtalon) ? 1 : 0;
+    (void)std::printf("hud-base baseChecksum=%llu shoreEtalon=%llu baseMatchesShore=%d\n",
+                       static_cast<unsigned long long>(baseChecksum),
+                       static_cast<unsigned long long>(kHudShoreEtalon), baseMatchesShore);
+    if (!baseMatchesShore) {
+        (void)std::printf("hud-fail base disturbed baseChecksum=%llu (want %llu)\n",
+                           static_cast<unsigned long long>(baseChecksum),
+                           static_cast<unsigned long long>(kHudShoreEtalon));
+        HudShot_Shutdown();
+        return 1;
+    }
+    if (hst.hudPixels <= 2000) {
+        (void)std::printf("hud-fail empty overlay hudPixels=%ld (want >2000)\n",
+                           hst.hudPixels);
+        HudShot_Shutdown();
+        return 1;
+    }
+    if (!WriteTga24(outPath, 640, 480, hudPixels)) {
+        (void)std::printf("hud-fail write '%s'\n", outPath);
+        HudShot_Shutdown();
+        return 1;
+    }
+    OS_DebugOut("mad-sa-linux hud shot");
+    (void)std::printf(
+        "hud-ok health=%d armor=%d barW=%d barH2=%d hudPixels=%ld baseChecksum=%llu "
+        "checksum=%llu stars=off\n",
+        hst.health, hst.armor, hst.barW1, hst.barW2, hst.hudPixels,
+        static_cast<unsigned long long>(baseChecksum),
+        static_cast<unsigned long long>(checksum));
+    (void)std::printf("hudshot-ok out=%s nonblack=%llu/%llu avg=%llu,%llu,%llu checksum=%llu\n",
+                       outPath, static_cast<unsigned long long>(hN),
+                       static_cast<unsigned long long>(640ULL * 480ULL),
+                       static_cast<unsigned long long>(hR / (640ULL * 480ULL)),
+                       static_cast<unsigned long long>(hG / (640ULL * 480ULL)),
+                       static_cast<unsigned long long>(hB / (640ULL * 480ULL)),
+                       static_cast<unsigned long long>(checksum));
+    HudShot_Shutdown();
     return 0;
 }
 
@@ -5560,6 +5685,9 @@ int main(int argc, char** argv) {
     }
     if (HasArg(argc, argv, "--shot-cs-duo")) {
         return RunShotCsDuo(argc, argv);
+    }
+    if (HasArg(argc, argv, "--shot-hud")) {
+        return RunShotHud(argc, argv);
     }
     if (HasArg(argc, argv, "--shot-shore")) {
         return RunShotShore(argc, argv);
