@@ -18,6 +18,8 @@ struct TimeCycleParams {
     uint8_t skyTop[3] = {}; // Sky top RGB
     uint8_t skyBot[3] = {}; // Sky bot RGB
     uint8_t sunCore[3] = {}; // SunCore RGB
+    float farClp = 0.0f; // FarClp (tokens[27] per header, timecyc bytes only)
+    float fogSt = 0.0f; // FogSt (tokens[28] per header, timecyc bytes only)
 };
 
 // Loads the `weather` row for `hour` (0-23) relative to gameDir (sets the

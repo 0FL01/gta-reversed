@@ -10,8 +10,10 @@
 
 #include "app/platform/linux/TimeCycle.h"
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -162,6 +164,8 @@ bool TimeCycle_LoadWeatherHour(const char* gameDir, const char* weather, int hou
     // section header stops the scan.)
     struct Row {
         int v[18];
+        float farClp = 0.0f; // tokens[27] (FarClp per the header comment)
+        float fogSt = 0.0f; // tokens[28] (FogSt per the header comment)
     };
     std::vector<Row> rows;
     for (size_t i = sec + 1; i < lines.size(); ++i) {
@@ -201,6 +205,42 @@ bool TimeCycle_LoadWeatherHour(const char* gameDir, const char* weather, int hou
             continue; // not a data row (never invent values: skip, like the
                       // game's n<51 warning path skips bad lines)
         }
+        // FarClp/FogSt are tokens[27]/[28] of the whitespace-split row
+        // (header: ... PoleShd FarClp FogSt LightOnGround ...). Both come
+        // only from these timecyc bytes; a row without them is skipped.
+        {
+            std::vector<std::string> toks;
+            {
+                size_t p = 0;
+                while (p < ln.size()) {
+                    while (p < ln.size() && (ln[p] == ' ' || ln[p] == '\t')) {
+                        ++p;
+                    }
+                    if (p >= ln.size()) {
+                        break;
+                    }
+                    size_t q = p;
+                    while (q < ln.size() && ln[q] != ' ' && ln[q] != '\t') {
+                        ++q;
+                    }
+                    toks.emplace_back(ln.substr(p, q - p));
+                    p = q;
+                }
+            }
+            if (toks.size() < 29) {
+                continue;
+            }
+            char* endFar = nullptr;
+            char* endFog = nullptr;
+            const float far = std::strtof(toks[27].c_str(), &endFar);
+            const float fog = std::strtof(toks[28].c_str(), &endFog);
+            if (!endFar || *endFar != '\0' || !endFog || *endFog != '\0' ||
+                !std::isfinite(far) || !std::isfinite(fog)) {
+                continue;
+            }
+            row.farClp = far;
+            row.fogSt = fog;
+        }
         rows.push_back(row);
     }
     if (rows.empty()) {
@@ -220,6 +260,11 @@ bool TimeCycle_LoadWeatherHour(const char* gameDir, const char* weather, int hou
             return false;
         }
     }
+    if (!std::isfinite(row.farClp) || !std::isfinite(row.fogSt) || row.farClp <= 0.0f ||
+        !(row.farClp > row.fogSt)) {
+        SetErr(err, errSize, "timecyc bad FarClp/FogSt");
+        return false;
+    }
     out.hour = hour;
     out.sampleIdx = idx;
     if (rows.size() == 8) {
@@ -236,6 +281,8 @@ bool TimeCycle_LoadWeatherHour(const char* gameDir, const char* weather, int hou
         out.skyBot[k] = static_cast<uint8_t>(row.v[12 + k]);
         out.sunCore[k] = static_cast<uint8_t>(row.v[15 + k]);
     }
+    out.farClp = row.farClp;
+    out.fogSt = row.fogSt;
     return true;
 }
 
