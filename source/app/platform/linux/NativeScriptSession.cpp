@@ -47,7 +47,7 @@ uint32 Word(std::span<const uint8> bytes, std::size_t pos, unsigned count = 4) {
 enum class Operand { Integer, Float, String, Output, FloatOutput, InOutInteger, InOutFloat };
 struct Signature {
     uint16 Opcode;
-    std::array<Operand, 5> Types{};
+    std::array<Operand, 6> Types{};
     unsigned Count = 0;
 };
 using O = Operand;
@@ -88,6 +88,7 @@ constexpr Signature Signatures[] = {
     {0x0417, {O::Integer}, 1},
     {0x06C8, {O::Integer}, 1},
     {0x0517, {O::Float, O::Float, O::Float, O::String, O::Output}, 5},
+    {0x0518, {O::Float, O::Float, O::Float, O::Integer, O::String, O::Output}, 6},
     {0x0570, {O::Float, O::Float, O::Float, O::Integer, O::Output}, 5},
     {0x018B, {O::Integer, O::Integer}, 2},
     {0x09B4, {O::Float, O::Float, O::Float, O::Integer, O::Integer}, 5},
@@ -474,7 +475,7 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
     }
 
     int32 reference = -1;
-    if (d.Opcode == 0x04E4 || d.Opcode == 0x03CB || d.Opcode == 0x0053 || d.Opcode == 0x07AF || d.Opcode == 0x01F5 || d.Opcode == 0x0373 || d.Opcode == 0x0173 || d.Opcode == 0x0517 || d.Opcode == 0x0570 || d.Opcode == 0x018B || d.Opcode == 0x09B4) {
+    if (d.Opcode == 0x04E4 || d.Opcode == 0x03CB || d.Opcode == 0x0053 || d.Opcode == 0x07AF || d.Opcode == 0x01F5 || d.Opcode == 0x0373 || d.Opcode == 0x0173 || d.Opcode == 0x0517 || d.Opcode == 0x0518 || d.Opcode == 0x0570 || d.Opcode == 0x018B || d.Opcode == 0x09B4) {
         const NativeScriptRequestId id{m_SessionId, m_CommandSequence + 1, state.IP};
         NativeScriptServiceResult result;
         // All operands/output bounds have been checked before ANY host call.
@@ -483,6 +484,10 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
             if (d.Opcode == 0x09B4) result = services.SetEntryExitFlag({id, d.Float(0), d.Float(1), d.Float(2), d.Int(3), d.Int(4)});
             if (d.Opcode == 0x0517) {
                 auto created = services.CreateLockedProperty({id, {d.Float(0), d.Float(1), d.Float(2)}, d.Text});
+                result = std::move(created.Result); reference = created.Reference.Value;
+            }
+            if (d.Opcode == 0x0518) {
+                auto created = services.CreateForSaleProperty({id, {d.Float(0), d.Float(1), d.Float(2)}, d.Int(3), d.Text});
                 result = std::move(created.Result); reference = created.Reference.Value;
             }
             if (d.Opcode == 0x0570) {
@@ -530,7 +535,7 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         }
         // Group generations occupy the high 16 bits, including the sign bit.
         // The host validates liveness; only the invalid sentinel is VM-invalid.
-        if ((d.Opcode == 0x07AF || d.Opcode == 0x01F5 || d.Opcode == 0x0517 || d.Opcode == 0x0570) && reference == -1) return invalid("Ready lookup returned invalid script reference");
+        if ((d.Opcode == 0x07AF || d.Opcode == 0x01F5 || d.Opcode == 0x0517 || d.Opcode == 0x0518 || d.Opcode == 0x0570) && reference == -1) return invalid("Ready lookup returned invalid script reference");
     }
 
     // Commit point: nothing above changes script-visible state or global bytes.
@@ -632,6 +637,7 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         break;
     case 0x0053: write(4, uint32(a)); break;
     case 0x0517: case 0x0570: write(4, uint32(reference)); break;
+    case 0x0518: write(5, uint32(reference)); break;
     case 0x07AF: case 0x01F5: write(1, uint32(reference)); break;
     case 0x0746: {
         auto& categories = m_State.Relationships[b];

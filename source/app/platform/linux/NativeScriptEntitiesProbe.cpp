@@ -39,6 +39,23 @@ int main() {
     Check(wrap.AdvanceTime(0xfffffff0, error), "wrap epoch"); wrap.Show("wrap", 1);
     Check(wrap.AdvanceTime(0xfffffff1, error) && wrap.AdvanceTime(0x10, error) && wrap.View().Alpha == 200, "uint32 game clock rollover accepted");
     Check(!wrap.AdvanceTime(0xf, error) && wrap.View().Alpha == 200, "backwards stamp after wrap rejected");
+    NativeScriptHelpPresentation quick;
+    Check(quick.AdvanceTime(0,error),"quick epoch"); quick.Show("denial fixture",10,true);
+    Check(quick.AdvanceTime(1,error) && quick.AdvanceTime(17,error) && quick.View().Alpha==200,"source quick flag keeps ordinary fade-in");
+    Check(quick.AdvanceTime(3017,error) && quick.View().Alpha==200 && quick.AdvanceTime(3018,error) && quick.View().Alpha==200,
+        "quick strict3000ms threshold precedes increment despite long line-dependent lifetime");
+    Check(quick.AdvanceTime(3118,error) && quick.View().Alpha==80,"quick denial uses same source fade-out");
+    quick.Show("",0,true); Check(!quick.Displayed() && quick.View().Text.empty() && !quick.View().Alpha,"funded type18 SetHelpMessage(nullptr) clears presentation");
+    NativeScriptPropertyInput cash;
+    Check(NativeScriptPropertyCollect(1,cash,6)==NativeScriptPropertyInteractionStatus::InsufficientFunds,"source zero balance cannot fund positive price");
+    cash.Money=1;
+    Check(NativeScriptPropertyCollect(1,cash,6)==NativeScriptPropertyInteractionStatus::ScriptPurchaseRequired && cash.Money==1,
+        "equal cash is only a script-required interaction, never an owned debit");
+    cash.OnMission=true;
+    Check(NativeScriptPropertyCollect(-1,cash,6)==NativeScriptPropertyInteractionStatus::OnMission,"mission denial takes precedence over signed negative ammo");
+    cash.OnMission=false; cash.Money=0;
+    Check(NativeScriptPropertyCollect(-1,cash,6)==NativeScriptPropertyInteractionStatus::ScriptPurchaseRequired &&
+        NativeScriptPropertyCollect(0,cash,0)==NativeScriptPropertyInteractionStatus::None,"signed price comparison and no-buffer no event");
     std::array<int, 208> metrics; metrics.fill(20);
     const auto lines = NativeScriptHelpLines("one two three four five six", metrics);
     Check(lines.size() == 2 && lines[0] == "one two three four " && lines[1] == "five six", "word boundaries shared by duration and HUD layout");

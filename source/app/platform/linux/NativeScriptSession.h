@@ -74,6 +74,12 @@ struct NativeScriptLockedPropertyRequest {
     NativeScriptPosition Position;
     std::array<char, 8> Text{};
 };
+struct NativeScriptForSalePropertyRequest {
+    NativeScriptRequestId Id;
+    NativeScriptPosition Position;
+    std::int32_t Price = 0;
+    std::array<char, 8> Text{};
+};
 struct NativeScriptContactBlipRequest {
     NativeScriptRequestId Id;
     NativeScriptPosition Position;
@@ -111,6 +117,7 @@ public:
     // heading AND RW matrix. A Ready result certifies those actual host effects.
     virtual NativeScriptServiceResult SetCharHeading(const NativeScriptHeadingRequest&) { return {}; }
     virtual NativeScriptReferenceResult<NativeScriptPickupRef> CreateLockedProperty(const NativeScriptLockedPropertyRequest&) { return {}; }
+    virtual NativeScriptReferenceResult<NativeScriptPickupRef> CreateForSaleProperty(const NativeScriptForSalePropertyRequest&) { return {}; }
     virtual NativeScriptReferenceResult<NativeScriptBlipRef> CreateContactBlip(const NativeScriptContactBlipRequest&) { return {}; }
     virtual NativeScriptServiceResult SetBlipDisplay(const NativeScriptBlipDisplayRequest&) { return {}; }
     virtual NativeScriptServiceResult SetEntryExitFlag(const NativeScriptEntryExitFlagRequest&) { return {}; }
@@ -185,6 +192,9 @@ struct NativeScriptState : NativeScriptThreadState {
     std::array<std::array<std::uint32_t, 5>, 32> Relationships{};
     std::uint64_t RelationshipRevision = 0;
     bool AlreadyRunningMission = false;
+    // CTheScripts::Init zeroes this byte offset. DECLARE_MISSION_FLAG is still
+    // a strict unsupported instruction; thread presence is NOT mission status.
+    std::uint16_t OnAMissionFlag = 0;
     // Owned counterpart of Game.h::gbLARiots (Compact 0xB72958), NOT the cheat
     // or gbLARiots_NoPoliceCars. 06C8 stores (parameter != 0); no immediate effects.
     // Game.cpp initializes false; SimpleVariablesSaveStructure persists the flag.
@@ -246,7 +256,7 @@ private:
     struct Instruction {
         std::uint16_t Opcode = 0;
         std::uint32_t Next = 0;
-        std::array<std::uint32_t, 5> Values{};
+        std::array<std::uint32_t, 6> Values{};
         std::uint32_t OutputValue = 0; // decoded old cell for checked in-place arithmetic
         std::array<char, 8> Text{};
         bool OutputGlobal = true;

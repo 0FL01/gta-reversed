@@ -194,6 +194,22 @@ NativeScriptReferenceResult<NativeScriptPickupRef> RealtimeScriptHost::CreateLoc
     for (const auto& event : m_Events) if (event.Id == request.Id) return {Error("entity request ID already owned by player/world service"), {}};
     return m_Entities.CreateLockedProperty(request);
 }
+NativeScriptReferenceResult<NativeScriptPickupRef> RealtimeScriptHost::CreateForSaleProperty(const NativeScriptForSalePropertyRequest& request) {
+    if (!m_Initialized) return {Error("property service requires initialized host"), {}};
+    if (m_PendingLoad) return {Error("entity service cannot cross pending world request"), {}};
+    for (const auto& event : m_Events) if (event.Id == request.Id) return {Error("entity request ID already owned by player/world service"), {}};
+    return m_Entities.CreateForSaleProperty(request);
+}
+bool RealtimeScriptHost::TickProperties(NativeScriptPosition camera, bool alive, NativeScriptPropertyInput input, std::string& error) {
+    if (!m_Initialized || !m_PedActive || !Finite(camera)) { error = "property consumer requires live player and finite camera"; return false; }
+    input.Money = m_PlayerInfo.Money;
+    std::int32_t mission = 0;
+    if (State().OnAMissionFlag && !m_Session.ReadGlobal(State().OnAMissionFlag, mission)) { error = "invalid declared mission flag"; return false; }
+    input.OnMission = State().OnAMissionFlag && mission == 1;
+    const auto& player = m_Gameplay.State();
+    m_Entities.Tick({player.PedRoot.X, player.PedRoot.Y, player.PedRoot.Z}, camera, alive, player.InVehicle, input);
+    error.clear(); return true;
+}
 NativeScriptReferenceResult<NativeScriptBlipRef> RealtimeScriptHost::CreateContactBlip(const NativeScriptContactBlipRequest& request) {
     if (!m_Initialized) return {Error("radar service requires initialized host"), {}};
     if (m_PendingLoad) return {Error("entity service cannot cross pending world request"), {}};

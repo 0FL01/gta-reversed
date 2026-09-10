@@ -28,6 +28,20 @@ struct RealtimeHudState {
     std::uint8_t helpAlpha = 0; // Entities.HelpPresentation().Alpha; zero draws nothing
 };
 
+// Column-major compatibility-GL world camera snapshot. Clip/FOV values are
+// source CDraw values (Fov in degrees), explicitly supplied rather than inferred from
+// a potentially extended native world far plane. ModelView has no actor transform.
+struct RealtimeHudPriceView {
+    std::array<float, 16> ModelView{}, Projection{};
+    float NearClip = 0, FarClip = 0, Fov = 0;
+};
+
+struct RealtimeHudProjectedPrice {
+    std::size_t Candidate = 0; // index into the original pool-order span
+    float X = 0, Y = 0, Depth = 0, Width = 0, Height = 0;
+    float ScaleX = 0, ScaleY = 0; // drawable-pixel font scale, not HUD reference units
+};
+
 class RealtimeHud {
 public:
     RealtimeHud() = default;
@@ -47,12 +61,24 @@ public:
     // texture. Does not modify depth/stencil contents or framebuffer binding.
     void Draw(const RealtimeHudView& view, const RealtimeHudState& state, int width, int height) const;
 
-    // Initial source-backed slice: exterior radar, player/north, clock. No
-    // fabricated health/armour/money, weapon/wanted/blip or script state.
+    static RealtimeHudPriceView CapturePriceView(float nearClip, float farClip, float fov);
+    // CSprite::CalcScreenCoors near/far rejection BEFORE the 16-message limit.
+    // X/Y outside the screen still consume a slot, as in the source.
+    static std::vector<RealtimeHudProjectedPrice> ProjectPropertyPrices(
+        std::span<const NativeScriptPropertyLabel> labels, const RealtimeHudPriceView& view, int width, int height);
+    void DrawPropertyPrices(std::span<const NativeScriptPropertyLabel> labels,
+        const RealtimeHudPriceView& view, int width, int height) const;
+    // Call after world/water while world GL matrices are current, before Draw.
+    // Labels already contain the source +0.7 Z offset and formatted GXT text.
+    void DrawPropertyPrices(std::span<const NativeScriptPropertyLabel> labels,
+        int width, int height, float nearClip, float farClip, float fov) const;
+
+    // Source-backed exterior radar, player/north, clock and supplied script
+    // property/help presentation. No fabricated health/armour/money state.
 private:
     RadarMapAssets m_Radar;
     MenuHudFont m_Font;
-    WorldShotImage m_PropertyRadar{};
-    std::array<unsigned int, 149> m_Textures{}; // tiles, centre/north/disc/font1/propertyR
+    WorldShotImage m_PropertyRadar{}, m_ForSaleRadar{};
+    std::array<unsigned int, 150> m_Textures{}; // tiles, centre/north/disc/font1/propertyR/G
     bool m_Loaded = false;
 };

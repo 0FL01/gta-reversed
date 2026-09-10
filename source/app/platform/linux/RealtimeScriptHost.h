@@ -35,6 +35,10 @@ struct RealtimeScriptHostEvent {
     RealtimeGameplayState Player{};
     RealtimeGameplayCamera Camera{};
 };
+struct RealtimeScriptPlayerInfo {
+    // PlayerInfo.cpp::Clear, source lifetime owned by this new-game host.
+    std::int32_t Money = 0, DisplayMoney = 0;
+};
 
 class RealtimeScriptHost final : public NativeScriptServices {
 public:
@@ -76,6 +80,11 @@ public:
     const NativeScriptEntities& Entities() const { return m_Entities; }
     NativeEntryExits& EntryExits() { return m_EntryExits; }
     const NativeEntryExits& EntryExits() const { return m_EntryExits; }
+    const RealtimeScriptPlayerInfo& PlayerInfo() const { return m_PlayerInfo; }
+    // Parent supplies real collect-key edge/target/busy/global suppression and
+    // unpaused frame counter. Balance/mission inputs are overwritten from owned
+    // player/SCM state. Tick stages only; Entities().AdvanceTime publishes atomically.
+    bool TickProperties(NativeScriptPosition camera, bool alive, NativeScriptPropertyInput input, std::string& error);
 
     NativeScriptServiceResult RequestCollision(const NativeScriptCollisionRequest&) override;
     NativeScriptServiceResult LoadScene(const NativeScriptSceneRequest&) override;
@@ -85,6 +94,7 @@ public:
     NativeScriptServiceResult SetCameraBehindPlayer(const NativeScriptCameraRequest&) override;
     NativeScriptServiceResult SetCharHeading(const NativeScriptHeadingRequest&) override;
     NativeScriptReferenceResult<NativeScriptPickupRef> CreateLockedProperty(const NativeScriptLockedPropertyRequest&) override;
+    NativeScriptReferenceResult<NativeScriptPickupRef> CreateForSaleProperty(const NativeScriptForSalePropertyRequest&) override;
     NativeScriptReferenceResult<NativeScriptBlipRef> CreateContactBlip(const NativeScriptContactBlipRequest&) override;
     NativeScriptServiceResult SetBlipDisplay(const NativeScriptBlipDisplayRequest&) override;
     NativeScriptServiceResult SetEntryExitFlag(const NativeScriptEntryExitFlagRequest&) override;
@@ -99,6 +109,7 @@ private:
     RealtimeGameplay& m_Gameplay;
     NativeScriptSession m_Session;
     NativeScriptEntities m_Entities;
+    RealtimeScriptPlayerInfo m_PlayerInfo;
     NativeEntryExits m_EntryExits;
     std::shared_ptr<const NativeCollisionContext> m_CollisionContext;
     std::shared_ptr<const RealtimeGameplayWorld> m_World;

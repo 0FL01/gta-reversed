@@ -736,10 +736,13 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             unsigned(clock.Hours), unsigned(clock.Minutes), scriptHost.State().Fade.Alpha);
     }
     GpuScene actorGpu, scriptGpu, entryGpu;
-    if (newGame && (!scriptGpu.UploadTextures(scriptHost.Entities().PreparedModel()) ||
-        !entryGpu.UploadTextures(scriptHost.EntryExits().PreparedModel()))) {
-        std::printf("play-fail script entity textures\n");
-        return 1;
+    if (newGame) {
+        WorldShotScene scriptImages;
+        scriptImages.images = scriptHost.Entities().PreparedImages();
+        if (!scriptGpu.UploadTextures(scriptImages) || !entryGpu.UploadTextures(scriptHost.EntryExits().PreparedModel())) {
+            std::printf("play-fail script entity textures\n");
+            return 1;
+        }
     }
     RealtimeEnvironment environment;
     if (!environment.Load(gameDir, error, sizeof(error), hour, weather) ||
@@ -816,6 +819,8 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
     bool demoEntered = false;
     double demoNextExitAttempt = 9.0;
     Uint64 gameNs = 0;
+    Uint64 waterTicks = 0, waterPreviousNs = 0;
+    float waterPreviousX = camera.x, waterPreviousY = camera.y;
     bool paused = false;
     while (running) {
         const Uint64 now = SDL_GetTicksNS();
@@ -827,6 +832,7 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
         previous = now;
         SDL_Event event{};
         RealtimeGameplayInput input{};
+        bool collectJustDown = false;
         while (SDL_PollEvent(&event)) {
             if (event.type == SDL_EVENT_QUIT || event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED ||
                 (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE)) {
@@ -835,6 +841,7 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat) {
                 input.Jump |= event.key.key == SDLK_SPACE;
                 input.Interact |= event.key.key == SDLK_F;
+                collectJustDown |= newGame && event.key.key == SDLK_TAB;
                 if (event.key.key == SDLK_TAB && gameplayEnabled && !newGame) {
                     freecam = !freecam;
                 }
@@ -940,10 +947,19 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
         if (newGame) {
             const auto& state = gameplay.State();
             auto& entities = scriptHost.Entities();
-            entities.Tick({state.PedRoot.X, state.PedRoot.Y, state.PedRoot.Z},
-                {camera.x, camera.y, camera.z}, state.Ready, state.InVehicle);
-            if (!entities.AdvanceTime(static_cast<std::uint32_t>(gameNs / 1'000'000), gameplayError)) {
+            NativeScriptPropertyInput propertyInput;
+            propertyInput.FrameCounter = static_cast<std::uint32_t>(frames);
+            propertyInput.CollectJustDown = collectJustDown;
+            if (!scriptHost.TickProperties({camera.x, camera.y, camera.z}, state.Ready, propertyInput, gameplayError) ||
+                !entities.AdvanceTime(static_cast<std::uint32_t>(gameNs / 1'000'000), gameplayError)) {
                 std::printf("play-fail script entity clock: %s\n", gameplayError.c_str());
+                return 1;
+            }
+            // Each unpaused frame is published once here. Type18 does not debit
+            // cash or remove the pickup: the remaining purchase belongs to SCM.
+            if (entities.Interaction().Status == NativeScriptPropertyInteractionStatus::ScriptPurchaseRequired) {
+                std::printf("play-property-terminal status=Unsupported frame=%u purchase-completed=0\n",
+                    entities.Interaction().FrameCounter);
                 return 1;
             }
         }
@@ -960,6 +976,29 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             hour = std::fmod(hour + dt / 60.0f, 24.0f);
             environment.SetHour(hour);
         }
+        // Original capped simulation cadence, independent of SDL presentation.
+        // Catch up every tick; linearly sample the observed camera trajectory
+        // between presentation snapshots. Native minimization adds no game time.
+        const Uint64 targetWaterTicks = gameNs / 1'000'000'000 * 30 + gameNs % 1'000'000'000 * 30 / 1'000'000'000;
+        while (waterTicks < targetWaterTicks) {
+            ++waterTicks;
+            const Uint64 tickNs = waterTicks / 30 * 1'000'000'000 + waterTicks % 30 * 1'000'000'000 / 30;
+            const float fraction = gameNs > waterPreviousNs
+                ? std::clamp(static_cast<float>(tickNs - waterPreviousNs) / static_cast<float>(gameNs - waterPreviousNs), 0.0f, 1.0f) : 1.0f;
+            RealtimeWaterFlowTick tick;
+            tick.frame = static_cast<std::uint32_t>(waterTicks);
+            tick.gameMs = static_cast<std::uint32_t>(tickNs / 1'000'000);
+            tick.timeStep = 50.0f / 30.0f;
+            tick.cameraX = waterPreviousX + (camera.x - waterPreviousX) * fraction;
+            tick.cameraY = waterPreviousY + (camera.y - waterPreviousY) * fraction;
+            if (!environment.AdvanceWaterFlow(tick)) {
+                std::printf("play-fail water flow frame=%u\n", tick.frame);
+                return 1;
+            }
+        }
+        waterPreviousNs = gameNs;
+        waterPreviousX = camera.x;
+        waterPreviousY = camera.y;
         auto waterState = environment.GetWaterState();
         waterState.gameMs = static_cast<std::uint32_t>(gameNs / 1'000'000);
         if (!environment.SetWaterState(waterState)) {
@@ -1016,6 +1055,8 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
         }
         if (newGame) {
             entryGpu.DrawMarkers(scriptHost.EntryExits().Actors());
+            hud.DrawPropertyPrices(scriptHost.Entities().PriceLabels(), width, height,
+                0.1f, environment.GetParams().farClip, 60.0f);
         }
         RealtimeHudView hudView;
         hudView.cameraYaw = camera.yaw;

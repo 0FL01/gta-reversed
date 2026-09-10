@@ -93,9 +93,42 @@ def main():
     instruction(0x45A29B, "fstp")  # right.y
     instruction(0x45A2E0, "fstp")  # forward.x
     instruction(0x45A302, "fstp")  # forward.y
+    # Exact opcode dispatch: subtract0515, use byte translation, then table.
+    instruction(0x4925DB, "add", 0xFFFFFAEB)
+    instruction(0x4925E3, "cmp", 0x60)
+    assert instruction(0x4925EC, "movzx").operands[1].mem.disp == 0x4935AC
+    assert instruction(0x4925F3, "jmp").operands[0].mem.disp == 0x49350C
+    index = pe.get_data(0x4935AC - base + 0x518 - 0x515, 1)[0]
+    assert index == 2
+    scalar(0x49350C + index * 4, "I", 0x4926E0)
+    instruction(0x4926E0, "push", 4)  # x,y,z,price, THEN fixed text8, THEN output
+    instruction(0x49273B, "call", 0x468C50)
+    instruction(0x492749, "call", 0x6CDA20)
+    instruction(0x492750, "call", 0x469150)
+    instruction(0x492788, "push", 18)
+    instruction(0x49279E, "call", 0x45B650)
+    instruction(0x4927AF, "call", 0x4692E0)
+    scalar(0x8A2528, "d", -100.0)
+    scalar(0x8A1DD0, "d", 0.5)
+    instruction(0x5D024A, "push", 0x93FE74)
+    instruction(0x5D024F, "push", 0x8B4208)
+    assert pe.get_data(0x8B4208 - base, 15) == b"property_fsale\0"
+    instruction(0x459E43, "je", 0x459E80)
+    instruction(0x459E80, "mov", 47)
+    assert pe.get_data(0x9148D8 - base + 47 * 8, 3) == bytes((255,100,100))
+    scalar(0x8A2580, "d", 14.0)
+    scalar(0x8A2270, "d", float(struct.unpack("<f", struct.pack("<f", 0.7))[0]))
+    scalar(0x8A3248, "d", 255.0)
+    instruction(0x459FB5, "call", 0x7539F0)  # projected before admitted to16 queue
+    instruction(0x45A0A2, "movzx")  # uint16 object cost, then five times this
+    instruction(0x597E1F, "fcomp")
+    scalar(0x8A1C18, "f", 3000.0)  # quick-help strict elapsed>3000 branch
+    instruction(0x597E2A, "jne", 0x597E48)
     print(f"STATIC-RE PASS retail-size={len(data)} sha256={digest}")
     print("help retail=597B40 reference=58B6E0 duration=(lines+3)*1000 alpha=200 fade=600-2*elapsed scale=200/1000 replacement=reset")
     print("property retail=459C10 reference=455720 time-mask=2047 angle-scale=0.003056640736758709 scale=1+0.6*(max(1,1.2/maxCOLextent)-1)")
+    print("0518 STATIC handler=4926E0 table=49350C translation=4935AC index=2 collect=4 text=8 output=1 type=18 modelBinding=property_fsale groundSentinel=-100 groundAdd=0.5")
+    print("sale-label STATIC category=47 rgb=255,100,100 radiusXY=14 zAdd=0.7 alpha=255*(1-distance/14) projectedQueue=16 quickHelpMs=3000")
 
 
 if __name__ == "__main__":

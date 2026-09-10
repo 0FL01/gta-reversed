@@ -20,6 +20,10 @@ def extract_oracle():
     start = source.index('void CWaterLevel::CalculateWavesOnlyForCoordinate(')
     end = source.index('\n// 0x6E5810', start)
     function = source[start:end]
+    start = source.index('void CWaterLevel::UpdateFlow()')
+    flow = source[start:source.index('\n// 0x6EB690', start)]
+    start = source.index('uint32 CWaterLevel::AddWaterLevelVertex(')
+    vertex = source[start:source.index('\nstruct SortableVtx', start)]
     # Keep the original function text unmodified. These are isolated stand-ins
     # for its static refs and vector/math dependencies, not the native module.
     prefix = r'''
@@ -27,10 +31,33 @@ def extract_oracle():
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <functional>
+#include <ranges>
+#include <tuple>
 namespace water_oracle {
+using int16 = int16_t;
 using int32 = int32_t;
+using uint32 = uint32_t;
+namespace rng = std::ranges;
+namespace rngv {
+    template<class Range> auto enumerate(Range r) {
+        return std::views::iota(size_t{0}, std::ranges::size(r)) | std::views::transform([r](size_t i) {
+            return std::tuple<size_t, decltype(r[i])>{i, r[i]};
+        });
+    }
+}
 constexpr float PI = 3.14159265358979323846f, TWO_PI = 2.0f * PI, E_CONST = .577f;
 struct CVector2D { float x, y; };
+struct Bounds {
+    bool DoConstrainPoint(CVector2D& p) const {
+        const auto old = p;
+        p.x = std::clamp(p.x, -3000.f, 3000.f); p.y = std::clamp(p.y, -3000.f, 3000.f);
+        return p.x != old.x || p.y != old.y;
+    }
+};
+constexpr Bounds WORLD_BOUNDS{};
+struct CRenPar { float z{}, big{}, small{}; int8_t flowX{}, flowY{}; };
+struct Vertex { int16_t x{}, y{}; CRenPar rp{}; };
 struct CVector {
     float x, y, z;
     CVector(float a, float b, float c) : x(a), y(b), z(c) {}
@@ -38,7 +65,12 @@ struct CVector {
     void Normalise() { const float r = 1.0f / std::sqrt(x*x+y*y+z*z); x *= r; y *= r; z *= r; }
 };
 struct CWeather { static inline float Wavyness, SunGlare; };
-struct CTimer { static inline uint32_t time; static uint32_t GetTimeInMS() { return time; } };
+struct CTimer {
+    static inline uint32_t time, m_FrameCounter;
+    static inline float step;
+    static uint32_t GetTimeInMS() { return time; }
+    static float GetTimeStep() { return step; }
+};
 struct CMaths {
     static float GetSinFast(float rad) {
         static const auto table = [] {
@@ -56,12 +88,21 @@ struct CWaterLevel {
     static inline float faWaveMultipliersY[8]{.75f,.9f,.95f,.82f,.7f,.75f,.9f,1};
     static inline uint32_t m_nWaterTimeOffset;
     static void CalculateWavesOnlyForCoordinate(int32,int32,float,float,float&,float&,float&,CVector&);
+    static inline std::array<Vertex, 2048> m_aVertices;
+    static inline uint32 NumWaterVertices;
+    static uint32 AddWaterLevelVertex(int32, int32, CRenPar);
+    static inline CVector2D m_CurrentFlow{}, m_CurrentDesiredFlow{};
+    static inline std::function<void()> nearestCallback;
+    static void FindNearestWaterAndItsFlow() { nearestCallback(); }
+    static void UpdateFlow();
 };
 '''
     digest = hashlib.sha256(function.encode()).hexdigest()
     (OUTPUT / 'RealtimeWaterProbe.oracle.h').write_text(
-        '// Extracted source SHA256 ' + digest + '\n' + prefix + function + '\n}\n')
+        '// Extracted source SHA256 ' + digest + '\n' + prefix + function + flow + vertex + '\n}\n')
     print('water-oracle-source-sha256=' + digest, flush=True)
+    for name, body in [('UpdateFlow', flow), ('AddWaterLevelVertex', vertex)]:
+        print('water-oracle-' + name + '-sha256=' + hashlib.sha256(body.encode()).hexdigest(), flush=True)
 
 
 REGRESSIONS = ('RealtimeStreamingProbe', 'VehicleMaterialProbe', 'RealtimeHudProbe')

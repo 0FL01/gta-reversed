@@ -89,21 +89,21 @@ struct Dictionary {
     ~Dictionary() { Value->destroy(); }
 };
 WorldShotScene ReadStaticModel(const std::string& model, const std::string& txd, const NativeScriptStaticModelOptions& options = {});
-WorldShotScene ReadModel(NativeScriptPropertyGeometry& property) {
+WorldShotScene ReadModel(NativeScriptPropertyGeometry& property, int modelId) {
     auto ide = ReadFile("data/maps/generic/dynamic.ide");
     ide.push_back(0);
     std::string model, txd;
     const char* line = reinterpret_cast<const char*>(ide.data());
     while (*line) {
         int id = -1; char dff[64]{}, dict[64]{};
-        if (std::sscanf(line, "%d, %63[^,], %63[^,]", &id, dff, dict) == 3 && id == NativeScriptPickup::Model) {
+        if (std::sscanf(line, "%d, %63[^,], %63[^,]", &id, dff, dict) == 3 && id == modelId) {
             model = dff; txd = dict; break;
         }
         const auto* next = std::strchr(line, '\n'); if (!next) break; line = next + 1;
     }
     const auto stem = [](const std::string& s) { return !s.empty() && s.size() <= 19 && std::all_of(s.begin(), s.end(), [](char c) {
         return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'; }); };
-    Require(stem(model) && stem(txd), "missing/invalid model 1272 IDE binding");
+    Require(stem(model) && stem(txd), "missing/invalid property IDE binding");
     // Verified generic dynamic-model library; resolve its chunk by BOTH source
     // name and IDE ID. No collision-context ownership or global COL loader.
     const auto col = ReadEntry("dynamic.col");
@@ -121,7 +121,7 @@ WorldShotScene ReadModel(NativeScriptPropertyGeometry& property) {
             Require(!found, "ambiguous property COL binding");
             NativeCollisionModel parsed; std::string error;
             Require(NativeCollisionAssets::Parse(std::span(col).subspan(offset, size), "models/gta3.img:dynamic.col", parsed, error), error);
-            Require(parsed.HeaderId == NativeScriptPickup::Model, "property COL/IDE model ID mismatch");
+            Require(parsed.HeaderId == modelId, "property COL/IDE model ID mismatch");
             property.ColMin = parsed.Min; property.ColMax = parsed.Max;
             property.ColLibrary = parsed.Library; property.ColHeaderId = parsed.HeaderId;
             property.Scale = NativeScriptPropertyScale(parsed.Min, parsed.Max); found = true;
@@ -224,6 +224,18 @@ void Bounds(WorldShotScene& scene) {
     }
     if (scene.meshes.empty()) { std::fill(std::begin(scene.bboxMin), std::end(scene.bboxMin), 0); std::fill(std::begin(scene.bboxMax), std::end(scene.bboxMax), 0); }
 }
+// Default native keyboard binding: mode0 CollectPickupJustDown uses L1,
+// mapped to PED_ANSWER_PHONE (TAB). Unknown formatting is a real barrier.
+std::string PropertyText(std::string text, std::int32_t price) {
+    const auto replace = [&](std::string_view token, const std::string& value) {
+        for (auto pos = text.find(token); pos != std::string::npos; pos = text.find(token, pos + value.size())) text.replace(pos, token.size(), value);
+    };
+    replace("~k~~PED_ANSWER_PHONE~", "TAB");
+    replace("~1~", std::to_string(price));
+    Require(!text.empty() && text.size() < 400 && std::all_of(text.begin(), text.end(), [](unsigned char c) {
+        return c == '\n' || (c >= 32 && c < 128 && c != '~'); }), "unsupported property GXT/control format");
+    return text;
+}
 }
 
 bool NativeScriptEntities_LoadStaticModel(const char* gameDir, const std::string& model,
@@ -234,17 +246,21 @@ bool NativeScriptEntities_LoadStaticModel(const char* gameDir, const std::string
         scene = std::move(prepared); error.clear(); return true;
     } catch (const std::exception& e) { error = e.what(); return false; }
 }
-bool NativeScriptEntities_LoadRadar(const char* gameDir, WorldShotImage& image, std::string& error) {
+bool NativeScriptEntities_LoadRadar(const char* gameDir, WorldShotImage& image, std::string& error, int sprite) {
     try {
         RwScope scope; OS_SetFilePathOffset(gameDir);
         auto bytes = ReadFile("models/hud.txd"); Dictionary dictionary(bytes);
         WorldShotImage decoded{};
-        Require(TexSample_Decode(dictionary.Value->find("radar_propertyR"), decoded) && !decoded.rgba.empty(), "missing propertyR radar sprite");
+        Require(sprite == 31 || sprite == 32, "unprepared property radar ID");
+        Require(TexSample_Decode(dictionary.Value->find(sprite == 31 ? "radar_propertyG" : "radar_propertyR"), decoded) && !decoded.rgba.empty(), "missing property radar sprite");
         image = std::move(decoded); error.clear(); return true;
     } catch (const std::exception& e) { error = e.what(); return false; }
 }
+bool NativeScriptEntities_LoadRadar(const char* gameDir, WorldShotImage& image, std::string& error) {
+    return NativeScriptEntities_LoadRadar(gameDir, image, error, 32);
+}
 bool NativeScriptRadarVisible(const NativeScriptRadarBlip& b, float distance, bool onMission, unsigned zoom, bool exterior) {
-    return b.Active && b.Sprite == 32 && exterior && !(b.Contact && onMission) &&
+    return b.Active && (b.Sprite == 32 || b.Sprite == 31) && exterior && !(b.Contact && onMission) &&
         (b.Display == 2 || b.Display == 3) && (!b.ShortRange || (!zoom && distance <= 1.0f));
 }
 NativeScriptEntities::NativeScriptEntities(std::size_t pickups, std::size_t blips): m_Pickups(pickups), m_Blips(blips) {
@@ -254,22 +270,41 @@ bool NativeScriptEntities::LoadBeforeWorker(const char* gameDir, std::string& er
     if (m_Loaded) { error = "property assets already initialized"; return false; }
     try {
         RwScope scope; OS_SetFilePathOffset(gameDir);
-        NativeScriptPropertyGeometry property;
-        auto model = ReadModel(property); Bounds(model);
+        NativeScriptPropertyGeometry property, saleGeometry;
+        auto model = ReadModel(property, 1272); Bounds(model);
+        auto saleModel = ReadModel(saleGeometry, 1273); Bounds(saleModel);
+        auto images = model.images;
+        images.insert(images.end(), saleModel.images.begin(), saleModel.images.end());
         WorldShotImage radar{}; Require(NativeScriptEntities_LoadRadar(gameDir, radar, error), error);
+        WorldShotImage saleRadar{}; Require(NativeScriptEntities_LoadRadar(gameDir, saleRadar, error, 31), error);
         GxtTable table; char err[256]{}; Require(GxtText_Load(gameDir, "english", table, err, sizeof(err)), err);
         std::array<std::string, 3> messages;
         std::array<std::uint32_t, 3> lineCounts{};
         MenuHudFont helpFont;
         Require(MenuShot_LoadPricedownFont(gameDir, helpFont, err, sizeof(err)), err); // font1 + font-ID 1 metrics
         constexpr const char* keys[]{"PROP_3", "PROP_4", "FESZ_CA"};
+        std::array<std::string, 3> saleMessages, labelMessages;
         for (std::size_t i = 0; i < messages.size(); ++i) {
             Require(GxtText_Find(table, keys[i], messages[i]), "property GXT key missing");
             const auto plain = !messages[i].empty() && messages[i].size() < 400 && std::all_of(messages[i].begin(), messages[i].end(),
                 [](unsigned char c) { return c == '\n' || (c >= 32 && c < 128 && c != '~'); });
             if (plain) lineCounts[i] = std::uint32_t(NativeScriptHelpLines(messages[i], helpFont.prop).size());
+            // ModifyStringLabelForControlSetting: mode0/1 changes final suffix
+            // after '_' to L (including PROP_4); FESZ_CA has no such suffix.
+            std::string key(keys[i]);
+            if (key.size() >= 2 && key[key.size()-2] == '_') key.back() = 'L';
+            Require(GxtText_Find(table, key.c_str(), saleMessages[i]), "sale control GXT key missing");
+            (void)PropertyText(saleMessages[i], 0);
+            labelMessages[i] = PropertyText(messages[i], 0);
         }
+        std::array<std::string, 2> denials;
+        Require(GxtText_Find(table, "PROP_1", denials[0]) && GxtText_Find(table, "PROP_2", denials[1]), "sale denial GXT missing");
+        for (auto& denial : denials) denial = PropertyText(std::move(denial), 0);
         m_Model = std::move(model); m_Radar = std::move(radar); m_Messages = std::move(messages);
+        m_ForSaleModel = std::move(saleModel); m_ForSaleGeometry = std::move(saleGeometry);
+        m_ForSaleRadar = std::move(saleRadar); m_Images = std::move(images);
+        m_SaleMessages = std::move(saleMessages); m_LabelMessages = std::move(labelMessages);
+        m_Denials = std::move(denials); std::copy_n(helpFont.prop, m_HelpWidths.size(), m_HelpWidths.begin());
         m_MessageLines = lineCounts;
         m_PropertyGeometry = std::move(property);
         m_Loaded = true; error.clear(); return true;
@@ -288,12 +323,22 @@ const NativeScriptRadarBlip* NativeScriptEntities::ResolveBlip(NativeScriptBlipR
     return slot < m_Blips.size() && m_Blips[slot].Active && m_Blips[slot].Reference.Value == ref.Value ? &m_Blips[slot] : nullptr;
 }
 NativeScriptReferenceResult<NativeScriptPickupRef> NativeScriptEntities::CreateLockedProperty(const NativeScriptLockedPropertyRequest& r) {
+    return CreateProperty({r.Id, r.Position, 0, r.Text}, false);
+}
+NativeScriptReferenceResult<NativeScriptPickupRef> NativeScriptEntities::CreateForSaleProperty(const NativeScriptForSalePropertyRequest& r) {
+    return CreateProperty(r, true);
+}
+NativeScriptReferenceResult<NativeScriptPickupRef> NativeScriptEntities::CreateProperty(const NativeScriptForSalePropertyRequest& r, bool forSale) {
+    const std::uint16_t opcode = forSale ? 0x0518 : 0x0517;
     if (const auto* old = FindEvent(r.Id)) {
-        if (old->Opcode != 0x0517 || old->Position != r.Position || old->Text != r.Text || !ResolvePickup({old->Reference})) return {Error("mismatched/stale property replay"), {}};
+        if (old->Opcode != opcode || old->Position != r.Position || old->Text != r.Text || old->Argument != r.Price || !ResolvePickup({old->Reference})) return {Error("mismatched/stale property replay"), {}};
         return {Ready(), {old->Reference}};
     }
     if (!m_Loaded) return {Unsupported("property assets must be prepared before worker startup"), {}};
     if (!Finite(r.Position)) return {Error("nonfinite property position"), {}};
+    // Original 0518 Z<=-100 requests CWorld ground +0.5. This entity service
+    // has no collision authority; fail explicitly rather than invent a height.
+    if (forSale && r.Position.Z <= -100) return {Unsupported("sale ground sentinel requires owned world ground service"), {}};
     for (const auto v : {r.Position.X, r.Position.Y, r.Position.Z}) if (v * 8 < -32768 || v * 8 > 32767) return {Error("property position compression overflow"), {}};
     const auto free = std::find_if(m_Pickups.begin(), m_Pickups.end(), [](const auto& p) { return !p.Active && (p.Reference.Value == -1 || (uint32(p.Reference.Value) >> 16) < 0xfffe); });
     if (free == m_Pickups.end()) return {Error("pickup pool capacity exhausted"), {}};
@@ -305,9 +350,13 @@ NativeScriptReferenceResult<NativeScriptPickupRef> NativeScriptEntities::CreateL
     auto text = r.Text; for (auto& c : text) if (c >= 'a' && c <= 'z') c -= 'a' - 'A';
     const std::string key(text.data(), strnlen(text.data(), text.size()));
     const auto messageIndex = key == "PROP_3" ? 0 : key == "PROP_4" ? 1 : 2;
-    if (!m_MessageLines[messageIndex]) return {Unsupported("property help requires unimplemented GXT/control-key expansion"), {}};
-    pickup.Message = m_Messages[messageIndex];
-    pickup.Actor = m_Model; pickup.Active = true;
+    if (!forSale && !m_MessageLines[messageIndex]) return {Unsupported("property help requires unimplemented GXT/control-key expansion"), {}};
+    pickup.Message = forSale ? PropertyText(m_SaleMessages[messageIndex], r.Price) : m_Messages[messageIndex];
+    pickup.MessageLines = std::uint32_t(NativeScriptHelpLines(pickup.Message, m_HelpWidths).size());
+    pickup.Label = m_LabelMessages[messageIndex];
+    pickup.Price = r.Price; pickup.CostValue = std::uint16_t(uint32(r.Price) / 5u);
+    pickup.Model = forSale ? 1273 : 1272; pickup.Type = forSale ? 18 : 17;
+    pickup.Actor = forSale ? m_ForSaleModel : m_Model; pickup.Active = true;
     // CPickup::GiveUsAPickUpObject: position=compressed position, heading=-pi/2.
     for (auto& mesh : pickup.Actor.meshes) for (std::size_t i = 0; i < mesh.pos.size(); i += 3) {
         const auto x = mesh.pos[i], nx = mesh.nrm[i];
@@ -317,7 +366,7 @@ NativeScriptReferenceResult<NativeScriptPickupRef> NativeScriptEntities::CreateL
     Bounds(pickup.Actor);
     // All potentially throwing preparation precedes the commit; move assignment
     // publishes a generation and its actual geometry together, never a zero ref.
-    m_Events.push_back({r.Id, 0x0517, r.Position, r.Text, 0, pickup.Reference.Value});
+    m_Events.push_back({r.Id, opcode, r.Position, r.Text, r.Price, pickup.Reference.Value});
     *free = std::move(pickup); ++m_Revision; return {Ready(), free->Reference};
 }
 NativeScriptReferenceResult<NativeScriptBlipRef> NativeScriptEntities::CreateContactBlip(const NativeScriptContactBlipRequest& r) {
@@ -325,12 +374,13 @@ NativeScriptReferenceResult<NativeScriptBlipRef> NativeScriptEntities::CreateCon
         if (old->Opcode != 0x0570 || old->Position != r.Position || old->Argument != r.Sprite || !ResolveBlip({old->Reference})) return {Error("mismatched/stale blip replay"), {}};
         return {Ready(), {old->Reference}};
     }
-    if (!m_Loaded || r.Sprite != 32) return {Unsupported("contact sprite is not prepared by this bounded host"), {}};
+    if (!m_Loaded || (r.Sprite != 32 && r.Sprite != 31)) return {Unsupported("contact sprite is not prepared by this bounded host"), {}};
     if (!Finite(r.Position)) return {Error("nonfinite blip position"), {}};
     const auto free = std::find_if(m_Blips.begin(), m_Blips.end(), [](const auto& b) { return !b.Active && (b.Reference.Value == -1 || (uint32(b.Reference.Value) >> 16) < 0xfffe); });
     if (free == m_Blips.end()) return {Error("radar pool capacity exhausted"), {}};
     NativeScriptRadarBlip blip;
     blip.Reference = {NextRef(free->Reference.Value, std::size_t(free - m_Blips.begin()))}; blip.Position = r.Position; blip.Active = true;
+    blip.Sprite = r.Sprite;
     m_Events.push_back({r.Id, 0x0570, r.Position, {}, r.Sprite, blip.Reference.Value});
     *free = blip; ++m_Revision; return {Ready(), blip.Reference};
 }
@@ -347,7 +397,9 @@ NativeScriptServiceResult NativeScriptEntities::SetBlipDisplay(const NativeScrip
 }
 bool NativeScriptEntities::RemovePickup(NativeScriptPickupRef ref) {
     if (!ResolvePickup(ref)) return false;
-    auto& p = m_Pickups[uint32(ref.Value) & 0xffff]; p.Active = false; p.Actor = {}; m_Actors = {}; ++m_Revision; return true;
+    auto& p = m_Pickups[uint32(ref.Value) & 0xffff]; p.Active = false; p.Actor = {}; m_Actors = {}; m_Labels.clear();
+    if (m_Interaction.Pickup.Value == ref.Value) m_Interaction = {};
+    ++m_Revision; return true;
 }
 bool NativeScriptEntities::RemoveBlip(NativeScriptBlipRef ref) {
     if (!ResolveBlip(ref)) return false;
@@ -355,7 +407,18 @@ bool NativeScriptEntities::RemoveBlip(NativeScriptBlipRef ref) {
 }
 void NativeScriptEntities::Tick(NativeScriptPosition ped, NativeScriptPosition camera, bool alive, bool inVehicle) {
     Require(Finite(ped) && Finite(camera), "nonfinite property frame input");
-    m_Frame = FrameInput{ped, camera, alive, inVehicle};
+    m_Frame = FrameInput{ped, camera, alive, inVehicle, {}};
+}
+void NativeScriptEntities::Tick(NativeScriptPosition ped, NativeScriptPosition camera, bool alive, bool inVehicle, const NativeScriptPropertyInput& input) {
+    Require(Finite(ped) && Finite(camera), "nonfinite property frame input");
+    m_Frame = FrameInput{ped, camera, alive, inVehicle, input};
+}
+NativeScriptPropertyInteractionStatus NativeScriptPropertyCollect(std::int32_t price,
+    const NativeScriptPropertyInput& input, std::uint8_t buffer) {
+    if (!buffer) return NativeScriptPropertyInteractionStatus::None;
+    if (input.OnMission) return NativeScriptPropertyInteractionStatus::OnMission;
+    if (input.Money < price) return NativeScriptPropertyInteractionStatus::InsufficientFunds;
+    return NativeScriptPropertyInteractionStatus::ScriptPurchaseRequired;
 }
 bool NativeScriptEntities::AdvanceTime(std::uint32_t now, std::string& error) try {
     if (m_HasTime && now - m_GameMs > 0x7fffffff) { error = "property game time moved backwards or exceeded half-range"; return false; }
@@ -364,26 +427,76 @@ bool NativeScriptEntities::AdvanceTime(std::uint32_t now, std::string& error) tr
     }
     auto help = m_Help;
     auto helpMessage = m_HelpMessage;
+    auto buffer = m_CollectBuffer;
+    auto collectFrame = m_CollectFrame;
+    auto interaction = m_Interaction;
+    bool newCollectFrame = false;
+    if (m_Frame && m_Frame->Property) {
+        const auto& input = *m_Frame->Property;
+        if (collectFrame && input.FrameCounter - *collectFrame > 0x7fffffff) { error = "property frame counter moved backwards"; return false; }
+        if (collectFrame && input.FrameCounter == *collectFrame && m_PublishedFrame && m_PublishedFrame->Property != m_Frame->Property) {
+            error = "property collect inputs changed within a published frame"; return false;
+        }
+        newCollectFrame = !input.Replay && (!collectFrame || input.FrameCounter != *collectFrame);
+        if (input.Replay) interaction = {}; // source Update returns before any collect attempt
+        if (newCollectFrame) {
+            collectFrame = input.FrameCounter; interaction = {};
+            if (input.CollectJustDown && !input.ControlsDisabled) buffer = 6;
+            else if (buffer) --buffer;
+            if (input.Targeting) buffer = 0;
+        }
+    }
+    std::uint64_t helpChanges = 0;
+    std::vector<NativeScriptPropertyLabel> labels;
     std::vector<std::size_t> latches;
     std::vector<std::pair<std::size_t, WorldShotScene>> poses;
-    WorldShotScene actors{}; actors.images = m_Model.images;
+    WorldShotScene actors{}; actors.images = m_Images;
     for (std::size_t i = 0; i < m_Pickups.size(); ++i) {
         const auto& p = m_Pickups[i]; if (!p.Active) continue;
-        auto actor = NativeScriptPropertyActor(m_Model, p.Position, m_PropertyGeometry.Scale, now);
+        const bool sale = p.Type == 18;
+        auto actor = NativeScriptPropertyActor(sale ? m_ForSaleModel : m_Model, p.Position,
+            sale ? m_ForSaleGeometry.Scale : m_PropertyGeometry.Scale, now);
         if (m_Frame) {
             const auto& f = *m_Frame;
             const auto dx = f.Ped.X - p.Position.X, dy = f.Ped.Y - p.Position.Y;
-            if (f.Alive && !f.InVehicle && !p.HelpMessageDisplayed && dx*dx + dy*dy < 1.8f && std::abs(f.Ped.Z - p.Position.Z) < 2.0f) {
-                const auto message = std::find(m_Messages.begin(), m_Messages.end(), p.Message);
-                assert(message != m_Messages.end());
-                help.Show(p.Message, m_MessageLines[std::size_t(message - m_Messages.begin())]);
-                helpMessage = p.Message; latches.push_back(i);
-            }
             const auto cx = f.Camera.X - p.Position.X, cy = f.Camera.Y - p.Position.Y;
-            if (cx*cx + cy*cy < 10000) { // CPickup::IsVisible, XY <100m
+            const bool visible = cx*cx + cy*cy < 10000 && !(sale && f.Property && (f.Property->Cutscene || f.Property->Widescreen));
+            if (f.Alive && !f.InVehicle && dx*dx + dy*dy < 1.8f && std::abs(f.Ped.Z - p.Position.Z) < 2.0f) {
+                if (!sale && !p.HelpMessageDisplayed) {
+                    help.Show(p.Message, p.MessageLines);
+                    helpMessage = p.Message; latches.push_back(i); ++helpChanges;
+                } else if (sale && visible && newCollectFrame && !f.Property->Busy &&
+                    i >= 620 * (f.Property->FrameCounter % 6) / 6 && i < 620 * (f.Property->FrameCounter % 6 + 1) / 6) {
+                    const auto& input = *f.Property;
+                    if (!input.HelpBlocked && !help.Displayed()) {
+                        help.Show(p.Message, p.MessageLines); helpMessage = p.Message; ++helpChanges;
+                    }
+                    const auto status = NativeScriptPropertyCollect(p.Price, input, buffer);
+                    if (status != NativeScriptPropertyInteractionStatus::None) {
+                        interaction = {status, p.Reference, p.Price, input.Money, input.FrameCounter};
+                        if (!input.HelpBlocked) {
+                            helpMessage = status == NativeScriptPropertyInteractionStatus::ScriptPurchaseRequired ? "" :
+                                m_Denials[status == NativeScriptPropertyInteractionStatus::OnMission ? 1 : 0];
+                            help.Show(helpMessage, std::uint32_t(NativeScriptHelpLines(helpMessage, m_HelpWidths).size()), true); ++helpChanges;
+                        }
+                    }
+                }
+            }
+            if (visible) { // CPickup::IsVisible, XY <100m
+                const auto first = actors.meshes.size();
                 actors.meshes.insert(actors.meshes.end(), actor.meshes.begin(), actor.meshes.end());
+                if (sale) for (std::size_t m = first; m < actors.meshes.size(); ++m) for (auto& image : actors.meshes[m].triImg) if (image >= 0) image += int(m_Model.images.size());
                 actors.stats.triangles += actor.stats.triangles; actors.stats.atomics += actor.stats.atomics;
                 actors.stats.vertices += actor.stats.vertices;
+                // DoPickUpEffects: parent admits at most16 AFTER near/far
+                // screen projection; candidates retain source pool order.
+                const auto distance = std::sqrt(cx*cx + cy*cy);
+                if (sale && distance < 14) {
+                    const auto cost = uint32(p.CostValue)*5u;
+                    labels.push_back({p.Reference, {p.Position.X, p.Position.Y, p.Position.Z + 0.7f}, cost,
+                        cost ? "$" + std::to_string(cost) : p.Label, {255,100,100},
+                        std::uint8_t((1.0 - double(distance)/14.0)*255.0)});
+                }
             }
         }
         poses.emplace_back(i, std::move(actor));
@@ -394,7 +507,8 @@ bool NativeScriptEntities::AdvanceTime(std::uint32_t now, std::string& error) tr
     // once-only latches, help clock and current-phase visible meshes agree.
     for (auto& [slot, actor] : poses) m_Pickups[slot].Actor = std::move(actor);
     for (const auto slot : latches) m_Pickups[slot].HelpMessageDisplayed = true;
-    m_Help = std::move(help); m_HelpMessage = std::move(helpMessage); m_HelpRevision += latches.size();
+    m_Help = std::move(help); m_HelpMessage = std::move(helpMessage); m_HelpRevision += helpChanges;
+    m_CollectBuffer = buffer; m_CollectFrame = collectFrame; m_Interaction = interaction; m_Labels = std::move(labels);
     m_Actors = std::move(actors); m_PublishedFrame = m_Frame;
     m_GameMs = now; m_HasTime = true; m_PresentationRevision = m_Revision;
     error.clear(); return true;
@@ -459,14 +573,15 @@ std::vector<std::string> NativeScriptHelpLines(std::string_view text, std::span<
     }
     return lines;
 }
-void NativeScriptHelpPresentation::Show(std::string_view text, std::uint32_t lines) {
-    assert(text.size() < 400 && lines && lines <= 400);
+void NativeScriptHelpPresentation::Show(std::string_view text, std::uint32_t lines, bool quick) {
+    assert(text.size() < 400 && (text.empty() || lines) && lines <= 400);
     std::string owned(text);
     m_Text = std::move(owned);
     m_Lifetime = (lines + 3) * 1000; // retail 597c54: GetNumberLines + 3 seconds
     // SetHelpMessage clears all three buffers and resets nonpermanent state=0,
     // including when replacing an active message (594ce8..594dd2).
     m_State = m_Alpha = 0; m_NewMessage = !m_Text.empty();
+    m_Quick = quick;
 }
 bool NativeScriptHelpPresentation::AdvanceTime(std::uint32_t now, std::string& error) {
     const auto elapsed = m_HasTime ? now - m_LastTime : 0;
@@ -481,7 +596,7 @@ bool NativeScriptHelpPresentation::AdvanceTime(std::uint32_t now, std::string& e
     case 0: break;
     case 1:
         m_Alpha = 200; m_FadeTimer = 600;
-        if (m_Timer > m_Lifetime) m_State = 3; // source comparison precedes timer increment
+        if (m_Timer > m_Lifetime || (m_Quick && m_Timer > 3000)) m_State = 3; // source comparison precedes timer increment
         break;
     case 2:
         m_FadeTimer += 2 * std::int64_t(elapsed);

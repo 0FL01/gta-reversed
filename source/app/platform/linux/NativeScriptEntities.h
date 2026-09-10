@@ -1,4 +1,4 @@
-// Owned locked-property slice. Startup parsers are exclusive; frame APIs use
+// Owned property slice. Startup parsers are exclusive; frame APIs use
 // only owned triangles/RGBA/GXT. No game_sa pool or original-address linkage.
 #pragma once
 #include "app/platform/linux/NativeScriptSession.h"
@@ -28,7 +28,8 @@ struct NativeScriptHelpView {
 // Retail static RE provenance/assertions: NativeScriptEntitiesSourceProbe.py.
 class NativeScriptHelpPresentation {
 public:
-    void Show(std::string_view text, std::uint32_t lines);
+    void Show(std::string_view text, std::uint32_t lines, bool quick = false);
+    bool Displayed() const { return m_State != 0; } // CHud::HelpMessageDisplayed
     // One update per native UNPAUSED frame. Duplicate stamps are idempotent;
     // backwards/ambiguous (>INT32_MAX elapsed) stamps fail without mutation.
     bool AdvanceTime(std::uint32_t gameMs, std::string& error);
@@ -40,7 +41,7 @@ private:
     std::uint64_t m_Timer = 0;
     std::int64_t m_FadeTimer = 0;
     std::uint8_t m_State = 0, m_Alpha = 0;
-    bool m_HasTime = false, m_NewMessage = false;
+    bool m_HasTime = false, m_NewMessage = false, m_Quick = false;
 };
 
 struct NativeScriptPickup {
@@ -50,7 +51,41 @@ struct NativeScriptPickup {
     std::string Message;
     WorldShotScene Actor; // actual prepared DFF; absolute phase rebuilt from bind
     bool Active = false, HelpMessageDisplayed = false;
-    static constexpr int Model = 1272, Type = 17; // eModelID / ePickupType
+    int Model = 1272, Type = 17; // eModelID / ePickupType; sale=1273/18
+    std::int32_t Price = 0; // CPickup::m_nAmmo bits; signed comparison in Update
+    std::uint16_t CostValue = 0; // CObject::m_wCostValue = uint32(price)/5
+    std::uint32_t MessageLines = 0;
+    std::string Label;
+};
+
+// Explicit input to CPickups::Update's sale slice. Money is a READ of the
+// live CPlayerInfo-equivalent, never a credit or a requested purchase amount.
+struct NativeScriptPropertyInput {
+    std::uint32_t FrameCounter = 0;
+    std::int32_t Money = 0;
+    bool OnMission = false, CollectJustDown = false, Targeting = false;
+    bool ControlsDisabled = false, Busy = false, Replay = false;
+    bool Cutscene = false, Widescreen = false, HelpBlocked = false;
+    bool operator==(const NativeScriptPropertyInput&) const = default;
+};
+enum class NativeScriptPropertyInteractionStatus { None, OnMission, InsufficientFunds, ScriptPurchaseRequired };
+struct NativeScriptPropertyInteraction {
+    NativeScriptPropertyInteractionStatus Status = NativeScriptPropertyInteractionStatus::None;
+    NativeScriptPickupRef Pickup;
+    std::int32_t Price = 0, Balance = 0;
+    std::uint32_t FrameCounter = 0;
+};
+// Pickup.cpp:585 never debits/removes/returns isRemoved for type18. A funded
+// press requires subsequent script purchase logic; it is NOT a collected event.
+NativeScriptPropertyInteractionStatus NativeScriptPropertyCollect(std::int32_t price,
+    const NativeScriptPropertyInput& input, std::uint8_t collectBuffer);
+struct NativeScriptPropertyLabel {
+    NativeScriptPickupRef Pickup;
+    NativeScriptPosition Position; // source object position + Z 0.7, project in parent
+    std::uint32_t Price = 0; // 5*uint16(uint32(ammo)/5), not unquantized script price
+    std::string Text;
+    std::array<std::uint8_t, 3> Color{255, 100, 100}; // source category47 RGB
+    std::uint8_t Alpha = 0;
 };
 
 struct NativeScriptRadarBlip {
@@ -67,6 +102,7 @@ bool NativeScriptRadarVisible(const NativeScriptRadarBlip& blip, float distance,
 // Shared startup loader used by the host AND the real HUD.Load. Engine must
 // already be started; restores current dictionary and retains no RW pointers.
 bool NativeScriptEntities_LoadRadar(const char* gameDir, WorldShotImage& image, std::string& error);
+bool NativeScriptEntities_LoadRadar(const char* gameDir, WorldShotImage& image, std::string& error, int sprite);
 // Exclusive startup static DFF/TXD preloader. Returns owned geometry/texels only.
 struct NativeScriptStaticModelOptions {
     bool ResetFrame = false, FirstAtomicOnly = false;
@@ -80,6 +116,7 @@ public:
     explicit NativeScriptEntities(std::size_t pickupCapacity = 620, std::size_t blipCapacity = 175);
     bool LoadBeforeWorker(const char* gameDir, std::string& error);
     NativeScriptReferenceResult<NativeScriptPickupRef> CreateLockedProperty(const NativeScriptLockedPropertyRequest&);
+    NativeScriptReferenceResult<NativeScriptPickupRef> CreateForSaleProperty(const NativeScriptForSalePropertyRequest&);
     NativeScriptReferenceResult<NativeScriptBlipRef> CreateContactBlip(const NativeScriptContactBlipRequest&);
     NativeScriptServiceResult SetBlipDisplay(const NativeScriptBlipDisplayRequest&);
     const NativeScriptPickup* ResolvePickup(NativeScriptPickupRef ref) const;
@@ -92,12 +129,25 @@ public:
     // removes a locked pickup, or treats proximity as successful collection.
     // Stages inputs only. AdvanceTime atomically publishes geometry/help/latches.
     void Tick(NativeScriptPosition ped, NativeScriptPosition camera, bool alive, bool inVehicle);
+    void Tick(NativeScriptPosition ped, NativeScriptPosition camera, bool alive, bool inVehicle, const NativeScriptPropertyInput& input);
     std::span<const NativeScriptPickup> Pickups() const { return m_Pickups; }
     std::span<const NativeScriptRadarBlip> Blips() const { return m_Blips; }
     const WorldShotScene& Actors() const { return m_Actors; } // camera-visible actual actors
     const WorldShotScene& PreparedModel() const { return m_Model; }
+    const WorldShotScene& PreparedForSaleModel() const { return m_ForSaleModel; }
+    const std::vector<WorldShotImage>& PreparedImages() const { return m_Images; }
+    const NativeScriptPropertyGeometry& ForSaleGeometry() const { return m_ForSaleGeometry; }
+    // Pool order candidates: parent projects near/far, then admits at most16.
+    // Pickups::RenderPickUpText: pricedown, centered, proportional, scaleXY=
+    // min(screenWidth/640, projectedWidthOrHeight/30), no background.
+    std::span<const NativeScriptPropertyLabel> PriceLabels() const { return m_Labels; }
+    // Frame result, not a queued collected event. Process once for its published
+    // FrameCounter; duplicate rendering/time calls retain the same identity.
+    const NativeScriptPropertyInteraction& Interaction() const { return m_Interaction; }
+    std::uint8_t CollectBuffer() const { return m_CollectBuffer; }
     const NativeScriptPropertyGeometry& PropertyGeometry() const { return m_PropertyGeometry; }
     const WorldShotImage& RadarImage() const { return m_Radar; }
+    const WorldShotImage* RadarImage(int sprite) const { return sprite == 32 ? &m_Radar : sprite == 31 ? &m_ForSaleRadar : nullptr; }
     const std::string& HelpMessage() const { return m_HelpMessage; }
     std::uint64_t HelpRevision() const { return m_HelpRevision; }
     bool AdvanceTime(std::uint32_t gameMs, std::string& error);
@@ -114,20 +164,27 @@ private:
         std::int32_t Argument = 0, Reference = -1;
     };
     const Event* FindEvent(NativeScriptRequestId id) const;
+    NativeScriptReferenceResult<NativeScriptPickupRef> CreateProperty(const NativeScriptForSalePropertyRequest&, bool forSale);
     std::vector<NativeScriptPickup> m_Pickups;
     std::vector<NativeScriptRadarBlip> m_Blips;
     std::vector<Event> m_Events;
-    WorldShotScene m_Model{}, m_Actors{};
-    NativeScriptPropertyGeometry m_PropertyGeometry;
-    WorldShotImage m_Radar{};
+    WorldShotScene m_Model{}, m_ForSaleModel{}, m_Actors{};
+    NativeScriptPropertyGeometry m_PropertyGeometry, m_ForSaleGeometry;
+    WorldShotImage m_Radar{}, m_ForSaleRadar{};
+    std::vector<WorldShotImage> m_Images;
+    std::vector<NativeScriptPropertyLabel> m_Labels;
     std::array<std::string, 3> m_Messages;
     std::array<std::uint32_t, 3> m_MessageLines{};
+    std::array<std::string, 3> m_SaleMessages, m_LabelMessages;
+    std::array<std::string, 2> m_Denials;
+    std::array<int, 208> m_HelpWidths{};
     NativeScriptHelpPresentation m_Help;
     std::string m_HelpMessage;
     std::uint64_t m_HelpRevision = 0, m_Revision = 0;
     struct FrameInput {
         NativeScriptPosition Ped, Camera;
         bool Alive = false, InVehicle = false;
+        std::optional<NativeScriptPropertyInput> Property;
         bool operator==(const FrameInput&) const = default;
     };
     std::optional<FrameInput> m_Frame, m_PublishedFrame;
@@ -135,4 +192,7 @@ private:
     std::uint32_t m_GameMs = 0;
     bool m_HasTime = false;
     bool m_Loaded = false;
+    std::uint8_t m_CollectBuffer = 0;
+    std::optional<std::uint32_t> m_CollectFrame;
+    NativeScriptPropertyInteraction m_Interaction;
 };

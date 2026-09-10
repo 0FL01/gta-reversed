@@ -44,6 +44,8 @@ int main(int argc, char** argv) {
         const auto* pagerDict = rw::TexDictionary::getCurrent();
         NativeScriptEntities small(1, 1);
         Require(small.LoadBeforeWorker(dir, error), error);
+        NativeScriptEntities saleFixture(1,1);
+        Require(saleFixture.LoadBeforeWorker(dir,error),error);
         Check(rw::TexDictionary::getCurrent() == pagerDict && rw::Engine::state == rw::Engine::Started,
             "property preload preserves pager dictionary and borrowed engine lifetime");
         Check(small.PreparedModel().stats.triangles > 0 && !small.PreparedModel().images.empty() &&
@@ -156,20 +158,53 @@ int main(int argc, char** argv) {
                 static_cast<unsigned long long>(thread.Commands),thread.LastInstructionIP,thread.LastOpcode,thread.IP,
                 static_cast<unsigned long long>(host.EntryExits().Revision()));
         }
+        Check(host.Session().Threads()[1].LastOutputWrite.Sequence == 125 && host.Session().Threads()[1].LastOutputWrite.Variable == 6624,
+            "price assignment committed before sale creation");
+        const std::array<EnexStep,3> saleSuffix{{{201080,201106,0x0518},{201106,201122,0x0570},{201122,201129,0x018B}}};
+        for (std::size_t i=0;i<saleSuffix.size();++i) {
+            const auto step=host.RunPass(1); const auto& thread=host.Session().Threads()[1]; const auto expected=saleSuffix[i];
+            Check(step.Status==NativeScriptStatus::BudgetYield && step.Executed==1 && thread.Commands==133+i &&
+                thread.LastInstructionIP==expected.IP && thread.LastOpcode==expected.Opcode && thread.IP==expected.Next,
+                "actual sale/radar suffix commits exact typed source IP/opcode/count");
+            std::printf("sale actual-step command=%llu ip=%u opcode=%04X next=%u entityRevision=%llu\n",
+                static_cast<unsigned long long>(thread.Commands),thread.LastInstructionIP,thread.LastOpcode,thread.IP,
+                static_cast<unsigned long long>(host.Entities().Revision()));
+        }
         const auto fault = host.RunPass(1000);
-        Check(fault.Status == NativeScriptStatus::Unsupported && fault.ThreadIndex == 1 && fault.IP == 201080 &&
-            fault.Opcode == 0x0518 && fault.Executed == 0 && host.State() == beforeFault &&
-            host.Session().Threads()[1].Commands == 132 && host.Session().Threads()[1].LastOutputWrite.Sequence == 125 &&
-            host.Session().Threads()[1].LastOutputWrite.IP == 201072 && host.Session().Threads()[1].LastOutputWrite.Variable == 6624,
-            "real mission0 commits property/radar and both ENEX access writes, strict 0518 barrier before main resumes");
+        Check(fault.Status == NativeScriptStatus::Unsupported && fault.ThreadIndex == 1 && fault.IP == 201129 &&
+            fault.Opcode == 0x02B9 && fault.Executed == 0 && host.State() == beforeFault &&
+            host.Session().Threads()[1].Commands == 135 && host.Session().Threads()[1].LastOutputWrite.Sequence == 127 &&
+            host.Session().Threads()[1].LastOutputWrite.IP == 201106 && host.Session().Threads()[1].LastOutputWrite.Variable == 6496,
+            "real mission0 commits owned sale/green radar, strict garage 02B9 barrier before main resumes");
         const auto missionBeforeFault = host.Session().Threads()[1];
         const auto repeated = host.RunPass(1000);
-        Check(repeated.Status == NativeScriptStatus::Unsupported && repeated.Opcode == 0x0518 && repeated.IP == 201080 &&
+        Check(repeated.Status == NativeScriptStatus::Unsupported && repeated.Opcode == 0x02B9 && repeated.IP == 201129 &&
             repeated.Executed == 0 && host.State() == beforeFault && host.Session().Threads()[1] == missionBeforeFault,
             "unsupported mission remains terminal with unchanged main and mission states");
         auto& entities = host.Entities();
         NativeEntryExitsProbe(host);
-        Check(entities.Revision() == 9, "exactly three actual pickup allocations, three blips and three display writes");
+        Check(entities.Revision() == 12, "exactly four actual pickup allocations, four blips and four display writes");
+        std::int32_t saleRef=-1,saleBlip=-1,price=0;
+        Require(host.Session().ReadGlobal(6752,saleRef) && host.Session().ReadGlobal(6496,saleBlip) && host.Session().ReadGlobal(6624,price), "actual sale globals");
+        const auto* sale=entities.ResolvePickup({saleRef}); const auto* green=entities.ResolveBlip({saleBlip});
+        Require(sale && green,"actual sale outputs resolve");
+        Check(saleRef==65539 && saleBlip==65539 && sale->Type==18 && sale->Model==1273 && sale->Price==price && price==30000 &&
+            sale->CostValue==6000 && green->Position==sale->AuthoredPosition && green->Sprite==31 && green->Display==2 &&
+            sale->Actor.stats.triangles>0 && std::string(sale->Actor.stats.dffName)=="property_fsale.dff" &&
+            std::string(sale->Actor.stats.txdName)=="icons3.txd" && sale->Message.find("TAB")!=std::string::npos,
+            "real0518 owns type18 model1273/icons3 price/control-GXT and green31 radar");
+        Check(host.PlayerInfo().Money==0 && host.PlayerInfo().DisplayMoney==0 && host.State().OnAMissionFlag==0,
+            "source new player money/display zero; mission thread does not imply declared mission flag");
+        const NativeScriptForSalePropertyRequest actualSale{{events.front().Id.Session,186,201080},sale->AuthoredPosition,price,sale->Text};
+        const auto saleRevision=entities.Revision();
+        Check(host.CreateForSaleProperty(actualSale).Reference.Value==saleRef && entities.Revision()==saleRevision,
+            "actual0518 host identity replay retains same drawable/ref once");
+        auto wrongSale=actualSale; ++wrongSale.Price;
+        Check(host.CreateForSaleProperty(wrongSale).Result.Status==NativeScriptServiceStatus::Error && entities.Revision()==saleRevision && sale->Price==price,
+            "same0518 identity with changed price rejected atomically");
+        Check(host.CreateLockedProperty({actualSale.Id,sale->AuthoredPosition,sale->Text}).Result.Status==NativeScriptServiceStatus::Error &&
+            host.SetCameraBehindPlayer({actualSale.Id}).Status==NativeScriptServiceStatus::Error && entities.Revision()==saleRevision,
+            "sale identity shared across locked and host world/player services");
         const std::array<std::uint16_t, 3> blipVariables{264, 2108, 220};
         for (std::size_t i = 0; i < 3; ++i) {
             std::int32_t pickupRef = -1, blipRef = -1, x = 0, y = 0, z = 0;
@@ -329,10 +364,105 @@ int main(int argc, char** argv) {
         }, [](NativeScriptRequestId) {});
         Check(host.LoadScene({{999, 9, 9}, resident.Center}).Status == NativeScriptServiceStatus::Error && host.WorldRevision() == stableRevision + 1 &&
             host.Publication().Scene == resident.Scene, "invalid Ready world publication cannot replace resident state");
+        // Real assets / production consumer with explicitly generated frame and
+        // balance fixtures. These are not a claim that SCM awarded player cash.
+        const NativeScriptForSalePropertyRequest fixtureRequest{{902,1,1},{0,0,2},30004,sale->Text};
+        const auto fixtureResult=saleFixture.CreateForSaleProperty(fixtureRequest);
+        Require(fixtureResult.Result.Status==NativeScriptServiceStatus::Ready,fixtureResult.Result.Message);
+        const auto* fixture=saleFixture.ResolvePickup(fixtureResult.Reference);
+        Require(fixture,"source sale fixture allocation");
+        const auto fixtureRevision=saleFixture.Revision();
+        std::uint32_t fixtureTime=100,frame=0;
+        NativeScriptPropertyInput input; input.CollectJustDown=true;
+        const auto publish=[&](bool alive=true,bool car=false,NativeScriptPosition ped={0,0,2},NativeScriptPosition camera={0,0,2}) {
+            input.FrameCounter=frame; saleFixture.Tick(ped,camera,alive,car,input);
+            Require(saleFixture.AdvanceTime(fixtureTime++,error),error); frame+=6;
+        };
+        const auto none=[&] { return saleFixture.Interaction().Status==NativeScriptPropertyInteractionStatus::None; };
+        publish(false); Check(none() && !saleFixture.HelpRevision(),"sale TEST-INPUT dead ped cannot prompt/collect");
+        publish(true,true); Check(none() && !saleFixture.HelpRevision(),"sale in-vehicle cannot prompt/collect");
+        publish(true,false,{1.35f,0,2}); Check(none() && !saleFixture.HelpRevision(),"sale XY squared >=1.8 cannot prompt/collect");
+        publish(true,false,{0,0,4}); Check(none() && !saleFixture.HelpRevision(),"sale strict absZ<2 boundary");
+        publish(true,false,{0,0,2},{100,0,2}); Check(none() && saleFixture.Actors().meshes.empty(),"source camera XY100 excludes sale render/collect");
+        for(auto* gate : {&input.Busy,&input.Replay,&input.Cutscene,&input.Widescreen}) {
+            *gate=true; publish(); Check(none() && !saleFixture.HelpRevision(),"sale global/task/target gate blocks prompt or collection"); *gate=false;
+        }
+        // Source targeting permits proximity help but cancels collect; verify it
+        // separately below after a normal no-key prompt has become displayed.
+        input.CollectJustDown=false; input.Targeting=true; publish(); input.Targeting=false;
+        Check(none() && saleFixture.HelpMessage()==fixture->Message && !fixture->HelpMessageDisplayed,
+            "type18 proximity displays localized control prompt without locked once-only latch");
+        const auto promptRevision=saleFixture.HelpRevision();
+        publish(); Check(saleFixture.HelpRevision()==promptRevision,"displayed sale help not reset by repeated proximity");
+        input.CollectJustDown=true; input.Money=30003; publish();
+        Check(saleFixture.Interaction().Status==NativeScriptPropertyInteractionStatus::InsufficientFunds &&
+            saleFixture.Interaction().Price==30004 && saleFixture.Interaction().Balance==30003 &&
+            !saleFixture.HelpMessage().empty() && saleFixture.HelpMessage()!=fixture->Message,
+            "sale source insufficient cash yields localized quick denial, compares unquantized signed ammo");
+        const auto denial=saleFixture.HelpMessage();
+        input.OnMission=true; input.Money=30004; publish();
+        Check(saleFixture.Interaction().Status==NativeScriptPropertyInteractionStatus::OnMission && saleFixture.HelpMessage()!=denial,
+            "declared source mission flag takes precedence over sufficient cash with distinct GXT denial");
+        input.OnMission=false; publish();
+        Check(saleFixture.Interaction().Status==NativeScriptPropertyInteractionStatus::ScriptPurchaseRequired &&
+            saleFixture.Interaction().Pickup.Value==fixtureResult.Reference.Value && saleFixture.HelpPresentation().Text.empty() &&
+            saleFixture.ResolvePickup(fixtureResult.Reference)==fixture && fixture->Active && saleFixture.Revision()==fixtureRevision && input.Money==30004,
+            "funded TEST-INPUT emits explicit script-purchase barrier, clears help, no debit/removal/collected event");
+        const auto funded=saleFixture.Interaction(); const auto fundedHelpRevision=saleFixture.HelpRevision();
+        Require(saleFixture.AdvanceTime(fixtureTime-1,error),error);
+        Check(saleFixture.Interaction().FrameCounter==funded.FrameCounter && saleFixture.HelpRevision()==fundedHelpRevision,
+            "duplicate frame/time does not repeat funded interaction or help reset");
+        const auto stableVertices=saleFixture.Actors().meshes[0].pos;
+        auto changedInput=input; changedInput.FrameCounter=funded.FrameCounter; changedInput.Money=0;
+        saleFixture.Tick({0,0,2},{0,0,2},true,false,changedInput);
+        Check(!saleFixture.AdvanceTime(fixtureTime,error) && saleFixture.Interaction().Status==funded.Status &&
+            saleFixture.Actors().meshes[0].pos==stableVertices && saleFixture.HelpRevision()==fundedHelpRevision,
+            "same collect frame changed cash rejects whole actors/help/buffer/interaction publication");
+        const auto replayBuffer=saleFixture.CollectBuffer(); input.Replay=true; publish(); input.Replay=false;
+        Check(none() && saleFixture.CollectBuffer()==replayBuffer,"replay clears current interaction and freezes source collect buffer");
+        input.CollectJustDown=false; input.Targeting=true; publish();
+        Check(none() && !saleFixture.CollectBuffer(),"source targeting clears previously buffered collect");
+        input.Targeting=false; input.ControlsDisabled=true; input.CollectJustDown=true; publish();
+        Check(none() && !saleFixture.CollectBuffer(),"disabled controls cannot create a collect key edge");
+        input.ControlsDisabled=false; input.HelpBlocked=true; input.Money=0;
+        const auto blockedRevision=saleFixture.HelpRevision(); publish();
+        Check(saleFixture.Interaction().Status==NativeScriptPropertyInteractionStatus::InsufficientFunds && saleFixture.HelpRevision()==blockedRevision,
+            "source HUD suppression does not alter cash eligibility or fabricate a help publication");
+        input.HelpBlocked=false; input.CollectJustDown=true; frame=192; // slot0 visibility/update cadence starts together
+        publish(); input.CollectJustDown=false;
+        for(std::uint32_t offset=1;offset<=6;++offset) {
+            frame=192+offset; publish();
+            Check(saleFixture.CollectBuffer()==6-offset && none(),"six-frame source collect buffer decays once per frame; nonselected pool slice never purchases");
+        }
+        Check(saleFixture.PriceLabels().size()==1 && saleFixture.PriceLabels()[0].Price==30000 && saleFixture.PriceLabels()[0].Alpha==255,
+            "source object cost is uint16(ammo/5), price label rounds to five independent of purchase comparison");
+        auto badSale=fixtureRequest; badSale.Id.Instruction++; badSale.Position.Z=-100;
+        Check(saleFixture.CreateForSaleProperty(badSale).Result.Status==NativeScriptServiceStatus::Unsupported && saleFixture.Revision()==fixtureRevision,
+            "ground sentinel is explicit unsupported dependency without collision ownership, no invented altitude");
+        badSale.Position.Z=2;
+        Check(saleFixture.CreateForSaleProperty(badSale).Result.Status==NativeScriptServiceStatus::Error && saleFixture.Revision()==fixtureRevision,
+            "sale pool capacity failure preserves existing live asset actor");
+        Require(saleFixture.RemovePickup(fixtureResult.Reference),"fixture release");
+        Check(saleFixture.PriceLabels().empty() && none(),"released sale lifetime cannot leave a stale price-label or interaction reference");
+        badSale.Price=-1; const auto wrapped=saleFixture.CreateForSaleProperty(badSale);
+        Require(wrapped.Result.Status==NativeScriptServiceStatus::Ready,wrapped.Result.Message);
+        Check(wrapped.Reference.Value==fixtureResult.Reference.Value+65536 && saleFixture.ResolvePickup(wrapped.Reference)->CostValue==13107 &&
+            !saleFixture.ResolvePickup(fixtureResult.Reference) && saleFixture.CreateForSaleProperty(fixtureRequest).Result.Status==NativeScriptServiceStatus::Error,
+            "signed ammo bit pattern uses unsigned object cost then16bit truncation; versioned release/replay remains real");
+        const auto root=game.State().PedRoot;
+        const auto hostFixture=host.CreateForSaleProperty({{903,1,1},{root.X,root.Y,root.Z},1,sale->Text});
+        Require(hostFixture.Result.Status==NativeScriptServiceStatus::Ready,hostFixture.Result.Message);
+        NativeScriptPropertyInput liveInput; liveInput.FrameCounter=24; liveInput.Money=2147483647; liveInput.OnMission=true; liveInput.CollectJustDown=true;
+        Require(host.TickProperties({root.X,root.Y,root.Z},true,liveInput,error) && host.Entities().AdvanceTime(32,error),error);
+        Check(host.Entities().Interaction().Status==NativeScriptPropertyInteractionStatus::InsufficientFunds &&
+            host.Entities().Interaction().Balance==0 && host.PlayerInfo().Money==0 && host.PlayerInfo().DisplayMoney==0,
+            "live host overwrites supplied TEST cash/mission with actual owned zero player balance and undeclared SCM flag");
+        Check(rw::TexDictionary::getCurrent()==pagerDict && rw::Engine::state==rw::Engine::Started,
+            "sealed creation/render/proximity/collect use owned data and preserve engine context");
         game.Tick(1.0/60, {}, *host.World());
         Check(game.State().Ticks == 1 && !game.State().CarPresent && game.Actors().stats.triangles == 2,
             "persistent entity/pose keeps ticking without startup preview vehicle");
-        std::printf("host-probe failures=%d firstpass=53 mission-prefix=132 terminal=0518@201080 mission0-complete=0\n", s_Failures);
+        std::printf("host-probe failures=%d firstpass=53 mission-prefix=135 terminal=02B9@201129 mission0-complete=0\n", s_Failures);
     }
     StreamPager_Shutdown();
     return s_Failures ? 1 : 0;

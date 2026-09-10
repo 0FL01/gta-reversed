@@ -118,8 +118,240 @@ static void CheckFlow(RealtimeEnvironment& env) {
     std::puts("water-flow original-arithmetic-exact owned-once-per-gameMs strict-wrap/negative/idempotent/clock-wrap-ok");
 }
 
-static void CheckFeedback(RealtimeEnvironment& env, uint32_t ms, bool distant = false, bool flowing = false) {
-    auto state = RealtimeWaterState{};
+// Independent selector lift: compact function is still a plugin stub. Branch
+// provenance is retail 724300..7247C9, statically inspected only. Canonical vertex
+// ownership below runs verbatim extracted AddWaterLevelVertex, not native code.
+struct FlowReference {
+    struct Quad { std::array<WaterVert, 4> v; int polygon; };
+    std::vector<Quad> quads;
+    explicit FlowReference(const WaterLevelData& data) {
+        using W = water_oracle::CWaterLevel;
+        W::NumWaterVertices = 0;
+        for (size_t p = 0; p < data.polys.size(); ++p) {
+            const auto& poly = data.polys[p];
+            bool sameX = true, sameY = true;
+            for (int i = 1; i < poly.nverts; ++i) {
+                sameX &= int(poly.v[i].x) == int(poly.v[0].x);
+                sameY &= int(poly.v[i].y) == int(poly.v[0].y);
+            }
+            if (sameX || sameY) continue;
+            Quad q{{}, int(p)};
+            for (int i = 0; i < poly.nverts; ++i) {
+                const auto& v = poly.v[i];
+                const auto id = W::AddWaterLevelVertex(int(v.x), int(v.y),
+                    {v.z, v.bigWaves, v.smallWaves, int8_t(int(v.flowX * 64)), int8_t(int(v.flowY * 64))});
+                Require(W::NumWaterVertices < W::m_aVertices.size(), "oracle source vertex capacity");
+                const auto& s = W::m_aVertices[id];
+                q.v[i] = {float(s.x), float(s.y), s.rp.z, float(s.rp.flowX)/64, float(s.rp.flowY)/64, s.rp.big, s.rp.small};
+            }
+            if (poly.nverts != 4) continue;
+            std::sort(q.v.begin(), q.v.end(), [](const auto& a, const auto& b) { return a.y == b.y ? a.x < b.x : a.y < b.y; });
+            quads.push_back(q);
+        }
+    }
+    RealtimeWaterFlowSelection Find(float x, float y, std::array<float, 2> previous = {}) const {
+        RealtimeWaterFlowSelection r;
+        if (!(x > -3000 && x < 3000 && y > -3000 && y < 3000)) { // 72433C..724383
+            r.result = RealtimeWaterFlowSelection::Result::OutsideWorld;
+            r.nearestWavyDistance = 0;
+            return r;
+        }
+        r.desired = previous;
+        float flowDistance = 1.e7f;
+        for (const auto& q : quads) {
+            float dx = 0, dy = 0;
+            if (x < q.v[0].x) dx = q.v[0].x-x; else if (x > q.v[1].x) dx = x-q.v[1].x;
+            if (y < q.v[0].y) dy = q.v[0].y-y; else if (y > q.v[2].y) dy = y-q.v[2].y;
+            const float squared = float(double(dx)*dx + double(dy)*dy);
+            const float distance = float(std::sqrt(double(squared))); // 72444E..724470
+            if (r.nearestWavyDistance > distance &&
+                (q.v[0].bigWaves || q.v[0].smallWaves || q.v[1].bigWaves || q.v[1].smallWaves ||
+                 q.v[2].bigWaves || q.v[2].smallWaves || q.v[3].bigWaves || q.v[3].smallWaves)) {
+                r.nearestWavyDistance = distance;
+                r.nearestWavyHeight = q.v[0].z; // 724538..724543
+            }
+            if (!(flowDistance > distance)) continue; // 724548..724552
+            flowDistance = distance;
+            float d[4];
+            for (int i = 0; i < 4; ++i) {
+                const double vx = double(x)-q.v[i].x, vy = double(y)-q.v[i].y;
+                d[i] = float(vx*vx + vy*vy); // four float stores 724599/5CE/607/623
+            }
+            // Literal comparison cascade 724626..724767, not native min-loop.
+            const int corner = d[0]<d[1] && d[0]<d[2] && d[0]<d[3] ? 0 :
+                               d[1]<d[2] && d[1]<d[3] ? 1 : d[2]<d[3] ? 2 : 3;
+            r.desired = {q.v[corner].flowX, q.v[corner].flowY};
+            r.corner = corner; r.polygon = q.polygon;
+            r.result = RealtimeWaterFlowSelection::Result::SelectedQuad;
+        }
+        return r;
+    }
+};
+static bool SameSelection(const RealtimeWaterFlowSelection& a, const RealtimeWaterFlowSelection& b) {
+    return a.result == b.result && a.desired == b.desired && a.polygon == b.polygon && a.corner == b.corner &&
+        a.nearestWavyDistance == b.nearestWavyDistance && a.nearestWavyHeight == b.nearestWavyHeight;
+}
+static void ReferenceUV(RealtimeWaterState& s) {
+    // Original promoted float constants; independent of AdvanceFlowUV.
+    for (int i = 0; i < 2; ++i) {
+        const double travel = double(s.flowTimeStep) * 0.039999999105930328369140625 * double(s.currentFlow[i]);
+        s.firstFlowUV[i] = float(double(s.firstFlowUV[i]) + travel * 0.07999999821186065673828125);
+        s.secondFlowUV[i] = float(double(s.secondFlowUV[i]) + travel * 0.039999999105930328369140625);
+        if (s.firstFlowUV[i] > 1) s.firstFlowUV[i] = s.firstFlowUV[i]-1;
+        if (s.secondFlowUV[i] > 1) s.secondFlowUV[i] = s.secondFlowUV[i]-1;
+    }
+}
+static bool SameFlow(const RealtimeWaterState& a, const RealtimeWaterState& b) {
+    return a.currentFlow == b.currentFlow && a.firstFlowUV == b.firstFlowUV && a.secondFlowUV == b.secondFlowUV &&
+        a.flowTimeStep == b.flowTimeStep && a.gameMs == b.gameMs;
+}
+static std::vector<WaterLevelData> FlowFixtures() {
+    auto quad = [](float x, float y, float z) {
+        WaterPoly p{}; p.nverts = 4; p.flags = 1;
+        for (int i = 0; i < 4; ++i) p.v[i] = {x+(i%2)*10, y+(i/2)*10, z, (i+1)*.1099f, -(i+1)*.1099f, 1, .2f};
+        std::swap(p.v[0], p.v[3]); // authored order differs from sorted order
+        return p;
+    };
+    std::vector<WaterLevelData> fixtures(8);
+    auto triangle = quad(0, 0, 5); triangle.nverts = 3;
+    triangle.v[0] = {0, 0, 5, .015624f, -.015626f, 0, 0};
+    triangle.v[1] = {10, 0, 5, .5f, -.5f, 0, 0};
+    triangle.v[2] = {0, 10, 5, .75f, -.75f, 0, 0};
+    fixtures[1].polys = {triangle};
+    fixtures[2].polys = {quad(0, 0, 5)};
+    auto hidden = quad(0, 0, 1005); hidden.flags = 0;
+    for (auto& v : hidden.v) v.bigWaves = v.smallWaves = 0;
+    fixtures[3].polys = {hidden, quad(0, 0, 5), quad(10, 0, 20)};
+    fixtures[4].polys = {triangle, quad(0, 0, 5), quad(0, 0, 6)};
+    fixtures[5].polys = {quad(-3005, -4, 55), quad(2995, -4, 77), quad(3001, 30, 88)};
+    auto degenerate = quad(0, 0, 5);
+    for (auto& v : degenerate.v) { v.x = 0; v.flowX = 1.9f; }
+    fixtures[6].polys = {degenerate, quad(0, 0, 5)};
+    auto fractional = quad(-3.75f, -2.99f, 9);
+    fractional.v[0].flowX = 1.999f; fractional.v[1].flowX = 2.125f;
+    fractional.v[2].flowY = -2.125f;
+    fixtures[7].polys = {fractional};
+    return fixtures;
+}
+static void CheckNearest(const WaterLevelData& real) {
+    auto fixtures = FlowFixtures(); fixtures.push_back(real);
+    size_t comparisons = 0, nonzero = 0;
+    for (const auto& p : real.polys) for (int i = 0; i < p.nverts; ++i)
+        nonzero += p.v[i].flowX != 0 || p.v[i].flowY != 0;
+    Require(nonzero == 0, "actual water.dat has no authored current flow");
+    for (auto& data : fixtures) {
+        RealtimeWaterFlow actual; actual.Initialise(data);
+        FlowReference reference(data);
+        std::vector<std::array<float, 2>> points;
+        for (float x : {-3001.f, -3000.f, std::nextafter(-3000.f, 0.f), -10.f, 0.f, 5.f, std::nextafter(5.f, 6.f),
+                         10.f, 15.f, 20.f, std::nextafter(3000.f, 0.f), 3000.f, 3001.f})
+            for (float y : {-3001.f, -3000.f, -10.f, 0.f, 5.f, std::nextafter(5.f, 6.f), 10.f, 15.f, 20.f, 3000.f, 3001.f})
+                points.push_back({x,y});
+        for (int x = -20; x <= 20; ++x) for (int y = -20; y <= 20; ++y) points.push_back({x*149.93f, y*149.97f});
+        for (const auto& p : data.polys) {
+            float x = 0, y = 0;
+            for (int i = 0; i < p.nverts; ++i) {
+                points.push_back({p.v[i].x, p.v[i].y});
+                points.push_back({std::nextafter(p.v[i].x, INFINITY), std::nextafter(p.v[i].y, -INFINITY)});
+                x += p.v[i].x; y += p.v[i].y;
+            }
+            points.push_back({x/p.nverts, y/p.nverts});
+        }
+        data.polys.clear(); // the native field owns its startup cache
+        for (const auto& xy : points) {
+            const auto a = actual.FindNearest(xy[0], xy[1], {.375f,-.625f});
+            const auto b = reference.Find(xy[0], xy[1], {.375f,-.625f});
+            Require(SameSelection(a,b), "independent nearest selector/vertex ownership differential");
+            ++comparisons;
+        }
+    }
+    // Explicit expectations keep both implementations honest at ambiguous edges.
+    auto data = FlowFixtures(); RealtimeWaterFlow f;
+    f.Initialise(data[2]); Require(f.FindNearest(5,5).corner == 3, "last corner wins four-way tie");
+    Require(f.FindNearest(5,0).corner == 1 && f.FindNearest(0,5).corner == 2, "last corner wins two-way ties");
+    f.Initialise(data[3]); const auto overlap = f.FindNearest(5,5);
+    Require(overlap.polygon == 0 && overlap.nearestWavyHeight == 5, "first quad wins, invisible/interior not filtered, separate wavy height");
+    f.Initialise(data[4]); Require(f.FindNearest(0,0).desired == std::array{0.f,-1.f/64}, "triangle first-owned metadata, signed truncation");
+    f.Initialise(data[1]); Require(f.FindNearest(0,0,{.25f,-.25f}).desired == std::array{.25f,-.25f}, "triangles are not flow candidates");
+    Require(f.FindNearest(3000,0,{.25f,-.25f}).desired == std::array{0.f,0.f}, "world boundary clears desired");
+    std::printf("water-nearest comparisons=%zu exact fixtures=8 real-quads=%d authored-nonzero-flow=%zu ties/bounds/flags/triangles/dedup/clamp-ok\n",
+        comparisons, real.quads, nonzero);
+}
+
+static void CheckFlowTicks(const WaterLevelData& real) {
+    using W = water_oracle::CWaterLevel;
+    using T = water_oracle::CTimer;
+    auto fixtures = FlowFixtures(); fixtures.push_back(real);
+    size_t checked = 0, totalSelections = 0;
+    for (size_t fixture = 0; fixture < fixtures.size(); ++fixture) {
+        RealtimeWaterState baseline{};
+        for (int fps : {15, 30, 60, 144}) {
+            RealtimeWaterFlow actual; actual.Initialise(fixtures[fixture]);
+            FlowReference reference(fixtures[fixture]);
+            RealtimeWaterFlowSelection selected{};
+            RealtimeWaterState a{}, b{};
+            a.gameMs = b.gameMs = 1700; // wave clock independent of flow tick clock
+            a.currentFlow = b.currentFlow = {.5f,-.000001f};
+            a.firstFlowUV = a.secondFlowUV = b.firstFlowUV = b.secondFlowUV = {.99999f,-.25f};
+            W::m_CurrentFlow = {.5f,-.000001f}; W::m_CurrentDesiredFlow = {};
+            unsigned n = 0, elapsed = 0, selections = 0;
+            RealtimeWaterFlowTick last{};
+            W::nearestCallback = [&] {
+                selected = reference.Find(last.cameraX, last.cameraY, selected.desired);
+                W::m_CurrentDesiredFlow = {selected.desired[0], selected.desired[1]};
+                ++selections;
+            };
+            for (int presentation = 0; presentation < fps*40; ++presentation) {
+                const unsigned due = unsigned((presentation+1)*30/fps);
+                while (n < due) {
+                    last = {}; last.frame = 0xffffffc0u+n;
+                    const bool sourcePaused = n >= 128 && n < 160;
+                    last.suspended = n >= 500 && n < 532;
+                    last.canSeeWater = !(n >= 64 && n < 96);
+                    if (!sourcePaused && !last.suspended) ++elapsed;
+                    last.gameMs = 0xfffffd00u + elapsed*1000/30;
+                    last.timeStep = sourcePaused ? .00001f : last.suspended ? 0 : n%17 == 0 ? 3 : n%19 == 0 ? .00001f : 50.f/30;
+                    last.cameraX = n%128 < 64 ? 5 : 15; last.cameraY = n%80 < 40 ? 5 : -3;
+                    if (n >= 300 && n < 400) last.cameraX = 3000;
+                    if (!last.suspended && last.canSeeWater) {
+                        T::m_FrameCounter = last.frame; T::step = last.timeStep;
+                        W::UpdateFlow(); // verbatim extracted source incl 29/32 phase
+                        b.currentFlow = {W::m_CurrentFlow.x,W::m_CurrentFlow.y};
+                        b.flowTimeStep = last.timeStep; ReferenceUV(b);
+                    }
+                    Require(actual.Advance(last,a), "consecutive original flow simulation tick");
+                    Require(SameSelection(actual.GetSelection(),selected) && SameFlow(a,b), "source UpdateFlow/UV differential exact");
+                    ++n; ++checked;
+                }
+                if (n) {
+                    const auto old = a;
+                    Require(actual.Advance(last,a) && SameFlow(a,old), "extra presentation does not advance source flow");
+                }
+            }
+            if (fps == 15) baseline = a; else Require(SameFlow(a,baseline), "15/30/60/144 presentation cadence invariant");
+            const auto old = a;
+            auto invalid = last; invalid.frame += 2;
+            Require(!actual.Advance(invalid,a) && SameFlow(a,old), "missing source tick rejected atomically");
+            invalid = last; invalid.cameraX += 1;
+            Require(!actual.Advance(invalid,a) && SameFlow(a,old), "conflicting duplicate rejected");
+            invalid = last; ++invalid.frame; invalid.timeStep = 3.001f;
+            Require(!actual.Advance(invalid,a), "unclipped timestep rejected");
+            invalid.timeStep = std::numeric_limits<float>::quiet_NaN(); Require(!actual.Advance(invalid,a), "NaN timestep rejected");
+            invalid.timeStep = 1; invalid.cameraX = INFINITY; Require(!actual.Advance(invalid,a), "nonfinite camera rejected");
+            invalid.cameraX = 5; a.accumulateFlow = true;
+            Require(!actual.Advance(invalid,a), "explicit accumulation cannot double-step owned flow"); a.accumulateFlow = false;
+            Require(SameFlow(a,old), "invalid calls preserve all flow fields");
+            totalSelections += selections;
+        }
+    }
+    W::nearestCallback = {};
+    std::printf("water-flow-ticks checked=%zu selections=%zu source-exact fps=15,30,60,144 source-pause/native-suspend/area/32-phase/frame-ms-wrap/idempotence/gap-reject-ok\n",
+        checked,totalSelections);
+}
+
+static void CheckFeedback(RealtimeEnvironment& env, uint32_t ms, bool distant = false, bool flowing = false,
+    const RealtimeWaterState* snapshot = nullptr) {
+    auto state = snapshot ? *snapshot : RealtimeWaterState{};
     if (flowing) {
         state.accumulateFlow = true; state.firstFlowUV = state.secondFlowUV = {.99999f,-.25f};
         state.currentFlow = {.5f,-.5f}; state.flowTimeStep = 1;
@@ -190,7 +422,7 @@ static void CheckFeedback(RealtimeEnvironment& env, uint32_t ms, bool distant = 
         }
     }
     std::printf("water-geometry %s ms=%u vertices=%zu z-error=%g uv-error=%g rgba-error=%g\n",
-        distant ? "far" : flowing ? "near-flow" : "near", ms, checked, zError, uvError, colorError);
+        distant ? "far" : flowing ? "near-flow" : snapshot ? "near-selected-flow" : "near", ms, checked, zError, uvError, colorError);
     Require(checked >= (distant ? 12u : 100u) && zError < .0001f && uvError < .0001f && colorError < .0001f,
         "GL geometry/UV/color source oracle");
 }
@@ -480,6 +712,68 @@ static void CheckTriangles(RealtimeEnvironment& env, const char* output) {
     Require(bodies==6,"all six authored triangles exercised");
 }
 
+static void CheckSelectedFlowGpu(RealtimeEnvironment& env, const char* output) {
+    RealtimeWaterState zero{}; zero.gameMs = 1700;
+    Require(env.SetWaterState(zero), "owned selector zero startup");
+    RealtimeWaterFlowTick tick{};
+    tick.cameraX = 820; tick.cameraY = -1880; tick.timeStep = 50.f/30;
+    for (uint32_t i = 0; i < 600; ++i) {
+        tick.frame = i; tick.gameMs = i*1000/30;
+        Require(env.AdvanceWaterFlow(tick), "actual zero-flow source tick");
+    }
+    Require(env.GetWaterState().currentFlow == zero.currentFlow && env.GetWaterState().firstFlowUV == zero.firstFlowUV &&
+        env.GetWaterState().secondFlowUV == zero.secondFlowUV, "real asset startup never invents flow");
+    Require(env.GetWaterFlowSelection().result == RealtimeWaterFlowSelection::Result::SelectedQuad &&
+        env.GetWaterFlowSelection().desired == zero.currentFlow, "owned nearest source body selected");
+    // Nonzero residual CURRENT is a labeled state fixture, not fabricated asset
+    // flow. Actual water.dat selects desired=(0,0); extracted UpdateFlow decays
+    // this snapshot while RenderWater advances UV at a fixed wave clock.
+    auto expected = zero; expected.currentFlow = {.5f,-.5f};
+    Require(env.SetWaterState(expected), "seed explicit residual-current fixture");
+    auto render = [&] {
+        glViewport(0,0,kWidth,kHeight);
+        glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(800,840,-1894,-1870,1,3000);
+        glMatrixMode(GL_MODELVIEW); glLoadIdentity(); glTranslatef(0,0,-20);
+        glDepthMask(GL_TRUE); glClearColor(0,0,0,1); glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+        env.DrawWater(820,-1880); glFinish();
+        Require(glGetError() == GL_NO_ERROR,"selected-flow real GL errors");
+        return Pixels();
+    };
+    const auto before = render();
+    const auto wave = env.SampleWater(820,-1880,0,.199f,.241f);
+    using W = water_oracle::CWaterLevel;
+    W::m_CurrentFlow = {.5f,-.5f}; W::m_CurrentDesiredFlow = {};
+    FlowReference reference(env.GetWaterData());
+    W::nearestCallback = [&] {
+        const auto r = reference.Find(tick.cameraX,tick.cameraY);
+        Require(r.desired == std::array{0.f,0.f}, "real body desired flow is zero");
+        W::m_CurrentDesiredFlow = {r.desired[0],r.desired[1]};
+    };
+    for (uint32_t i = 600; i < 720; ++i) {
+        tick.frame = i; tick.gameMs = i*1000/30;
+        water_oracle::CTimer::m_FrameCounter = tick.frame; water_oracle::CTimer::step = tick.timeStep;
+        W::UpdateFlow(); expected.currentFlow = {W::m_CurrentFlow.x,W::m_CurrentFlow.y};
+        expected.flowTimeStep = tick.timeStep; ReferenceUV(expected);
+        Require(env.AdvanceWaterFlow(tick) && SameFlow(env.GetWaterState(),expected), "owned source selection/smoothing/UV GPU input exact");
+    }
+    W::nearestCallback = {};
+    Require(env.GetWaterState().gameMs == 1700 && env.SampleWater(820,-1880,0,.199f,.241f).z == wave.z,
+        "fixed wave clock/geometry while flow UV advances");
+    const auto after = render();
+    for (int i = 0; i < 8; ++i) Require(env.AdvanceWaterFlow(tick), "same source tick duplicate before GL");
+    Require(render() == after,"selected flow same-tick GL deterministic");
+    size_t changed = 0;
+    for (size_t p = 0; p < before.size(); p += 4)
+        changed += !std::equal(before.begin()+p,before.begin()+p+3,after.begin()+p);
+    Require(changed > 10000,"real water body pixels respond to source-derived flow UV at fixed gameMs");
+    Capture(output,"selected-flow-before",before); Capture(output,"selected-flow-after",after);
+    std::printf("water-selected-flow-GPU zero-startup-ticks=600 residual-fixture-ticks=120 gameMs=1700 changed=%zu current=(%a,%a) UV1=(%a,%a) UV2=(%a,%a) fnv=%016llx/%016llx\n",
+        changed, expected.currentFlow[0], expected.currentFlow[1], expected.firstFlowUV[0], expected.firstFlowUV[1],
+        expected.secondFlowUV[0], expected.secondFlowUV[1], (unsigned long long)Hash(before), (unsigned long long)Hash(after));
+    CheckFeedback(env,1700,false,false,&expected);
+    Require(env.SetWaterState({}),"restore after selected flow fixture");
+}
+
 static void CheckShore(RealtimeEnvironment& env, const WorldShotScene& scene, const GpuScene& gpu, const char* output) {
     for (bool close : {true, false}) {
         Camera camera;
@@ -534,6 +828,8 @@ int main(int argc, char** argv) {
     Require(env.GetWaterTriangleCount() == 604, "authored visibility flags");
     CheckOracle(env);
     CheckFlow(env);
+    CheckNearest(env.GetWaterData());
+    CheckFlowTicks(env.GetWaterData());
     WorldShotScene scene{};
     E2EPagerFrame frame{};
     Require(StreamPager_Update(836, -1866, 0, scene, frame, error, sizeof(error)), error);
@@ -563,6 +859,7 @@ int main(int argc, char** argv) {
         CheckState(env);
         CheckPixels(env);
         CheckTriangles(env, argv[2]);
+        CheckSelectedFlowGpu(env, argv[2]);
         CheckShore(env, scene, gpu, argv[2]);
         env.ReleaseGpu();
     }

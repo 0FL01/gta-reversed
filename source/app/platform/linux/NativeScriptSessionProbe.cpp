@@ -92,14 +92,18 @@ struct MockServices final : NativeScriptServices {
     NativeScriptHeadingRequest Heading;
     float PedHeading = 0.25f, CameraHeading = -1;
     bool InVehicle = false;
-    std::array<ServiceStatus, 4> EntityMode{ServiceStatus::Unsupported, ServiceStatus::Unsupported, ServiceStatus::Unsupported, ServiceStatus::Unsupported};
-    std::array<unsigned, 4> EntityCalls{}, EntityCompletions{};
-    std::array<NativeScriptRequestId, 4> EntityIds{};
+    std::array<ServiceStatus, 5> EntityMode{ServiceStatus::Unsupported, ServiceStatus::Unsupported, ServiceStatus::Unsupported, ServiceStatus::Unsupported, ServiceStatus::Unsupported};
+    std::array<unsigned, 5> EntityCalls{}, EntityCompletions{};
+    std::array<NativeScriptRequestId, 5> EntityIds{};
     NativeScriptEntryExitFlagRequest EntryExit;
     NativeScriptServiceResult SetEntryExitFlag(const NativeScriptEntryExitFlagRequest& r) override {
         EntryExit = r; return EntityRespond(3, r.Id);
     }
     NativeScriptLockedPropertyRequest Property;
+    NativeScriptForSalePropertyRequest Sale;
+    NativeScriptReferenceResult<NativeScriptPickupRef> CreateForSaleProperty(const NativeScriptForSalePropertyRequest& r) override {
+        Sale = r; return {EntityRespond(4, r.Id), {EntityReference}};
+    }
     NativeScriptContactBlipRequest Blip;
     NativeScriptBlipDisplayRequest Display;
     std::int32_t EntityReference = 0x00020001;
@@ -912,18 +916,19 @@ void NewBarriers() {
 }
 Bytes EntityCode(unsigned kind, std::uint16_t output = 8, bool timer = false) {
     Bytes code;
-    if (kind < 2) {
-        Op(code, kind == 0 ? 0x0517 : 0x0570);
+    if (kind < 2 || kind == 4) {
+        Op(code, kind == 4 ? 0x0518 : kind == 0 ? 0x0517 : 0x0570);
         if (timer) Var(code, 32, false); else F(code, 1.5f);
         F(code, -2.0f); F(code, 12.25f);
-        if (kind == 0) { code.push_back(9); for (const char c : std::array<char, 8>{'P','R','O','P','_','4',0,0}) code.push_back(c); }
+        if (kind == 4) I32(code, -30000);
+        if (kind == 0 || kind == 4) { code.push_back(9); for (const char c : std::array<char, 8>{'P','R','O','P','_','4',0,0}) code.push_back(c); }
         else I8(code, 32);
         Var(code, output);
     } else { Op(code, 0x018B); I32(code, 0x00020001); I8(code, 2); }
     return code;
 }
 void EntityBarriers() {
-    for (unsigned kind = 0; kind < 3; ++kind) {
+    for (unsigned kind : {0u,1u,2u,4u}) {
         NativeScriptSession session;
         MockServices services;
         const auto code = EntityCode(kind);
@@ -938,13 +943,15 @@ void EntityBarriers() {
         const auto result = session.Step(services);
         Check(result.Status == Status::Advanced && result.Executed == 1 && result.IP == FixtureCode + code.size() && services.EntityCompletions[kind] == 1,
             "entity Ready advances exact typed instruction once");
-        if (kind < 2) {
+        if (kind < 2 || kind == 4) {
             std::int32_t ref = -1;
             Check(session.ReadGlobal(8, ref) && ref == services.EntityReference && session.State().LastOutputWrite.Sequence == before.LastOutputWrite.Sequence + 1,
                 "only Ready writes owned service handle output");
-            const auto position = kind == 0 ? services.Property.Position : services.Blip.Position;
+            const auto position = kind == 4 ? services.Sale.Position : kind == 0 ? services.Property.Position : services.Blip.Position;
             Check(position == NativeScriptPosition{1.5f, -2, 12.25f}, "typed entity float coordinates unchanged");
-            if (kind == 0) Check(services.Property.Text == std::array<char, 8>{'P','R','O','P','_','4',0,0}, "8-byte GXT key copied exactly into owned request");
+            if (kind == 4) Check(services.Sale.Price == -30000 && services.Sale.Text == std::array<char,8>{'P','R','O','P','_','4',0,0},
+                "0518 typed FFFITextOutput preserves signed ammo bits and eight-byte label before sixth output");
+            else if (kind == 0) Check(services.Property.Text == std::array<char, 8>{'P','R','O','P','_','4',0,0}, "8-byte GXT key copied exactly into owned request");
             else Check(services.Blip.Sprite == 32, "typed source radar sprite argument");
         } else Check(services.Display.Blip.Value == services.EntityReference && services.Display.Display == 2 &&
             session.State().LastOutputWrite == before.LastOutputWrite, "018B generation reference/display with no output write");
@@ -964,7 +971,7 @@ void EntityBarriers() {
         const auto unchanged = session.State(); services.Throw = true;
         Check(session.Step(services).Status == Status::Error && session.State() == unchanged, "entity exception does not write VM output");
         services.Throw = false;
-        if (kind < 2) {
+        if (kind < 2 || kind == 4) {
             LoadFixture(session, services, code); services.EntityReference = -1; services.EntityMode[kind] = ServiceStatus::Ready;
             const auto invalid = session.State();
             Check(session.Step(services).Status == Status::Error && session.State() == invalid, "Ready invalid entity reference rejected before output write");
@@ -982,6 +989,12 @@ void EntityBarriers() {
         services.Property.Text == request.Text, "pending property freezes inputs while underlying local timer mutates");
     services.EntityMode[0] = ServiceStatus::Ready;
     Check(session.Step(services).Status == Status::Advanced && services.EntityCompletions[0] == 1, "frozen property commits once after readiness");
+    LoadFixture(session,services,EntityCode(4,8,true)); services.EntityMode[4]=ServiceStatus::Pending;
+    Check(session.Step(services).Status==Status::Pending,"0518 timer-backed request pending"); const auto sale=services.Sale;
+    Check(session.AdvanceTime(9,error) && session.Step(services).Status==Status::Pending && services.Sale.Id==sale.Id &&
+        services.Sale.Position==sale.Position && services.Sale.Price==sale.Price && services.Sale.Text==sale.Text,"0518 all six operands frozen across deferred timer changes");
+    services.EntityMode[4]=ServiceStatus::Ready;
+    Check(session.Step(services).Status==Status::Advanced && services.EntityCompletions[4]==1,"0518 frozen request commits once");
 }
 void EntryExitBarriers() {
     Bytes code; Op(code, 0x09B4); F(code, 1.5f); F(code, -2.25f); F(code, 10); I16(code, 16384); I8(code, -2);

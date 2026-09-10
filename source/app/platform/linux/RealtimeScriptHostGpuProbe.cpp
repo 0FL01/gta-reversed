@@ -278,6 +278,64 @@ void RealtimeScriptHostGpuProbe(NativeScriptEntities& entities, RealtimeScriptHo
             pickup.Actor.stats.dffName, pickup.Actor.stats.triangles, coverage, textureEffect, rotationEffect, entities.PropertyGeometry().Scale, scaleEffect);
     }
     {
+        const auto& sale = entities.Pickups()[3];
+        CheckGpu(sale.Active && sale.Type==18 && sale.Model==1273,"real SCM sale instance, not locked alias");
+        GpuScene gpu; WorldShotScene prepared; prepared.images=entities.PreparedImages();
+        CheckGpu(gpu.UploadTextures(prepared),"combined locked+sale owned image indices uploaded before draw");
+        const auto q=sale.Position;
+        Camera camera; camera.x=q.X+3; camera.y=q.Y-4; camera.z=q.Z+2;
+        camera.yaw=std::atan2(-camera.y+q.Y,-camera.x+q.X); camera.pitch=std::atan2(-2.0f,5.0f);
+        std::string error;
+        entities.Tick(q,{camera.x,camera.y,camera.z},true,false);
+        CheckGpu(entities.AdvanceTime(512,error),error.c_str());
+        const auto draw=[&](const WorldShotScene& scene) {
+            glEnable(GL_DEPTH_TEST); glDepthMask(GL_TRUE); glClearColor(.1f,.12f,.15f,1);
+            glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT); camera.Apply(width,height,1000);
+            gpu.DrawActors(scene); return readback();
+        };
+        const auto clear=draw({}), visible=draw(entities.Actors());
+        const auto coverage=difference(clear,visible);
+        CheckGpu(coverage>100 && entities.Actors().stats.triangles==sale.Actor.stats.triangles,"actual type18 mesh reaches production DrawActors pixels");
+        const auto& bind=entities.PreparedForSaleModel(); const auto& geometry=entities.ForSaleGeometry();
+        const float extent=std::max({geometry.ColMax[0]-geometry.ColMin[0],geometry.ColMax[1]-geometry.ColMin[1],geometry.ColMax[2]-geometry.ColMin[2]});
+        const float ratio=std::max(1.0f,float(1.2f/extent));
+        const float scale=float(1.0+double(.6f)*double(ratio-1.0f));
+        const double angle=1.565000057220459;
+        bool pose=true,normal=true,material=true;
+        for (std::size_t m=0;m<bind.meshes.size();++m) {
+            const auto& source=bind.meshes[m]; const auto& actor=sale.Actor.meshes[m];
+            for (std::size_t i=0;i<source.pos.size();i+=3) {
+                pose &= std::abs(actor.pos[i]-float(q.X+scale*(source.pos[i]*std::cos(angle)-source.pos[i+1]*std::sin(angle))))<.0002f &&
+                    std::abs(actor.pos[i+1]-float(q.Y+scale*(source.pos[i]*std::sin(angle)+source.pos[i+1]*std::cos(angle))))<.0002f &&
+                    std::abs(actor.pos[i+2]-(q.Z+scale*source.pos[i+2]))<.00002f;
+                normal &= std::abs(actor.nrm[i]-float(source.nrm[i]*std::cos(angle)-source.nrm[i+1]*std::sin(angle)))<.00001f &&
+                    std::abs(actor.nrm[i+1]-float(source.nrm[i]*std::sin(angle)+source.nrm[i+1]*std::cos(angle)))<.00001f;
+            }
+            for (std::size_t i=0;i<source.surfaces.size();++i) material &= source.surfaces[i].color==actor.surfaces[i].color;
+        }
+        CheckGpu(pose && normal && material && geometry.ColHeaderId==1273 && std::abs(geometry.Scale-scale)<.00001f,
+            "all actual sale vertices/normals/materials follow independent source 60-percent COL normalization and phase");
+        auto flat=entities.Actors(); for(auto& mesh:flat.meshes) std::fill(mesh.triImg.begin(),mesh.triImg.end(),-1);
+        const auto textureEffect=difference(visible,draw(flat));
+        CheckGpu(textureEffect>30,"actual icons3 texels affect sale pixels via combined image remap");
+        auto white=entities.Actors(); for(auto& mesh:white.meshes) for(auto& surface:mesh.surfaces) surface.color={1,1,1,1};
+        const auto materialEffect=difference(visible,draw(white));
+        const auto locked=NativeScriptPropertyActor(entities.PreparedModel(),q,entities.PropertyGeometry().Scale,512);
+        const auto differentModel=difference(visible,draw(locked));
+        CheckGpu(differentModel>100,"actual sale drawable differs from locked model at identical position/time");
+        auto unscaled=NativeScriptPropertyActor(bind,q,1,512);
+        for(auto& mesh:unscaled.meshes)for(auto& image:mesh.triImg)if(image>=0)image+=int(entities.PreparedModel().images.size());
+        const auto scaleEffect=difference(visible,draw(unscaled));
+        CheckGpu(scaleEffect>100,"source sale COL scale changes actual GPU coverage");
+        CheckGpu(entities.PriceLabels().size()==1 && entities.PriceLabels()[0].Price==30000 && entities.PriceLabels()[0].Text=="$30000" &&
+            entities.PriceLabels()[0].Alpha==163 && entities.PriceLabels()[0].Position.Z==q.Z+.7f,
+            "same visible sale exports source cost/14-unit distance alpha and Z+0.7 price-label candidate");
+        std::printf("sale GPU PASS model=%s txd=%s type=%d tris=%d coverage=%zu textureEffect=%zu materialEffect=%zu lockedDelta=%zu sourceCOL=%d scale=%.9f scaleEffect=%zu labelAlpha=%u price=%u labelProjectionParent=required\n",
+            bind.stats.dffName,bind.stats.txdName,sale.Type,bind.stats.triangles,coverage,textureEffect,materialEffect,differentModel,
+            geometry.ColHeaderId,geometry.Scale,scaleEffect,entities.PriceLabels()[0].Alpha,entities.PriceLabels()[0].Price);
+        entities.Tick(p,p,true,false); CheckGpu(entities.AdvanceTime(512,error),error.c_str());
+    }
+    {
         char error[256]{}; CheckGpu(s_ProbeHud && s_ProbeHud->Upload(error, sizeof(error)), error);
         RealtimeHudView view; view.clock = false;
         RealtimeHudState state;
@@ -323,6 +381,32 @@ void RealtimeScriptHostGpuProbe(NativeScriptEntities& entities, RealtimeScriptHo
         entities.Tick(p, p, true, false);
         CheckGpu(entities.AdvanceTime(expire + 302, helpError), "source latch reentry frame publication");
         CheckGpu(entities.HelpRevision() == 1 && entities.HelpPresentation().Text.empty(), "expiry does not reset source once-only pickup latch");
+        // Actual GXT/font consumer, generated proximity/input fixtures. Only the
+        // denial uses source owned player cash; funded input is labelled TEST.
+        const auto& sale=entities.Pickups()[3];
+        NativeScriptPropertyInput saleInput; saleInput.Targeting=true;
+        const auto saleFrame=[&](std::uint32_t now) {
+            entities.Tick(sale.Position,sale.Position,true,false,saleInput);
+            CheckGpu(entities.AdvanceTime(now,helpError),helpError.c_str()); applyHelp();
+        };
+        const auto saleTime=expire+320;
+        saleFrame(saleTime); saleFrame(saleTime+16); saleFrame(saleTime+32);
+        CheckGpu(state.helpText==sale.Message && state.helpAlpha==200 && sale.Message.find("TAB")!=std::string::npos,
+            "source sale control-expanded GXT reaches actual timed HUD presentation");
+        const auto salePrompt=draw(); const auto promptPixels=difference(noHelp,salePrompt);
+        CheckGpu(promptPixels>100,"actual sale prompt produces real font1 glyph pixels");
+        saleInput.FrameCounter=6; saleInput.Targeting=false; saleInput.CollectJustDown=true; saleInput.Money=host.PlayerInfo().Money;
+        saleFrame(saleTime+48); saleFrame(saleTime+64); saleFrame(saleTime+80);
+        CheckGpu(entities.Interaction().Status==NativeScriptPropertyInteractionStatus::InsufficientFunds && state.helpAlpha==200 && state.helpText!=sale.Message,
+            "source real zero balance yields actual quick denial GXT HUD pixels");
+        const auto denialPixels=difference(salePrompt,draw()); CheckGpu(denialPixels>100,"denial is distinct actual localized glyph content");
+        saleInput.FrameCounter=12; saleInput.Money=sale.Price; saleFrame(saleTime+96); // TEST sufficient balance only
+        CheckGpu(entities.Interaction().Status==NativeScriptPropertyInteractionStatus::ScriptPurchaseRequired && state.helpText.empty() &&
+            !state.helpAlpha && draw()==noHelp && host.PlayerInfo().Money==0 && entities.ResolvePickup(sale.Reference),
+            "funded TEST input clears actual help pixels; source type18 leaves pickup alive and host cash unchanged");
+        entities.Tick(p,p,true,false); CheckGpu(entities.AdvanceTime(saleTime+112,helpError),helpError.c_str());
+        std::printf("sale HUD GPU PASS promptPixels=%zu denialDelta=%zu actualBalance=%d fundedInput=TEST sourcePurchase=required collected=0\n",
+            promptPixels,denialPixels,host.PlayerInfo().Money);
         // Hostile caller state around the real help path, including texture unit
         // and both matrix stacks; no caller-owned framebuffer/depth writes.
         glActiveTexture(GL_TEXTURE1); glEnable(GL_TEXTURE_2D);

@@ -31,6 +31,17 @@ static bool Fail(char* err, std::size_t errSize, const char* message) {
     return false;
 }
 
+static void AdvanceFlowUV(RealtimeWaterState& water) {
+    // RenderWater, retail 728DA7..728E8E: x87 arithmetic rounded at stores.
+    for (int axis = 0; axis < 2; ++axis) {
+        const double distance = double(water.flowTimeStep) * double(.04f) * double(water.currentFlow[axis]);
+        water.firstFlowUV[axis] = float(double(water.firstFlowUV[axis]) + distance * double(.08f));
+        water.secondFlowUV[axis] = float(double(water.secondFlowUV[axis]) + distance * double(.04f));
+        if (water.firstFlowUV[axis] > 1.0f) water.firstFlowUV[axis] -= 1.0f;
+        if (water.secondFlowUV[axis] > 1.0f) water.secondFlowUV[axis] -= 1.0f;
+    }
+}
+
 static bool LoadWaterTexture(WorldShotImage& image, char* err, std::size_t errSize) {
     // Same NULL-platform plugin set as the other native asset loaders. Borrow
     // the shared engine; never shut it down or retain a dictionary across Load.
@@ -123,6 +134,7 @@ bool RealtimeEnvironment::Load(const char* gameDir, char* err, std::size_t errSi
     }
     if (!LoadWaterTexture(m_WaterImage, err, errSize)) return false;
     m_WaterState = {};
+    m_WaterFlow.Initialise(m_Water);
     // OriginalWeatherConstants wind table, read-only retail 94D510; CWeather
     // Update 75EA21/75ECE2 clips wind then computes min(WindClipped+.3,1).
     constexpr const char* names[]{"EXTRASUNNY_LA", "SUNNY_LA", "EXTRASUNNY_SMOG_LA", "SUNNY_SMOG_LA", "CLOUDY_LA",
@@ -406,22 +418,131 @@ bool RealtimeEnvironment::SetWaterState(const RealtimeWaterState& state) {
         m_WaterState.firstFlowUV = previous.firstFlowUV;
         m_WaterState.secondFlowUV = previous.secondFlowUV;
         if (state.gameMs != previous.gameMs) {
-            // RenderWater retail 728DA7..728E8E: x87 distance and scales, float
-            // accumulator stores, then ONE subtraction iff >1 (not >=1, and
-            // deliberately no negative wrap). The caller supplies the source
-            // simulation time step; integer milliseconds cannot reconstruct it.
-            for (int axis = 0; axis < 2; ++axis) {
-                const double distance = double(state.flowTimeStep) * double(.04f) * double(state.currentFlow[axis]);
-                auto advance = [distance](float& uv, float scale) {
-                    uv = float(double(uv) + distance * double(scale));
-                    if (uv > 1.0f) uv -= 1.0f;
-                };
-                advance(m_WaterState.firstFlowUV[axis], .08f);
-                advance(m_WaterState.secondFlowUV[axis], .04f);
-            }
+            AdvanceFlowUV(m_WaterState);
         }
     }
     return true;
+}
+
+void RealtimeWaterFlow::Initialise(const WaterLevelData& data) {
+    m_Vertices.clear();
+    m_Quads.clear();
+    m_Selection = {};
+    m_HasTick = false;
+    for (size_t p = 0; p < data.polys.size(); ++p) {
+        const auto& poly = data.polys[p];
+        assert(poly.nverts == 3 || poly.nverts == 4);
+        auto vertices = std::to_array(poly.v);
+        for (int i = 0; i < poly.nverts; ++i) {
+            auto& v = vertices[i];
+            // LoadTextures converts XY to int32 and flow to signed 1/64 bytes.
+            assert(std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z));
+            v.x = std::trunc(v.x);
+            v.y = std::trunc(v.y);
+        }
+        const auto end = vertices.begin() + poly.nverts;
+        if (std::all_of(vertices.begin(), end, [&](const auto& v) { return v.x == vertices[0].x; }) ||
+            std::all_of(vertices.begin(), end, [&](const auto& v) { return v.y == vertices[0].y; })) continue;
+        Quad quad{{}, static_cast<int>(p)};
+        for (int i = 0; i < poly.nverts; ++i) {
+            auto v = vertices[i];
+            // AddWaterLevelVertex 6E5A40: clamp then clear ALL RenPar fields,
+            // share by XYZ only, and let the first authored vertex own metadata.
+            if (v.x < -3000 || v.x > 3000 || v.y < -3000 || v.y > 3000) {
+                v = {std::clamp(v.x, -3000.0f, 3000.0f), std::clamp(v.y, -3000.0f, 3000.0f), 0};
+            } else {
+                assert(std::isfinite(v.flowX) && std::isfinite(v.flowY));
+                v.flowX = float(static_cast<int8_t>(int(v.flowX * 64.0f))) / 64.0f;
+                v.flowY = float(static_cast<int8_t>(int(v.flowY * 64.0f))) / 64.0f;
+            }
+            const auto found = std::find_if(m_Vertices.begin(), m_Vertices.end(), [&](const auto& other) {
+                return v.x == other.x && v.y == other.y && v.z == other.z;
+            });
+            quad.vertices[i] = static_cast<size_t>(found - m_Vertices.begin());
+            if (found == m_Vertices.end()) m_Vertices.push_back(v);
+        }
+        if (poly.nverts != 4) continue;
+        std::sort(quad.vertices.begin(), quad.vertices.end(), [&](auto a, auto b) {
+            const auto& x = m_Vertices[a];
+            const auto& y = m_Vertices[b];
+            return x.y == y.y ? x.x < y.x : x.y < y.y;
+        });
+        m_Quads.push_back(quad);
+    }
+}
+
+RealtimeWaterFlowSelection RealtimeWaterFlow::FindNearest(float x, float y,
+    std::array<float, 2> previousDesired) const {
+    assert(std::isfinite(x) && std::isfinite(y));
+    RealtimeWaterFlowSelection out;
+    out.desired = previousDesired;
+    // FindNearestWaterAndItsFlow 6E9D70 (retail 724300..7247C9).
+    // The boundary itself is OUTSIDE; no flags, interior, Z or player test.
+    if (x <= -3000 || x >= 3000 || y <= -3000 || y >= 3000) {
+        out.result = RealtimeWaterFlowSelection::Result::OutsideWorld;
+        out.desired = {};
+        out.nearestWavyDistance = 0;
+        return out;
+    }
+    float best = 10000000.0f;
+    for (const auto& q : m_Quads) {
+        const auto& lo = m_Vertices[q.vertices[0]];
+        const auto& right = m_Vertices[q.vertices[1]];
+        const auto& top = m_Vertices[q.vertices[2]];
+        const float dx = std::max({lo.x - x, x - right.x, 0.0f});
+        const float dy = std::max({lo.y - y, y - top.y, 0.0f});
+        const float distance = std::sqrt(float(double(dx) * dx + double(dy) * dy));
+        if (distance < out.nearestWavyDistance && std::any_of(q.vertices.begin(), q.vertices.end(), [&](auto i) {
+            return m_Vertices[i].bigWaves != 0 || m_Vertices[i].smallWaves != 0;
+        })) {
+            out.nearestWavyDistance = distance;
+            out.nearestWavyHeight = lo.z; // first vertex, NOT interpolated level
+        }
+        if (distance >= best) continue; // first quad wins equal AABB distances
+        best = distance;
+        float nearest = INFINITY;
+        for (int i = 0; i < 4; ++i) {
+            const auto& v = m_Vertices[q.vertices[i]];
+            const double vx = double(v.x) - x, vy = double(v.y) - y;
+            const float squared = float(vx * vx + vy * vy); // four x87 float stores before comparisons
+            if (squared > nearest) continue; // last corner wins equal distances
+            nearest = squared;
+            out.desired = {v.flowX, v.flowY};
+            out.corner = i;
+        }
+        out.polygon = q.polygon;
+        out.result = RealtimeWaterFlowSelection::Result::SelectedQuad;
+    }
+    return out; // no quads inside world: retain desired, distance=1e7, height=0
+}
+
+bool RealtimeWaterFlow::Advance(const RealtimeWaterFlowTick& tick, RealtimeWaterState& water) {
+    if (water.accumulateFlow || !std::isfinite(tick.cameraX) || !std::isfinite(tick.cameraY) ||
+        !std::isfinite(tick.timeStep) || tick.timeStep < 0 || tick.timeStep > 3) return false;
+    for (const auto& pair : {water.currentFlow, water.firstFlowUV, water.secondFlowUV})
+        for (float v : pair) if (!std::isfinite(v)) return false;
+    if (m_HasTick) {
+        if (tick.frame == m_LastTick.frame) return tick == m_LastTick;
+        if (tick.frame != m_LastTick.frame + uint32_t{1}) return false;
+    }
+    m_HasTick = true;
+    m_LastTick = tick;
+    if (tick.suspended || !tick.canSeeWater) return true;
+    // PreRenderWater -> UpdateFlow; select only at the original 29/32 phase.
+    if (tick.frame % 32 == 29) m_Selection = FindNearest(tick.cameraX, tick.cameraY, m_Selection.desired);
+    const float step = tick.timeStep / 1000.0f;
+    for (int axis = 0; axis < 2; ++axis) {
+        const float delta = m_Selection.desired[axis] - water.currentFlow[axis];
+        water.currentFlow[axis] = std::abs(delta) < step ? m_Selection.desired[axis] :
+            water.currentFlow[axis] + std::copysign(step, delta);
+    }
+    water.flowTimeStep = tick.timeStep;
+    AdvanceFlowUV(water);
+    return true;
+}
+
+bool RealtimeEnvironment::AdvanceWaterFlow(const RealtimeWaterFlowTick& tick) {
+    return m_Loaded && m_WaterFlow.Advance(tick, m_WaterState);
 }
 
 RealtimeWaterSample RealtimeEnvironment::SampleWater(int x, int y, float z, float big, float small) const {

@@ -113,6 +113,12 @@ else:
         clocks = [int(value) for value in re.findall(r'water-capture clockMs=(\d+)', text)]
         assert len(clocks) >= 3 and clocks[0] == 0 and clocks[-1] >= 12000
         assert all(b > a for a, b in zip(clocks, clocks[1:]))
+        flow = re.findall(r'water-flow-capture gameNs=(\d+) ticks=(\d+) polygon=(-?\d+) current=([^\n]+)', text)
+        assert len(flow) == len(clocks)
+        for ns, ticks, polygon, current in flow:
+            assert int(ticks) == int(ns) * 30 // 1_000_000_000
+            assert int(ticks) < 29 or int(polygon) >= 0
+            assert current == '0.000000000,0.000000000', 'Owned water.dat has zero authored flows; do not invent a current'
         first = (workspace / captures[0]).read_bytes().split(b'\n', 3)[3]
         last = (workspace / captures[-1]).read_bytes().split(b'\n', 3)[3]
         changed = sum(first[i:i+3] != last[i:i+3] for i in range(0, len(first), 3))

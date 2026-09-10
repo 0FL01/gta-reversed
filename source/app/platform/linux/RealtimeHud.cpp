@@ -11,7 +11,7 @@
 
 namespace {
 constexpr float kPi = std::numbers::pi_v<float>;
-constexpr int kCentre = 144, kNorth = 145, kDisc = 146, kFont = 147, kProperty = 148;
+constexpr int kCentre = 144, kNorth = 145, kDisc = 146, kFont = 147, kProperty = 148, kForSale = 149;
 struct Point { float x, y; };
 
 // CRadar::CachedRotateClockwise, with GTA heading = native yaw - pi/2.
@@ -72,10 +72,68 @@ static void Quad(float x0, float y0, float x1, float y1, float u0 = 0, float v0 
     glEnd();
 }
 
-// Font.cpp FindSubFontCharacter(style=1), for the clock's ASCII alphabet.
+// Font.cpp FindSubFontCharacter(style=1); its input is the GXT byte minus 32.
 static unsigned PricedownGlyph(unsigned char ch) {
-    assert((ch >= '0' && ch <= '9') || ch == ':');
-    return ch == ':' ? 154u : unsigned(ch - '0') + 144u;
+    assert(ch >= 32);
+    const unsigned id = ch - 32;
+    switch (id) {
+    case 1: return 208;
+    case 4: return 93;
+    case 7: return 206;
+    case 8: case 9: return id + 86;
+    case 14: return 207;
+    case 26: return 154;
+    case 6: return 10;
+    case 31: return 91;
+    case 62: return 32;
+    case 143: return 205;
+    }
+    if (id >= 16 && id <= 25) return id + 128;
+    if (id >= 33 && id <= 58) return id + 122;
+    if (id >= 65 && id <= 90) return id + 90;
+    if (id >= 96 && id <= 118) return id + 85;
+    if (id >= 119 && id <= 140) return id + 62;
+    if (id >= 141 && id <= 142) return 204;
+    return id;
+}
+
+static int PriceAdvance(const MenuHudFont& font, unsigned char ch) {
+    const auto glyph = PricedownGlyph(ch);
+    // tFontData::m_spaceValue immediately follows the 208 prop bytes. The
+    // source maps '!' to this entry and PrintChar suppresses its geometry.
+    assert(glyph <= 208);
+    return glyph == 208 ? font.space : font.prop[glyph];
+}
+
+static void PriceText(const MenuHudFont& font, std::string_view text, float cx, float y, float sx, float sy, int width) {
+    // SetCentreSize(SCREEN_WIDTH). Split only at spaces/newlines; strings are
+    // already formatted by NativeScriptEntities (no numeric/token substitution).
+    while (!text.empty()) {
+        std::size_t end = 0, space = std::string_view::npos;
+        float advance = 0, atSpace = 0;
+        for (; end < text.size() && text[end] != '\n'; ++end) {
+            if (text[end] == ' ') { space = end; atSpace = advance; }
+            const float next = PriceAdvance(font, text[end]) * sx;
+            if (advance + next > width && space != std::string_view::npos) {
+                end = space; advance = atSpace; break;
+            }
+            advance += next;
+        }
+        float x = cx - advance / 2;
+        for (const unsigned char ch : text.substr(0, end)) {
+            const auto glyph = PricedownGlyph(ch);
+            if (ch != ' ' && glyph != 208) {
+                const float u = float(glyph % 16 * 32), v = float(glyph / 16 * 40);
+                // Font1 32x40 cells, PrintChar logical height 20 (16 for >=192).
+                const float cellHeight = glyph < 192 ? 40.0f : 32.0f;
+                if (x >= 0 && x <= width && y >= 0) Quad(x, y, x + 32 * sx, y + cellHeight * .5f * sy,
+                    (u + .5f) / 512, (v + .5f) / 512, (u + 31.5f) / 512, (v + cellHeight - .5f) / 512);
+            }
+            x += PriceAdvance(font, ch) * sx;
+        }
+        text.remove_prefix(std::min(end + 1, text.size()));
+        y += 18 * sy; // CFont::GetHeight(false)
+    }
 }
 
 static void ClockText(const char* text, int unprop, float dx, float dy) {
@@ -161,7 +219,8 @@ bool RealtimeHud::Load(const char* gameDir, char* err, std::size_t errSize) {
         && MenuShot_LoadPricedownFont(gameDir, m_Font, err, errSize);
     if (m_Loaded) {
         std::string error;
-        m_Loaded = NativeScriptEntities_LoadRadar(gameDir, m_PropertyRadar, error);
+        m_Loaded = NativeScriptEntities_LoadRadar(gameDir, m_PropertyRadar, error)
+            && NativeScriptEntities_LoadRadar(gameDir, m_ForSaleRadar, error, 31);
         if (!m_Loaded && err && errSize) std::snprintf(err, errSize, "%s", error.c_str());
     }
     return m_Loaded;
@@ -186,7 +245,8 @@ bool RealtimeHud::Upload(char* err, std::size_t errSize) {
     glGenTextures(m_Textures.size(), m_Textures.data());
     for (int i = 0; i < int(m_Textures.size()); ++i) {
         const TexImage* image = i < 144 ? &m_Radar.tiles[i] : i == kCentre ? &m_Radar.centre
-            : i == kNorth ? &m_Radar.north : i == kDisc ? &m_Radar.disc : i == kProperty ? &m_PropertyRadar : nullptr;
+            : i == kNorth ? &m_Radar.north : i == kDisc ? &m_Radar.disc : i == kProperty ? &m_PropertyRadar
+            : i == kForSale ? &m_ForSaleRadar : nullptr;
         const auto& font = m_Font;
         glBindTexture(GL_TEXTURE_2D, m_Textures[i]);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -213,6 +273,63 @@ bool RealtimeHud::Upload(char* err, std::size_t errSize) {
 void RealtimeHud::ReleaseGpu() {
     if (m_Textures[0]) glDeleteTextures(m_Textures.size(), m_Textures.data());
     m_Textures.fill(0);
+}
+
+RealtimeHudPriceView RealtimeHud::CapturePriceView(float nearClip, float farClip, float fov) {
+    RealtimeHudPriceView view;
+    glGetFloatv(GL_MODELVIEW_MATRIX, view.ModelView.data());
+    glGetFloatv(GL_PROJECTION_MATRIX, view.Projection.data());
+    view.NearClip = nearClip; view.FarClip = farClip; view.Fov = fov;
+    return view;
+}
+
+std::vector<RealtimeHudProjectedPrice> RealtimeHud::ProjectPropertyPrices(
+    std::span<const NativeScriptPropertyLabel> labels, const RealtimeHudPriceView& view, int width, int height) {
+    assert(width > 0 && height > 0 && std::isfinite(view.Fov) && view.Fov > 0);
+    assert(view.NearClip >= 0 && std::isfinite(view.FarClip) && view.FarClip > view.NearClip + 1);
+    const auto transform = [](const auto& matrix, const std::array<float, 4>& p) {
+        std::array<float, 4> out{};
+        for (int row = 0; row < 4; ++row) for (int col = 0; col < 4; ++col) out[row] += matrix[col * 4 + row] * p[col];
+        return out;
+    };
+    std::vector<RealtimeHudProjectedPrice> projected;
+    projected.reserve(std::min(labels.size(), std::size_t{16}));
+    for (std::size_t i = 0; i < labels.size() && projected.size() < 16; ++i) {
+        const auto& p = labels[i].Position;
+        const auto eye = transform(view.ModelView, {p.X, p.Y, p.Z, 1});
+        const float depth = -eye[2]; // GL camera looks along -Z; source camera uses +Z.
+        assert(std::isfinite(depth));
+        if (depth <= view.NearClip + 1 || depth >= view.FarClip) continue;
+        const auto clip = transform(view.Projection, eye);
+        assert(std::isfinite(clip[3]) && clip[3] > 0);
+        const float w = width / depth / view.Fov * 70, h = height / depth / view.Fov * 70;
+        projected.push_back({i, (clip[0] / clip[3] + 1) * width / 2,
+            (1 - clip[1] / clip[3]) * height / 2, depth, w, h,
+            std::min(width / 640.0f, w / 30), std::min(width / 640.0f, h / 30)});
+    }
+    return projected;
+}
+
+void RealtimeHud::DrawPropertyPrices(std::span<const NativeScriptPropertyLabel> labels,
+    int width, int height, float nearClip, float farClip, float fov) const {
+    DrawPropertyPrices(labels, CapturePriceView(nearClip, farClip, fov), width, height);
+}
+
+void RealtimeHud::DrawPropertyPrices(std::span<const NativeScriptPropertyLabel> labels,
+    const RealtimeHudPriceView& view, int width, int height) const {
+    assert(m_Textures[0]);
+    const auto projected = ProjectPropertyPrices(labels, view, width, height);
+    if (projected.empty()) return;
+    const DrawState restore(width, height);
+    // Pickup font scales are already in drawable pixels, unlike the HUD's
+    // reference-coordinate clock/help. Do not apply screen stretching twice.
+    glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, width, height, 0, -1, 1);
+    glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, m_Textures[kFont]);
+    for (const auto& p : projected) {
+        const auto& label = labels[p.Candidate];
+        glColor4ub(label.Color[0], label.Color[1], label.Color[2], label.Alpha);
+        PriceText(m_Font, label.Text, p.X, p.Y, p.ScaleX, p.ScaleY, width);
+    }
 }
 
 void RealtimeHud::Draw(const RealtimeHudView& view, const RealtimeHudState& state, int width, int height) const {
@@ -259,11 +376,12 @@ void RealtimeHud::Draw(const RealtimeHudView& view, const RealtimeHudState& stat
         const auto n = RadarToScreen({std::sin(orientation), std::cos(orientation)});
         glBindTexture(GL_TEXTURE_2D, m_Textures[kNorth]);
         Quad(n.x - 8, n.y - 8, n.x + 8, n.y + 8);
-        glBindTexture(GL_TEXTURE_2D, m_Textures[kProperty]);
         for (const auto& blip : state.scriptBlips) {
             auto p = WorldToRadar({blip.Position.X, blip.Position.Y}, view, state);
             const auto distance = std::sqrt(p.x*p.x + p.y*p.y);
             if (!NativeScriptRadarVisible(blip, distance, state.playerOnMission, state.radarZoom, state.exterior)) continue;
+            assert(blip.Sprite == 31 || blip.Sprite == 32);
+            glBindTexture(GL_TEXTURE_2D, m_Textures[blip.Sprite == 31 ? kForSale : kProperty]);
             if (distance > 1) { p.x /= distance; p.y /= distance; }
             const auto screen = RadarToScreen(p);
             Quad(screen.x - 8, screen.y - 8, screen.x + 8, screen.y + 8);

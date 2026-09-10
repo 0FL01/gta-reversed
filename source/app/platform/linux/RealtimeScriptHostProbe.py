@@ -80,4 +80,4 @@ if __name__ == '__main__':
         (OUTPUT / (name + '.log')).write_text(result.stdout)
         print(result.stdout, end='')
         result.check_returncode()
-        assert 'host-probe failures=0 firstpass=53 mission-prefix=132 terminal=0518@201080' in result.stdout
+        assert 'host-probe failures=0 firstpass=53 mission-prefix=135 terminal=02B9@201129' in result.stdout

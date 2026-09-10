@@ -32,7 +32,8 @@ struct ReadState {
 };
 
 static bool Swap(SDL_Window* window, const RealtimeHudView& view,
-                 const RealtimeHudState& hud, const RealtimeGameplayState& state, const RealtimeWaterState& water) {
+                 const RealtimeHudState& hud, const RealtimeGameplayState& state, const RealtimeWaterState& water,
+                 Uint64 gameNs, Uint64 flowTicks, const RealtimeWaterFlowSelection& selection) {
     static unsigned frame = 0;
     static Uint64 start = SDL_GetTicksNS();
     static unsigned timed = 0;
@@ -104,6 +105,10 @@ static bool Swap(SDL_Window* window, const RealtimeHudView& view,
                 before.integers == after.integers && before.transfer == after.transfer, path);
             std::fflush(stdout);
             std::printf("water-capture clockMs=%u wavyness=%.6f\n", water.gameMs, water.wavyness);
+            std::printf("water-flow-capture gameNs=%llu ticks=%llu polygon=%d current=%.9f,%.9f\n",
+                static_cast<unsigned long long>(gameNs), static_cast<unsigned long long>(flowTicks),
+                selection.polygon, water.currentFlow[0], water.currentFlow[1]);
+            ok &= flowTicks == gameNs / 1'000'000'000 * 30 + gameNs % 1'000'000'000 * 30 / 1'000'000'000;
         } else {
             std::printf("hud-capture FAIL invalid drawable/default framebuffer=%d\n", framebuffer);
         }
@@ -116,6 +121,6 @@ static bool Swap(SDL_Window* window, const RealtimeHudView& view,
 
 // SDL headers are already included. Only the production call site is replaced;
 // HUD inputs are the exact locals submitted to Draw, with no replay injection.
-#define SDL_GL_SwapWindow(window) hud_capture::Swap((window), hudView, hudState, gameplay.State(), environment.GetWaterState())
+#define SDL_GL_SwapWindow(window) hud_capture::Swap((window), hudView, hudState, gameplay.State(), environment.GetWaterState(), gameNs, waterTicks, environment.GetWaterFlowSelection())
 #include "Realtime.cpp"
 #undef SDL_GL_SwapWindow

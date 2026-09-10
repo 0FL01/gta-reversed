@@ -29,7 +29,7 @@ struct RealtimeWaterState {
     // from the UV fields; while enabled those fields are outputs. Disable to
     // restore an absolute snapshot. Supply the ORIGINAL smoothed m_CurrentFlow
     // and clipped CTimer::TimeStep, not a wind vector or a wall-clock delta.
-    // Nearest-water selection/32-frame flow smoothing is not emulated here.
+    // Leave false when using AdvanceWaterFlow, which owns source flow updates.
     bool accumulateFlow = false;
     std::array<float, 2> currentFlow{};
     float flowTimeStep = 0.0f;
@@ -38,6 +38,50 @@ struct RealtimeWaterState {
 struct RealtimeWaterSample {
     float z = 0.0f, colorMult = 0.0f, glare = 0.0f;
     std::array<float, 3> normal{0, 0, 1};
+};
+
+struct RealtimeWaterFlowTick {
+    // Original simulation frame counter, NOT the native presentation counter.
+    // Deliver consecutive ticks (uint32 wrap is supported), at the caller's
+    // source simulation cadence (30 Hz when emulating APP_MAX_FPS=30).
+    uint32_t frame = 0, gameMs = 0;
+    float timeStep = 0; // clipped CTimer::TimeStep, milliseconds * .05, <= 3
+    float cameraX = 0, cameraY = 0; // TheCamera.GetPosition(), not player coords
+    // Native UI suspension is an explicit freeze. To replay ORIGINAL paused
+    // CTimer ticks instead, leave suspended=false: frame still increments,
+    // gameMs stops, and clipped timeStep is .00001 (Timer.cpp/Game.cpp).
+    bool suspended = false;
+    bool canSeeWater = true; // CGame::currArea == 0 || currArea == 5
+    bool operator==(const RealtimeWaterFlowTick&) const = default;
+};
+
+struct RealtimeWaterFlowSelection {
+    enum class Result { NoQuad, SelectedQuad, OutsideWorld } result = Result::NoQuad;
+    std::array<float, 2> desired{};
+    float nearestWavyDistance = 10000000.0f, nearestWavyHeight = 0;
+    int polygon = -1, corner = -1; // authored polygon index, sorted quad corner
+};
+
+// CPU-only source flow field. Builds shared/quantized source vertices once;
+// triangles participate in vertex ownership but never in the nearest-quad scan.
+class RealtimeWaterFlow {
+public:
+    void Initialise(const WaterLevelData& data);
+    RealtimeWaterFlowSelection FindNearest(float cameraX, float cameraY,
+        std::array<float, 2> previousDesired = {}) const;
+    // False on invalid input, conflicting duplicate, skipped/out-of-order tick,
+    // or mixing explicit accumulateFlow mode. Identical duplicates are no-ops.
+    // Suspended/hidden-area ticks consume their counter but change no flow/UV.
+    // Does not change the wave clock: SetWaterState controls presentation time.
+    bool Advance(const RealtimeWaterFlowTick& tick, RealtimeWaterState& water);
+    const RealtimeWaterFlowSelection& GetSelection() const { return m_Selection; }
+private:
+    struct Quad { std::array<size_t, 4> vertices; int polygon; };
+    std::vector<WaterVert> m_Vertices;
+    std::vector<Quad> m_Quads;
+    RealtimeWaterFlowSelection m_Selection{};
+    RealtimeWaterFlowTick m_LastTick{};
+    bool m_HasTick = false;
 };
 
 class RealtimeEnvironment {
@@ -68,6 +112,12 @@ public:
     // Read-modify-write GetWaterState to retain Load's named-weather default.
     bool SetWaterState(const RealtimeWaterState& state);
     const RealtimeWaterState& GetWaterState() const { return m_WaterState; }
+    // Main simulation thread, before DrawWater. Load resets desired/current/UV
+    // and cadence. Extra renders must not fabricate simulation ticks; reuse the
+    // last tick verbatim or don't call. Replay every missed tick with its actual
+    // camera/timeStep/area inputs; a skipped history is explicitly rejected.
+    bool AdvanceWaterFlow(const RealtimeWaterFlowTick& tick);
+    const RealtimeWaterFlowSelection& GetWaterFlowSelection() const { return m_WaterFlow.GetSelection(); }
     // Source 0x6E6EF0, without distance attenuation (render applies it first).
     RealtimeWaterSample SampleWater(int x, int y, float z, float big, float small) const;
     std::array<float, 2> WaterTextureShift(int layer) const;
@@ -102,6 +152,7 @@ private:
     WaterLevelData m_Water{};
     WorldShotImage m_WaterImage{}; // owned pixels; no RW objects survive Load
     RealtimeWaterState m_WaterState{};
+    RealtimeWaterFlow m_WaterFlow{};
     unsigned int m_WaterTexture = 0;
     unsigned int m_LightingProgram = 0;
     mutable int m_PreviousProgram = 0; // lighting scopes must not nest
