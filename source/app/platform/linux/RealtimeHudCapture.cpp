@@ -9,6 +9,7 @@
 #include <vector>
 #include "app/platform/linux/RealtimeGameplay.h"
 #include "app/platform/linux/RealtimeHud.h"
+#include "app/platform/linux/RealtimeEnvironment.h"
 
 namespace hud_capture {
 struct ReadState {
@@ -31,7 +32,7 @@ struct ReadState {
 };
 
 static bool Swap(SDL_Window* window, const RealtimeHudView& view,
-                 const RealtimeHudState& hud, const RealtimeGameplayState& state) {
+                 const RealtimeHudState& hud, const RealtimeGameplayState& state, const RealtimeWaterState& water) {
     static unsigned frame = 0;
     static Uint64 start = SDL_GetTicksNS();
     static unsigned timed = 0;
@@ -79,7 +80,8 @@ static bool Swap(SDL_Window* window, const RealtimeHudView& view,
             const auto error = glGetError();
             ok = error == GL_NO_ERROR && before.integers == after.integers && before.transfer == after.transfer;
             char path[256];
-            std::snprintf(path, sizeof(path), "artifacts/graphics/realtime-hud-integrated-%04u.ppm", frame);
+            std::snprintf(path, sizeof(path), "artifacts/graphics/realtime-%s-integrated-%04u.ppm",
+                view.radar ? "hud" : "water", frame);
             if (ok) {
                 FILE* file = std::fopen(path, "wb");
                 ok = file != nullptr;
@@ -101,6 +103,7 @@ static bool Swap(SDL_Window* window, const RealtimeHudView& view,
                 static_cast<unsigned long long>(state.Exits), error,
                 before.integers == after.integers && before.transfer == after.transfer, path);
             std::fflush(stdout);
+            std::printf("water-capture clockMs=%u wavyness=%.6f\n", water.gameMs, water.wavyness);
         } else {
             std::printf("hud-capture FAIL invalid drawable/default framebuffer=%d\n", framebuffer);
         }
@@ -113,6 +116,6 @@ static bool Swap(SDL_Window* window, const RealtimeHudView& view,
 
 // SDL headers are already included. Only the production call site is replaced;
 // HUD inputs are the exact locals submitted to Draw, with no replay injection.
-#define SDL_GL_SwapWindow(window) hud_capture::Swap((window), hudView, hudState, gameplay.State())
+#define SDL_GL_SwapWindow(window) hud_capture::Swap((window), hudView, hudState, gameplay.State(), environment.GetWaterState())
 #include "Realtime.cpp"
 #undef SDL_GL_SwapWindow

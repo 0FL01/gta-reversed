@@ -40,6 +40,9 @@ struct WaterVert {
     float x = 0.0f;
     float y = 0.0f;
     float z = 0.0f;
+    // Authored water.dat parameters; the legacy flat renderer ignores these.
+    float flowX = 0.0f, flowY = 0.0f;
+    float bigWaves = 0.0f, smallWaves = 0.0f;
 };
 
 struct WaterPoly {

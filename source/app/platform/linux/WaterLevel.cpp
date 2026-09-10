@@ -109,6 +109,10 @@ bool ParseWaterLine(const char* line, WaterPoly& poly, bool& hasFlag) {
         poly.v[i].x = verts[i][0];
         poly.v[i].y = verts[i][1];
         poly.v[i].z = verts[i][2];
+        poly.v[i].flowX = verts[i][3];
+        poly.v[i].flowY = verts[i][4];
+        poly.v[i].bigWaves = verts[i][5];
+        poly.v[i].smallWaves = verts[i][6];
     }
     return true;
 }

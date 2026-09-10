@@ -1,11 +1,147 @@
 // Same renderer and HUD as production; surfaceless readback, no asset dumps.
+#ifndef GL_GLEXT_PROTOTYPES
+#define GL_GLEXT_PROTOTYPES 1
+#endif
 #include "app/platform/linux/Realtime.cpp"
 #include <EGL/eglext.h>
+#include <stdexcept>
 
 namespace {
 std::unique_ptr<RealtimeHud> s_ProbeHud;
 void CheckGpu(bool ok, const char* message) {
     if (!ok) { std::fprintf(stderr, "script-entities GPU FAIL %s\n", message); std::exit(2); }
+}
+void ProbeMarkerCamera() {
+    Camera camera; camera.x = camera.y = camera.z = camera.yaw = camera.pitch = 0;
+    // Independent 60-degree projection boundaries, in this camera's +X view.
+    const auto visible = [&](float depth, float side, float up, float radius = 0) {
+        return camera.SphereVisible({depth,-side,up},radius,640,448,1000);
+    };
+    CheckGpu(!visible(0.099f,0,0) && visible(0.101f,0,0) && visible(999.99f,0,0) && !visible(1000.01f,0,0),
+        "actual camera near=0.1/far=1000 point clipping");
+    CheckGpu(visible(0.05f,0,0,0.06f) && !visible(0.05f,0,0,0.04f) && visible(1000.5f,0,0,0.6f) && !visible(1000.5f,0,0,0.4f),
+        "actual camera sphere/near/far-plane intersection");
+    CheckGpu(visible(10,0,5.77f) && !visible(10,0,5.78f) && visible(10,8.24f,0) && !visible(10,8.25f,0) &&
+        !visible(10,0,6.5f), "actual 60-degree frustum excludes old 70-degree-only point");
+    CheckGpu(visible(10,0,6.9f,1) && !visible(10,0,6.94f,1) && visible(10,9.5f,0,1) && !visible(10,9.56f,0,1),
+        "actual camera normalized sloping-plane sphere radius");
+    camera.yaw = 1.57079632679f; camera.pitch = 0.4f;
+    CheckGpu(camera.SphereVisible({0,10*std::cos(camera.pitch),10*std::sin(camera.pitch)},0,640,448,1000) &&
+        !camera.SphereVisible({0,-10*std::cos(camera.pitch),-10*std::sin(camera.pitch)},0,640,448,1000),
+        "actual frustum follows camera yaw and pitch");
+    std::printf("enex camera PASS fov=60 near=0.1 far=1000 sphere-planes=normalized rotated=1\n");
+}
+
+void ProbeMarkerPass(GpuScene& gpu, const WorldShotScene& bind, const WorldShotScene& actors, const Camera& camera) {
+    constexpr int width = 640, height = 448;
+    const auto pixels = [] {
+        std::vector<std::uint8_t> data(width*height*4); glReadPixels(0,0,width,height,GL_RGBA,GL_UNSIGNED_BYTE,data.data()); return data;
+    };
+    const auto depth = [] {
+        std::vector<float> data(width*height); glReadPixels(0,0,width,height,GL_DEPTH_COMPONENT,GL_FLOAT,data.data()); return data;
+    };
+    const auto changed = [](const auto& a, const auto& b) {
+        std::size_t count = 0; for (std::size_t i=0;i<a.size();i+=4) count += !std::equal(a.begin()+i,a.begin()+i+4,b.begin()+i); return count;
+    };
+    const auto reset = [&] {
+        glUseProgram(0); glDisable(GL_LIGHTING); glDisable(GL_COLOR_SUM); glDisable(GL_FOG); glDisable(GL_SCISSOR_TEST);
+        for (int unit=0;unit<4;++unit) { glActiveTexture(GL_TEXTURE0+unit); glDisable(GL_TEXTURE_2D); }
+        glActiveTexture(GL_TEXTURE0); glDisable(GL_BLEND); glDisable(GL_ALPHA_TEST); glDisable(GL_CULL_FACE);
+        glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LESS); glDepthMask(GL_TRUE); glColorMask(GL_TRUE,GL_TRUE,GL_TRUE,GL_TRUE);
+        glPolygonMode(GL_FRONT_AND_BACK,GL_FILL); glClearDepth(1); glClearColor(0.1f,0.12f,0.15f,1);
+        glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT); camera.Apply(width,height,1000);
+    };
+    std::size_t ccwNormals=0,cwNormals=0,zeroArea=0,orthogonalNormals=0,zeroTexels=0;
+    double signedVolume=0;
+    for (const auto& mesh:bind.meshes) for (int t=0;t<mesh.tris;++t) {
+        const auto* p=mesh.pos.data()+t*9; const auto* n=mesh.nrm.data()+t*9;
+        const double ux=p[3]-p[0],uy=p[4]-p[1],uz=p[5]-p[2],vx=p[6]-p[0],vy=p[7]-p[1],vz=p[8]-p[2];
+        const double nx=uy*vz-uz*vy,ny=uz*vx-ux*vz,nz=ux*vy-uy*vx;
+        const double dot=nx*(n[0]+n[3]+n[6])+ny*(n[1]+n[4]+n[7])+nz*(n[2]+n[5]+n[8]);
+        signedVolume+=(p[0]*nx+p[1]*ny+p[2]*nz)/6;
+        if (nx*nx+ny*ny+nz*nz<=1e-16) ++zeroArea;
+        else if (dot>1e-8) ++ccwNormals; else if (dot < -1e-8) ++cwNormals; else ++orthogonalNormals;
+    }
+    for (const auto& image:bind.images) for (std::size_t i=3;i<image.rgba.size();i+=4) zeroTexels += image.rgba[i]==0;
+    reset(); const auto clear=pixels(); const auto untouchedDepth=depth(); gpu.DrawMarkers(actors); const auto production=pixels();
+    CheckGpu(depth()==untouchedDepth,"DrawMarkers preserves every depth-buffer sample with visible actual DFF");
+    const auto reference = [&](GLenum front) {
+        reset(); glEnable(GL_CULL_FACE); glCullFace(GL_BACK); glFrontFace(front); glDepthMask(GL_FALSE);
+        glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA); glEnable(GL_ALPHA_TEST); glAlphaFunc(GL_GREATER,0);
+        glTexEnvi(GL_TEXTURE_ENV,GL_TEXTURE_ENV_MODE,GL_MODULATE);
+        gpu.Draw(actors); return pixels(); // independent state oracle deliberately uses bare Draw
+    };
+    const auto ccw=reference(GL_CCW),cw=reference(GL_CW);
+    std::printf("enex winding actual-DFF triangles=%d normalsCCW=%zu normalsCW=%zu zeroArea=%zu orthogonalNormals=%zu signedVolume=%.9f CCWpixels=%zu CWpixels=%zu windingEffect=%zu zeroAlphaTexels=%zu\n",
+        bind.stats.triangles,ccwNormals,cwNormals,zeroArea,orthogonalNormals,signedVolume,changed(clear,ccw),changed(clear,cw),changed(ccw,cw),zeroTexels);
+    CheckGpu(ccwNormals>0 && !cwNormals && production==ccw && changed(ccw,cw)>30,
+        "actual DFF winding agrees with source normals and dedicated CCW backface-cull pass");
+
+    // Snapshot current attributes as well as render switches: Draw emits normals,
+    // colors and four texture coordinates even though it does not change ZWRITE.
+    const auto snapshot = [] {
+        std::vector<GLint> ints; std::vector<GLfloat> floats;
+        for (auto p : {GL_CURRENT_PROGRAM,GL_ACTIVE_TEXTURE,GL_MATRIX_MODE,GL_DEPTH_WRITEMASK,GL_DEPTH_FUNC,GL_CULL_FACE_MODE,GL_FRONT_FACE,
+            GL_BLEND_SRC_RGB,GL_BLEND_DST_RGB,GL_BLEND_SRC_ALPHA,GL_BLEND_DST_ALPHA,GL_ALPHA_TEST_FUNC}) {
+            GLint v{}; glGetIntegerv(p,&v); ints.push_back(v);
+        }
+        for (auto p : {GL_DEPTH_TEST,GL_CULL_FACE,GL_BLEND,GL_ALPHA_TEST,GL_LIGHTING,GL_COLOR_SUM,GL_FOG,GL_SCISSOR_TEST}) ints.push_back(glIsEnabled(p));
+        GLint viewport[4],scissor[4],polygon[2]; glGetIntegerv(GL_VIEWPORT,viewport); glGetIntegerv(GL_SCISSOR_BOX,scissor); glGetIntegerv(GL_POLYGON_MODE,polygon);
+        ints.insert(ints.end(),viewport,viewport+4); ints.insert(ints.end(),scissor,scissor+4); ints.insert(ints.end(),polygon,polygon+2);
+        GLfloat value[16]{};
+        for (auto p : {GL_MODELVIEW_MATRIX,GL_PROJECTION_MATRIX}) { glGetFloatv(p,value); floats.insert(floats.end(),value,value+16); }
+        for (auto p : {GL_CURRENT_COLOR,GL_CURRENT_SECONDARY_COLOR}) { glGetFloatv(p,value); floats.insert(floats.end(),value,value+4); }
+        glGetFloatv(GL_CURRENT_NORMAL,value); floats.insert(floats.end(),value,value+3);
+        glGetFloatv(GL_ALPHA_TEST_REF,value); floats.push_back(value[0]);
+        GLint active{}; glGetIntegerv(GL_ACTIVE_TEXTURE,&active);
+        for (int unit=0;unit<4;++unit) {
+            glActiveTexture(GL_TEXTURE0+unit); ints.push_back(glIsEnabled(GL_TEXTURE_2D));
+            GLint binding{},environment{}; glGetIntegerv(GL_TEXTURE_BINDING_2D,&binding); glGetTexEnviv(GL_TEXTURE_ENV,GL_TEXTURE_ENV_MODE,&environment);
+            ints.push_back(binding); ints.push_back(environment);
+            glGetFloatv(GL_CURRENT_TEXTURE_COORDS,value); floats.insert(floats.end(),value,value+4);
+            glGetFloatv(GL_TEXTURE_MATRIX,value); floats.insert(floats.end(),value,value+16);
+        }
+        glActiveTexture(active); return std::pair(ints,floats);
+    };
+    const auto shader = [](GLenum type,const char* text) {
+        const auto object=glCreateShader(type); glShaderSource(object,1,&text,nullptr); glCompileShader(object); GLint ok{};
+        glGetShaderiv(object,GL_COMPILE_STATUS,&ok); CheckGpu(ok,"hostile caller shader compile"); return object;
+    };
+    const auto vertex=shader(GL_VERTEX_SHADER,"#version 120\nvoid main(){gl_Position=ftransform();}");
+    const auto fragment=shader(GL_FRAGMENT_SHADER,"#version 120\nvoid main(){gl_FragColor=vec4(0,1,1,1);}");
+    const auto program=glCreateProgram(); glAttachShader(program,vertex); glAttachShader(program,fragment); glLinkProgram(program);
+    GLint linked{}; glGetProgramiv(program,GL_LINK_STATUS,&linked); CheckGpu(linked,"hostile caller shader link");
+    reset(); glUseProgram(program); glEnable(GL_LIGHTING); glEnable(GL_LIGHT0); glEnable(GL_COLOR_SUM); glSecondaryColor3f(1,0,1);
+    const GLfloat dark[]{0,0,0,1}; glLightModelfv(GL_LIGHT_MODEL_AMBIENT,dark);
+    glDisable(GL_DEPTH_TEST); glDepthMask(GL_TRUE); glEnable(GL_CULL_FACE); glCullFace(GL_FRONT); glFrontFace(GL_CW);
+    glDisable(GL_BLEND); glBlendFuncSeparate(GL_ONE,GL_ZERO,GL_ZERO,GL_ONE); glEnable(GL_ALPHA_TEST); glAlphaFunc(GL_NEVER,0.75f);
+    glColor4f(0.2f,0.3f,0.4f,0.5f); glNormal3f(0.2f,0.4f,0.6f);
+    glActiveTexture(GL_TEXTURE1); glMatrixMode(GL_TEXTURE);
+    const auto caller=snapshot(); gpu.DrawMarkers(actors); const auto bright=pixels(); const auto restored=snapshot();
+    std::printf("enex marker-state callerRestored=%d fullbrightEqual=%d depthUnchanged=%d\n",caller==restored,bright==production,depth()==untouchedDepth);
+    CheckGpu(caller==restored && bright==production && depth()==untouchedDepth && glGetError()==GL_NO_ERROR,
+        "DrawMarkers fullbright material ignores caller shader/light/color-sum and restores caller GL state");
+    glUseProgram(0); glDeleteProgram(program); glDeleteShader(vertex); glDeleteShader(fragment); glDisable(GL_LIGHT0);
+
+    // Real foreground geometry writes the left half of the depth buffer. The
+    // caller then disables depth testing: DrawMarkers must enable it internally.
+    reset(); glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity(); glColor4f(0.3f,0.4f,0.5f,1);
+    glBegin(GL_QUADS); glVertex3f(-100,-100,-2); glVertex3f(0,-100,-2); glVertex3f(0,100,-2); glVertex3f(-100,100,-2); glEnd(); glPopMatrix();
+    const auto foreground=pixels(); const auto foregroundDepth=depth(); glDisable(GL_DEPTH_TEST); gpu.DrawMarkers(actors); const auto occluded=pixels();
+    std::size_t blocked=0,leaked=0,visible=0;
+    for (std::size_t i=0;i<foregroundDepth.size();++i) {
+        const bool differs=!std::equal(foreground.begin()+i*4,foreground.begin()+i*4+4,occluded.begin()+i*4);
+        if (foregroundDepth[i]<1) { ++blocked; leaked+=differs; } else visible+=differs;
+    }
+    CheckGpu(blocked>100 && leaked==0 && visible>100 && depth()==foregroundDepth && !glIsEnabled(GL_DEPTH_TEST),
+        "foreground object occludes tested markers, visible remainder writes no depth, caller disabled test restored");
+    reset(); auto transparent=actors; for (auto& mesh:transparent.meshes) for (auto& material:mesh.surfaces) material.color[3]=0;
+    GLuint query{}; glGenQueries(1,&query); glBeginQuery(GL_SAMPLES_PASSED,query); gpu.DrawMarkers(transparent); glEndQuery(GL_SAMPLES_PASSED);
+    GLuint samples{}; glGetQueryObjectuiv(query,GL_QUERY_RESULT,&samples); glDeleteQueries(1,&query);
+    CheckGpu(samples==0 && pixels()==clear && depth()==untouchedDepth,"zero-alpha marker fragments rejected before samples/depth/color publication");
+    std::printf("enex marker-pass PASS depthTest=on depthWrite=off cull=back front=CCW fullbright=1 callerGL=preserved foregroundPixels=%zu leaks=%zu visible=%zu zeroAlphaSamples=%u\n",
+        blocked,leaked,visible,samples);
+    reset();
 }
 }
 void RealtimeScriptHostGpuPrepare(const char* dir) {
@@ -13,7 +149,7 @@ void RealtimeScriptHostGpuPrepare(const char* dir) {
     char error[512]{};
     CheckGpu(s_ProbeHud->Load(dir, error, sizeof(error)), error);
 }
-void RealtimeScriptHostGpuProbe(NativeScriptEntities& entities) {
+void RealtimeScriptHostGpuProbe(NativeScriptEntities& entities, RealtimeScriptHost& host) {
     const auto getDisplay = reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(eglGetProcAddress("eglGetPlatformDisplayEXT"));
     CheckGpu(getDisplay, "surfaceless EGL entry point");
     const auto display = getDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
@@ -40,6 +176,74 @@ void RealtimeScriptHostGpuProbe(NativeScriptEntities& entities) {
     };
     const auto& pickup = entities.Pickups()[0];
     const auto p = pickup.Position;
+    {
+        ProbeMarkerCamera();
+        auto& enex = host.EntryExits(); const auto& entrance = enex.Entries()[46];
+        const auto center = entrance.Center;
+        GpuScene gpu; CheckGpu(gpu.UploadTextures(enex.PreparedModel()), "prepared actual diamond_3/DIAMOND images");
+        Camera camera; camera.x = center.X+3; camera.y = center.Y-5; camera.z = center.Z+3;
+        camera.yaw = std::atan2(5.0f,-3.0f); camera.pitch = std::atan2(-2.0f,std::sqrt(34.0f));
+        NativeEntryExitView view;
+        view.Player = center; view.Camera = {camera.x,camera.y,camera.z}; view.Hour = 8; view.Area = 0; view.CanStartMission = true;
+        view.Forward = {std::cos(camera.yaw)*std::cos(camera.pitch),std::sin(camera.yaw)*std::cos(camera.pitch),std::sin(camera.pitch)};
+        view.SphereVisible = [&](NativeScriptPosition q, float radius) {
+            return camera.SphereVisible(q,radius,width,height,1000);
+        };
+        std::string error; std::uint32_t frame = 0;
+        const auto draw = [&] {
+            CheckGpu(enex.Tick(view,frame++,error),error.c_str());
+            glEnable(GL_DEPTH_TEST); glClearColor(0.1f,0.12f,0.15f,1); glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+            camera.Apply(width,height,1000); gpu.DrawMarkers(enex.Actors()); return readback();
+        };
+        CheckGpu(enex.Activation(view).Status == NativeEntryExitActivationStatus::None,"real 09B4-disabled entry cannot activate");
+        const auto disabled = draw();
+        CheckGpu(enex.VisibleEntries().empty(),"real 09B4-disabled entry has no drawable");
+        NativeScriptEntryExitFlagRequest request{{901,1,1},center.X,center.Y,1,0x4000,1};
+        CheckGpu(host.SetEntryExitFlag(request).Status == NativeScriptServiceStatus::Ready,"real host ENEX enable");
+        const auto revision = enex.Revision();
+        CheckGpu(host.SetEntryExitFlag(request).Status == NativeScriptServiceStatus::Ready && enex.Revision() == revision,"host ENEX replay no second effect");
+        const auto transition = enex.Activation(view);
+        CheckGpu(transition.Status == NativeEntryExitActivationStatus::TransitionRequired && transition.Transition.Entry == 46 &&
+            transition.Transition.Destination == 370 && transition.Transition.Exit == enex.Entries()[370].Exit &&
+            transition.Transition.Area == 8,"enabled same registry emits real typed transition, no completed teleport");
+        const auto visible = draw(); const auto coverage = difference(disabled,visible);
+        CheckGpu(coverage > 100 && enex.VisibleEntries().size() == 1 && enex.VisibleEntries()[0] == 46,"actual ENEX diamond reaches production GpuScene pixels");
+        const auto firstVertices = enex.Actors().meshes[0].pos;
+        CheckGpu(enex.Tick(view,frame-1,error) && enex.Actors().meshes[0].pos == firstVertices,"duplicate frame does not shrink first-use marker a second time");
+        const auto bind = enex.PreparedModel().meshes[0].pos;
+        CheckGpu(std::abs(firstVertices[0]-(center.X+bind[0]*2))<0.0001f && std::abs(firstVertices[1]-(center.Y+bind[1]*2))<0.0001f &&
+            std::abs(firstVertices[2]-(center.Z+1+std::sin(0.25f*0.01745329252f*0.3f)+bind[2]*2))<0.0001f,
+            "actual first source pose: identity frame, size2, authored ENEX Z+1, source new-cone bob");
+        auto flat = enex.Actors(); for (auto& mesh : flat.meshes) std::fill(mesh.triImg.begin(),mesh.triImg.end(),-1);
+        glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT); gpu.DrawMarkers(flat);
+        const auto textureEffect = difference(visible,readback());
+        CheckGpu(textureEffect > 30,"actual DIAMOND texels affect ENEX pixels");
+        frame = 512; const auto bobbed = draw(); const auto poseEffect = difference(visible,bobbed);
+        CheckGpu(poseEffect > 50,"source marker scale/bob geometry affects actual pixels");
+        ProbeMarkerPass(gpu,enex.PreparedModel(),enex.Actors(),camera);
+        const auto acceptedVertices = enex.Actors().meshes[0].pos;
+        CheckGpu(!enex.Tick(view,511,error) && enex.Actors().meshes[0].pos==acceptedVertices,"stale frame cannot publish partial ENEX actors");
+        const auto frustum=view.SphereVisible;
+        view.SphereVisible=[](NativeScriptPosition,float)->bool { throw std::runtime_error("probe camera exception"); };
+        CheckGpu(!enex.Tick(view,frame,error) && enex.Actors().meshes[0].pos==acceptedVertices,"camera failure rolls actor/phase publication back");
+        view.SphereVisible=[](NativeScriptPosition,float) { return false; }; CheckGpu(draw()==disabled,"sphere visibility gates actual marker pixels"); view.SphereVisible=frustum;
+        view.Area=1; CheckGpu(draw()==disabled,"linked entry area gates actual marker pixels"); view.Area=0;
+        view.TransitionState=1; CheckGpu(draw()==disabled && enex.Activation(view).Status==NativeEntryExitActivationStatus::None,"transition state gates both consumers"); view.TransitionState=0;
+        const auto cameraPosition=view.Camera;
+        const auto positionCamera = [&](NativeScriptPosition q) { view.Camera=q; camera.x=q.X; camera.y=q.Y; camera.z=q.Z; };
+        positionCamera({cameraPosition.X,cameraPosition.Y,center.Z+40}); CheckGpu(draw()==disabled,"camera 3D distance cutoff excludes 40 units"); positionCamera(cameraPosition);
+        positionCamera({center.X,center.Y,center.Z+1}); CheckGpu(draw()==disabled,"PlaceMarkerCone near-camera 1.6-unit exclusion"); positionCamera(cameraPosition);
+        for (auto* flag : {&view.Cutscene,&view.Coop,&view.Replay,&view.Disabled}) {
+            *flag=true; CheckGpu(draw()==disabled && enex.Activation(view).Status==NativeEntryExitActivationStatus::None,"source global gate removes both consumers"); *flag=false;
+        }
+        view.ControlsDisabled = true; CheckGpu(draw() == disabled && enex.Activation(view).Status == NativeEntryExitActivationStatus::None,"global controls gate suppresses marker and activation");
+        view.ControlsDisabled = false;
+        request.Id.Instruction++; request.State = 0;
+        CheckGpu(host.SetEntryExitFlag(request).Status == NativeScriptServiceStatus::Ready && draw() == disabled &&
+            enex.Activation(view).Status == NativeEntryExitActivationStatus::None,"09B4 disable removes actual GPU drawable and eligibility");
+        std::printf("enex GPU PASS model=%d tris=%d coverage=%zu textureEffect=%zu poseEffect=%zu activation=TransitionRequired destination=370 completed=0\n",
+            NativeEntryExits::MarkerModel,enex.PreparedModel().stats.triangles,coverage,textureEffect,poseEffect);
+    }
     {
         GpuScene gpu;
         CheckGpu(gpu.UploadTextures(entities.PreparedModel()), "actual prepared pickup textures");

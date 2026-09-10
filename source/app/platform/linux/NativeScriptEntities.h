@@ -67,6 +67,13 @@ bool NativeScriptRadarVisible(const NativeScriptRadarBlip& blip, float distance,
 // Shared startup loader used by the host AND the real HUD.Load. Engine must
 // already be started; restores current dictionary and retains no RW pointers.
 bool NativeScriptEntities_LoadRadar(const char* gameDir, WorldShotImage& image, std::string& error);
+// Exclusive startup static DFF/TXD preloader. Returns owned geometry/texels only.
+struct NativeScriptStaticModelOptions {
+    bool ResetFrame = false, FirstAtomicOnly = false;
+    std::optional<std::array<float, 4>> FirstMaterialColor;
+};
+bool NativeScriptEntities_LoadStaticModel(const char* gameDir, const std::string& model,
+    const std::string& txd, WorldShotScene& scene, std::string& error, const NativeScriptStaticModelOptions& options = {});
 
 class NativeScriptEntities {
 public:

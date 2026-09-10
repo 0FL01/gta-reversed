@@ -34,6 +34,7 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
         app/platform/linux/NativeCollisionAssets.cpp
         app/platform/linux/NativeScriptSession.cpp
         app/platform/linux/NativeScriptEntities.cpp
+        app/platform/linux/NativeEntryExits.cpp
         app/platform/linux/RealtimeScriptHost.cpp
         app/platform/linux/WorldShot.cpp
         app/platform/linux/SceneShot.cpp

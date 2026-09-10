@@ -4,6 +4,7 @@
 
 #include "app/platform/linux/NativeScriptSession.h"
 #include "app/platform/linux/NativeScriptEntities.h"
+#include "app/platform/linux/NativeEntryExits.h"
 #include "app/platform/linux/RealtimeGameplay.h"
 #include "app/platform/linux/StreamPager.h"
 #include <functional>
@@ -30,7 +31,7 @@ struct RealtimeScriptHostEvent {
     NativeScriptRequestId Id;
     std::uint16_t Opcode = 0;
     std::array<float, 4> Arguments{};
-    std::int32_t Index = 0, Reference = -1;
+    std::int32_t Index = 0, Reference = -1, StateArgument = 0;
     RealtimeGameplayState Player{};
     RealtimeGameplayCamera Camera{};
 };
@@ -73,6 +74,8 @@ public:
     const RealtimeScriptGroup* ResolveGroup(NativeScriptGroupRef ref) const;
     NativeScriptEntities& Entities() { return m_Entities; }
     const NativeScriptEntities& Entities() const { return m_Entities; }
+    NativeEntryExits& EntryExits() { return m_EntryExits; }
+    const NativeEntryExits& EntryExits() const { return m_EntryExits; }
 
     NativeScriptServiceResult RequestCollision(const NativeScriptCollisionRequest&) override;
     NativeScriptServiceResult LoadScene(const NativeScriptSceneRequest&) override;
@@ -84,6 +87,7 @@ public:
     NativeScriptReferenceResult<NativeScriptPickupRef> CreateLockedProperty(const NativeScriptLockedPropertyRequest&) override;
     NativeScriptReferenceResult<NativeScriptBlipRef> CreateContactBlip(const NativeScriptContactBlipRequest&) override;
     NativeScriptServiceResult SetBlipDisplay(const NativeScriptBlipDisplayRequest&) override;
+    NativeScriptServiceResult SetEntryExitFlag(const NativeScriptEntryExitFlagRequest&) override;
 
 private:
     NativeScriptServiceResult PublishWorld(const NativeScriptSceneRequest& request, bool requireGround = false);
@@ -95,6 +99,7 @@ private:
     RealtimeGameplay& m_Gameplay;
     NativeScriptSession m_Session;
     NativeScriptEntities m_Entities;
+    NativeEntryExits m_EntryExits;
     std::shared_ptr<const NativeCollisionContext> m_CollisionContext;
     std::shared_ptr<const RealtimeGameplayWorld> m_World;
     RealtimeScriptWorldPublication m_Publication;

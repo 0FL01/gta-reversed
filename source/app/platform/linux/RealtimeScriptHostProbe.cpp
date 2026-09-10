@@ -11,7 +11,8 @@
 #include <rw.h>
 
 void RealtimeScriptHostGpuPrepare(const char* dir);
-void RealtimeScriptHostGpuProbe(NativeScriptEntities& entities);
+void RealtimeScriptHostGpuProbe(NativeScriptEntities& entities, RealtimeScriptHost& host);
+void NativeEntryExitsProbe(RealtimeScriptHost& host);
 
 namespace {
 int s_Failures = 0;
@@ -140,17 +141,34 @@ int main(int argc, char** argv) {
         Check(static_cast<const NativeScriptThreadState&>(host.State()) == mainBefore && host.Events().size() == 7,
             "mission0 prefix does not resume main or fabricate entity services");
         const auto beforeFault = host.State();
+        const auto properties = host.RunPass(9);
+        Check(properties.Status == NativeScriptStatus::BudgetYield && properties.Executed == 9 && properties.IP == 201006 &&
+            host.Session().Threads()[1].Commands == 126 && host.EntryExits().Revision() == 0, "real property group ends before first ENEX write");
+        struct EnexStep { std::uint32_t IP, Next; std::uint16_t Opcode; };
+        const std::array<EnexStep,6> suffix{{{201006,201024,0x09B4},{201024,201034,0x0005},{201034,201044,0x0005},
+            {201044,201054,0x0005},{201054,201072,0x09B4},{201072,201080,0x0004}}};
+        for (std::size_t i=0;i<suffix.size();++i) {
+            const auto step=host.RunPass(1); const auto& thread=host.Session().Threads()[1]; const auto expected=suffix[i];
+            Check(step.Status==NativeScriptStatus::BudgetYield && step.Executed==1 && thread.Commands==127+i &&
+                thread.LastInstructionIP==expected.IP && thread.LastOpcode==expected.Opcode && thread.IP==expected.Next,
+                "actual typed six-instruction suffix commits exact source IP/opcode/count");
+            std::printf("enex actual-step command=%llu ip=%u opcode=%04X next=%u registryRevision=%llu\n",
+                static_cast<unsigned long long>(thread.Commands),thread.LastInstructionIP,thread.LastOpcode,thread.IP,
+                static_cast<unsigned long long>(host.EntryExits().Revision()));
+        }
         const auto fault = host.RunPass(1000);
-        Check(fault.Status == NativeScriptStatus::Unsupported && fault.ThreadIndex == 1 && fault.IP == 201006 &&
-            fault.Opcode == 0x09B4 && fault.Executed == 9 && host.State() == beforeFault &&
-            host.Session().Threads()[1].Commands == 126 && host.Session().Threads()[1].LastOutputWrite.Sequence == 121,
-            "real mission0 creates three source property/radar groups then faults at 09B4 before main resumes");
+        Check(fault.Status == NativeScriptStatus::Unsupported && fault.ThreadIndex == 1 && fault.IP == 201080 &&
+            fault.Opcode == 0x0518 && fault.Executed == 0 && host.State() == beforeFault &&
+            host.Session().Threads()[1].Commands == 132 && host.Session().Threads()[1].LastOutputWrite.Sequence == 125 &&
+            host.Session().Threads()[1].LastOutputWrite.IP == 201072 && host.Session().Threads()[1].LastOutputWrite.Variable == 6624,
+            "real mission0 commits property/radar and both ENEX access writes, strict 0518 barrier before main resumes");
         const auto missionBeforeFault = host.Session().Threads()[1];
         const auto repeated = host.RunPass(1000);
-        Check(repeated.Status == NativeScriptStatus::Unsupported && repeated.Opcode == 0x09B4 && repeated.IP == 201006 &&
+        Check(repeated.Status == NativeScriptStatus::Unsupported && repeated.Opcode == 0x0518 && repeated.IP == 201080 &&
             repeated.Executed == 0 && host.State() == beforeFault && host.Session().Threads()[1] == missionBeforeFault,
             "unsupported mission remains terminal with unchanged main and mission states");
         auto& entities = host.Entities();
+        NativeEntryExitsProbe(host);
         Check(entities.Revision() == 9, "exactly three actual pickup allocations, three blips and three display writes");
         const std::array<std::uint16_t, 3> blipVariables{264, 2108, 220};
         for (std::size_t i = 0; i < 3; ++i) {
@@ -189,7 +207,7 @@ int main(int argc, char** argv) {
         entities.Tick(property.Position, property.Position, true, false);
         publishProperty();
         Check(entities.HelpRevision() == 1, "locked pickup neither pays, collects, removes nor repeats help");
-        RealtimeScriptHostGpuProbe(entities);
+        RealtimeScriptHostGpuProbe(entities, host);
         const auto oldVertices = entities.Actors().meshes[0].pos;
         const auto oldNormals = entities.Actors().meshes[0].nrm;
         const auto oldHelpRevision = entities.HelpRevision();
@@ -293,6 +311,10 @@ int main(int argc, char** argv) {
             "pending service ID cannot change source position between polls");
         Check(host.CreateLockedProperty({deferred.Id, property.AuthoredPosition, property.Text}).Result.Status == NativeScriptServiceStatus::Error &&
             entities.Revision() == entityRevision, "pending world identity cannot allocate a property actor");
+        const auto enexRevision = host.EntryExits().Revision();
+        const auto entrance = host.EntryExits().Entries()[46].Center;
+        Check(host.SetEntryExitFlag({deferred.Id,entrance.X,entrance.Y,1,0x4000,1}).Status == NativeScriptServiceStatus::Error &&
+            host.EntryExits().Revision() == enexRevision, "pending world identity cannot mutate ENEX registry");
         workerReady = true;
         Check(host.LoadScene(deferred).Status == NativeScriptServiceStatus::Ready && host.LoadScene(deferred).Status == NativeScriptServiceStatus::Ready &&
             polls == 3 && host.WorldRevision() == stableRevision + 1, "Ready publishes once and replay skips completed worker request");
@@ -310,7 +332,7 @@ int main(int argc, char** argv) {
         game.Tick(1.0/60, {}, *host.World());
         Check(game.State().Ticks == 1 && !game.State().CarPresent && game.Actors().stats.triangles == 2,
             "persistent entity/pose keeps ticking without startup preview vehicle");
-        std::printf("host-probe failures=%d firstpass=53 mission-prefix=126 terminal=09B4@201006 mission0-complete=0\n", s_Failures);
+        std::printf("host-probe failures=%d firstpass=53 mission-prefix=132 terminal=0518@201080 mission0-complete=0\n", s_Failures);
     }
     StreamPager_Shutdown();
     return s_Failures ? 1 : 0;

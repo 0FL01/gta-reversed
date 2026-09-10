@@ -92,9 +92,13 @@ struct MockServices final : NativeScriptServices {
     NativeScriptHeadingRequest Heading;
     float PedHeading = 0.25f, CameraHeading = -1;
     bool InVehicle = false;
-    std::array<ServiceStatus, 3> EntityMode{ServiceStatus::Unsupported, ServiceStatus::Unsupported, ServiceStatus::Unsupported};
-    std::array<unsigned, 3> EntityCalls{}, EntityCompletions{};
-    std::array<NativeScriptRequestId, 3> EntityIds{};
+    std::array<ServiceStatus, 4> EntityMode{ServiceStatus::Unsupported, ServiceStatus::Unsupported, ServiceStatus::Unsupported, ServiceStatus::Unsupported};
+    std::array<unsigned, 4> EntityCalls{}, EntityCompletions{};
+    std::array<NativeScriptRequestId, 4> EntityIds{};
+    NativeScriptEntryExitFlagRequest EntryExit;
+    NativeScriptServiceResult SetEntryExitFlag(const NativeScriptEntryExitFlagRequest& r) override {
+        EntryExit = r; return EntityRespond(3, r.Id);
+    }
     NativeScriptLockedPropertyRequest Property;
     NativeScriptContactBlipRequest Blip;
     NativeScriptBlipDisplayRequest Display;
@@ -979,6 +983,35 @@ void EntityBarriers() {
     services.EntityMode[0] = ServiceStatus::Ready;
     Check(session.Step(services).Status == Status::Advanced && services.EntityCompletions[0] == 1, "frozen property commits once after readiness");
 }
+void EntryExitBarriers() {
+    Bytes code; Op(code, 0x09B4); F(code, 1.5f); F(code, -2.25f); F(code, 10); I16(code, 16384); I8(code, -2);
+    NativeScriptSession session; MockServices services;
+    LoadFixture(session, services, code); const auto before = session.State();
+    services.EntityMode[3] = ServiceStatus::Pending;
+    Check(session.Step(services).Status == Status::Pending && session.State() == before, "09B4 Pending atomic");
+    const auto request = services.EntryExit;
+    Check(request.X == 1.5f && request.Y == -2.25f && request.Radius == 10 && request.Mask == 16384 && request.State == -2,
+        "09B4 exact FFFII request, preserves noncanonical integer bool");
+    Check(session.Step(services).Status == Status::Pending && services.EntryExit.Id == request.Id && session.State() == before,
+        "09B4 Pending stable identity");
+    services.EntityMode[3] = ServiceStatus::Ready;
+    Check(session.Step(services).Status == Status::Advanced && session.State().IP == FixtureCode + code.size() &&
+        session.State().Condition == before.Condition && session.State().LastOutputWrite == before.LastOutputWrite && services.EntityCompletions[3] == 1,
+        "09B4 Ready advances one typed instruction, no compare/output");
+    for (auto status : {ServiceStatus::Error, ServiceStatus::Unsupported}) {
+        LoadFixture(session, services, code); const auto unchanged = session.State(); services.EntityMode[3] = status;
+        Check(session.Step(services).Status == (status == ServiceStatus::Error ? Status::Error : Status::Unsupported) && session.State() == unchanged,
+            "09B4 failure retains full VM state");
+        const auto calls = services.EntityCalls;
+        Check(session.Step(services).Executed == 0 && services.EntityCalls == calls, "09B4 terminal never polls again");
+    }
+    LoadFixture(session, services, code); const auto unchanged = session.State(); services.Throw = true;
+    Check(session.Step(services).Status == Status::Error && session.State() == unchanged, "09B4 throwing service atomic");
+    for (std::size_t n = 2; n < code.size(); ++n) RejectCode(Bytes(code.begin(), code.begin()+n));
+    auto bad = code; bad[2] = 9; RejectCode(bad); // string in float operand
+    Bytes infinite; Op(infinite, 0x09B4); F(infinite, std::numeric_limits<float>::infinity()); F(infinite, 0); F(infinite, 10); I16(infinite, 16384); I8(infinite, 0);
+    RejectCode(infinite);
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -991,5 +1024,6 @@ int main(int argc, char** argv) {
     ArithmeticArraysAndPolicy();
     NewBarriers();
     EntityBarriers();
+    EntryExitBarriers();
     std::printf("native-script-probe PASS checks=%zu services=TEST-ONLY no-worldboot-claim\n", s_Checks);
 }

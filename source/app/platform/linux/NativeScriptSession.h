@@ -1,6 +1,6 @@
 // Bounded, owned native SCM startup interpreter. No original-address dispatcher.
 // Supported contract: main first WAIT + mission-0 policy/numeric initialization
-// through the locked-property/contact-radar service group; unknowns fault.
+// through locked-property/contact-radar and IPL ENEX flags; unknowns fault.
 // No result means "game booted"; hosts choose an explicit observation boundary.
 #pragma once
 
@@ -84,6 +84,13 @@ struct NativeScriptBlipDisplayRequest {
     NativeScriptBlipRef Blip;
     std::int32_t Display = 0;
 };
+// 09B4: XY, search range, low-16-bit flag mask, integer boolean (nonzero).
+// No Z, output handle or compare update. Host owns nearest lookup + word write.
+struct NativeScriptEntryExitFlagRequest {
+    NativeScriptRequestId Id;
+    float X = 0, Y = 0, Radius = 0;
+    std::int32_t Mask = 0, State = 0;
+};
 
 class NativeScriptServices {
 public:
@@ -106,6 +113,7 @@ public:
     virtual NativeScriptReferenceResult<NativeScriptPickupRef> CreateLockedProperty(const NativeScriptLockedPropertyRequest&) { return {}; }
     virtual NativeScriptReferenceResult<NativeScriptBlipRef> CreateContactBlip(const NativeScriptContactBlipRequest&) { return {}; }
     virtual NativeScriptServiceResult SetBlipDisplay(const NativeScriptBlipDisplayRequest&) { return {}; }
+    virtual NativeScriptServiceResult SetEntryExitFlag(const NativeScriptEntryExitFlagRequest&) { return {}; }
 };
 
 enum class NativeScriptStatus { Advanced, BudgetYield, Waiting, Pending, Unsupported, Error };

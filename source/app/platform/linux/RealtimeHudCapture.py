@@ -21,7 +21,9 @@ mode = parser.add_mutually_exclusive_group(required=True)
 mode.add_argument('--build', action='store_true')
 mode.add_argument('--run', action='store_true')
 parser.add_argument('--seconds', type=int, choices=(16, 28), default=16)
-parser.add_argument('--player-cj', action='store_true')
+scene = parser.add_mutually_exclusive_group()
+scene.add_argument('--player-cj', action='store_true')
+scene.add_argument('--water', action='store_true', help='static shoreline free-camera, actual unpaused water clock')
 args = parser.parse_args()
 source = pathlib.Path(__file__).resolve().parent
 workspace = source.parents[4]
@@ -70,7 +72,8 @@ else:
     # Exactly the native launcher configuration, including continuous logging.
     env['MANGOHUD_CONFIG'] = ('fps,frametime,gpu_name,gpu_stats,cpu_stats,autostart_log=1,'
         f'log_duration=0,log_interval=100,output_folder={output}')
-    command = ['mangohud', str(binary), '--play', '--game-dir', str(game), '--demo', '--seconds', str(args.seconds)]
+    command = ['mangohud', str(binary), '--play', '--game-dir', str(game), '--seconds', str(args.seconds)]
+    command += ['--freecam', '--cam', '820,-1880,6', '--freeze-time'] if args.water else ['--demo']
     if args.player_cj:
         command.append('--player-cj')
     path = output / 'RealtimeHudCapture.log'
@@ -105,5 +108,16 @@ else:
         assert 'play-player model=player outfit=startup-fat200-muscle50-preview' in text
     states = re.findall(r'play-state .*', text)
     replay = bool(states and all(re.search(rf'\b{name}=[1-9]\d*\b', states[-1]) for name in ('jumps', 'landings', 'entries', 'exits')))
-    assert replay, 'Integrated demo must finish jump/land/entry/drive/brake/exit'
+    if args.water:
+        assert 'player=hidden-freecam' in text
+        clocks = [int(value) for value in re.findall(r'water-capture clockMs=(\d+)', text)]
+        assert len(clocks) >= 3 and clocks[0] == 0 and clocks[-1] >= 12000
+        assert all(b > a for a, b in zip(clocks, clocks[1:]))
+        first = (workspace / captures[0]).read_bytes().split(b'\n', 3)[3]
+        last = (workspace / captures[-1]).read_bytes().split(b'\n', 3)[3]
+        changed = sum(first[i:i+3] != last[i:i+3] for i in range(0, len(first), 3))
+        assert changed > 1000, 'Static-camera/frozen-hour water must visibly animate'
+        print(f'integrated-water PASS clock={clocks[0]}..{clocks[-1]} changedPixels={changed}')
+    else:
+        assert replay, 'Integrated demo must finish jump/land/entry/drive/brake/exit'
     print(f'integrated-capture PASS captures={len(captures)} runtimeExit=0 replayComplete={int(replay)} overlayInReadback=0')

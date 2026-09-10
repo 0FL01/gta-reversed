@@ -40,6 +40,7 @@ bool RealtimeScriptHost::InitializeBeforeWorker(const char* gameDir, std::string
     if (!m_Session.LoadMain(absoluteGameDir.c_str(), error)) return false;
     if (!m_Gameplay.Initialize(gameDir, error, RealtimeGameplayModel::BasePlayer)) return false;
     if (!m_Entities.LoadBeforeWorker(gameDir, error)) return false;
+    if (!m_EntryExits.LoadBeforeWorker(gameDir, error)) return false;
     m_Initialized = true;
     error.clear(); return true;
 }
@@ -48,7 +49,7 @@ void RealtimeScriptHost::SetLiveWorldLoader(WorldLoader loader, CancelLoad cance
     assert(!loader || cancel); // every asynchronous owner has cancellation
     m_Loader = std::move(loader); m_Cancel = std::move(cancel);
 }
-void RealtimeScriptHost::SealStartup() { m_Sealed = true; }
+void RealtimeScriptHost::SealStartup() { m_Sealed = true; m_EntryExits.SealStartup(); }
 NativeScriptResult RealtimeScriptHost::RunPass(std::size_t quota) {
     if (!m_Initialized) return {NativeScriptStatus::Error, 0, 0, 0, "script host not initialized"};
     return m_Session.RunPass(*this, quota);
@@ -67,7 +68,7 @@ std::optional<NativeScriptServiceResult> RealtimeScriptHost::Replay(const Realti
     if (m_Entities.OwnsRequest(event.Id)) return Error("service request ID already owned by property/radar service");
     for (const auto& old : m_Events) {
         if (old.Id != event.Id) continue;
-        if (old.Opcode != event.Opcode || old.Arguments != event.Arguments || old.Index != event.Index)
+        if (old.Opcode != event.Opcode || old.Arguments != event.Arguments || old.Index != event.Index || old.StateArgument != event.StateArgument)
             return Error("service request ID reused with different command/arguments");
         return Ready();
     }
@@ -204,4 +205,15 @@ NativeScriptServiceResult RealtimeScriptHost::SetBlipDisplay(const NativeScriptB
     if (m_PendingLoad) return Error("entity service cannot cross pending world request");
     for (const auto& event : m_Events) if (event.Id == request.Id) return Error("entity request ID already owned by player/world service");
     return m_Entities.SetBlipDisplay(request);
+}
+NativeScriptServiceResult RealtimeScriptHost::SetEntryExitFlag(const NativeScriptEntryExitFlagRequest& request) {
+    if (!m_Initialized) return Error("ENEX service requires initialized host");
+    if (m_PendingLoad) return Error("ENEX service cannot cross pending world request");
+    if (!Finite({request.X, request.Y, request.Radius})) return Error("nonfinite ENEX request");
+    RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=0x09B4,
+        .Arguments={request.X, request.Y, request.Radius}, .Index=request.Mask, .StateArgument=request.State};
+    if (auto result = Replay(event)) return *result;
+    const auto result = m_EntryExits.SetFlag(request);
+    if (result.Status == NativeScriptServiceStatus::Ready) Commit(event);
+    return result;
 }

@@ -90,6 +90,7 @@ constexpr Signature Signatures[] = {
     {0x0517, {O::Float, O::Float, O::Float, O::String, O::Output}, 5},
     {0x0570, {O::Float, O::Float, O::Float, O::Integer, O::Output}, 5},
     {0x018B, {O::Integer, O::Integer}, 2},
+    {0x09B4, {O::Float, O::Float, O::Float, O::Integer, O::Integer}, 5},
 };
 
 const Signature* FindSignature(uint16 opcode) {
@@ -473,12 +474,13 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
     }
 
     int32 reference = -1;
-    if (d.Opcode == 0x04E4 || d.Opcode == 0x03CB || d.Opcode == 0x0053 || d.Opcode == 0x07AF || d.Opcode == 0x01F5 || d.Opcode == 0x0373 || d.Opcode == 0x0173 || d.Opcode == 0x0517 || d.Opcode == 0x0570 || d.Opcode == 0x018B) {
+    if (d.Opcode == 0x04E4 || d.Opcode == 0x03CB || d.Opcode == 0x0053 || d.Opcode == 0x07AF || d.Opcode == 0x01F5 || d.Opcode == 0x0373 || d.Opcode == 0x0173 || d.Opcode == 0x0517 || d.Opcode == 0x0570 || d.Opcode == 0x018B || d.Opcode == 0x09B4) {
         const NativeScriptRequestId id{m_SessionId, m_CommandSequence + 1, state.IP};
         NativeScriptServiceResult result;
         // All operands/output bounds have been checked before ANY host call.
         struct Guard { bool& Flag; Guard(bool& flag): Flag(flag) { Flag = true; } ~Guard() { Flag = false; } } guard{m_InService};
         try {
+            if (d.Opcode == 0x09B4) result = services.SetEntryExitFlag({id, d.Float(0), d.Float(1), d.Float(2), d.Int(3), d.Int(4)});
             if (d.Opcode == 0x0517) {
                 auto created = services.CreateLockedProperty({id, {d.Float(0), d.Float(1), d.Float(2)}, d.Text});
                 result = std::move(created.Result); reference = created.Reference.Value;

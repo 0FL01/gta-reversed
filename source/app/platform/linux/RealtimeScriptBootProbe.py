@@ -29,6 +29,6 @@ if __name__ == '__main__':
         assert result.returncode == 1, f'Expected runtime terminal exit 1, got {result.returncode}'
         assert 'boot-capture PASS frame=1 black=1 clock=08:00 paired=1 actor=1 startup=1' in result.stdout
         assert 'boot-runtime PASS exit=1 swaps=1 fullboot=0' in result.stdout
-        assert len(re.findall(r'play-script-terminal status=Unsupported thread=1 generation=1 ip=201006 opcode=09B4 executed=126 ', result.stdout)) == 1
+        assert len(re.findall(r'play-script-terminal status=Unsupported thread=1 generation=1 ip=201080 opcode=0518 executed=132 ', result.stdout)) == 1
         assert 'play-ok' not in result.stdout and 'play-fail' not in result.stdout and 'FAIL' not in result.stdout
-        print('boot-probe PASS actual-startup-frame=1 mission-prefix=126 terminal=09B4@201006 runtime-exit=1 fullboot=0')
+        print('boot-probe PASS actual-startup-frame=1 mission-prefix=132 terminal=0518@201080 runtime-exit=1 fullboot=0')

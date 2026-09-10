@@ -9,6 +9,9 @@
 #include "app/platform/linux/NativePlayerAssets.h"
 #include "app/platform/linux/RealtimeScriptHost.h"
 
+#ifndef GL_GLEXT_PROTOTYPES
+#define GL_GLEXT_PROTOTYPES
+#endif
 #include <SDL3/SDL.h>
 #include <EGL/egl.h>
 #include <GL/gl.h>
@@ -255,6 +258,32 @@ struct GpuScene {
         glPopAttrib();
     }
 
+    // C3dMarker::Render cone pass: bright material, tested depth, no depth writes.
+    void DrawMarkers(const WorldShotScene& scene) const {
+        GLint program = 0;
+        glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+        const bool colorSum = glIsEnabled(GL_COLOR_SUM);
+        glPushAttrib(GL_ALL_ATTRIB_BITS);
+        glUseProgram(0);
+        glActiveTexture(GL_TEXTURE0);
+        glDisable(GL_LIGHTING);
+        glDisable(GL_COLOR_SUM);
+        glEnable(GL_DEPTH_TEST);
+        glDepthMask(GL_FALSE);
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_BACK);
+        glFrontFace(GL_CCW);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glEnable(GL_ALPHA_TEST);
+        glAlphaFunc(GL_GREATER, 0.0f);
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+        Draw(scene);
+        glPopAttrib();
+        if (colorSum) glEnable(GL_COLOR_SUM); else glDisable(GL_COLOR_SUM);
+        glUseProgram(program);
+    }
+
     // Dynamic actors retain textures; only posed vertices change each tick.
     void Draw(const WorldShotScene& scene, size_t firstMesh = 0, int firstTriangle = 0,
               int remaining = std::numeric_limits<int>::max()) const {
@@ -450,6 +479,17 @@ struct LiveWorld {
 struct Camera {
     float x = 1600.0f, y = -1700.0f, z = 70.0f;
     float yaw = -1.43f, pitch = -0.20f;
+
+    bool SphereVisible(NativeScriptPosition position, float radius, int width, int height, float farPlane) const {
+        const float dx = position.X-x, dy = position.Y-y, dz = position.Z-z;
+        const float cy = std::cos(yaw), sy = std::sin(yaw), cp = std::cos(pitch), sp = std::sin(pitch);
+        const float depth = (dx*cy+dy*sy)*cp+dz*sp;
+        const float side = dx*sy-dy*cy, up = -(dx*cy+dy*sy)*sp+dz*cp;
+        const float vertical = std::tan(3.14159265f/6.0f), horizontal = vertical*width/height;
+        return depth+radius >= 0.1f && depth-radius <= farPlane &&
+            std::abs(up) <= depth*vertical+radius*std::sqrt(1+vertical*vertical) &&
+            std::abs(side) <= depth*horizontal+radius*std::sqrt(1+horizontal*horizontal);
+    }
 
     void Update(float dt, const bool* keys, bool demo) {
         yaw += (keys[SDL_SCANCODE_LEFT] - keys[SDL_SCANCODE_RIGHT]) * dt;
@@ -695,8 +735,9 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             result.Executed, scriptHost.State().IP, static_cast<unsigned long long>(scriptHost.WorldRevision()),
             unsigned(clock.Hours), unsigned(clock.Minutes), scriptHost.State().Fade.Alpha);
     }
-    GpuScene actorGpu, scriptGpu;
-    if (newGame && !scriptGpu.UploadTextures(scriptHost.Entities().PreparedModel())) {
+    GpuScene actorGpu, scriptGpu, entryGpu;
+    if (newGame && (!scriptGpu.UploadTextures(scriptHost.Entities().PreparedModel()) ||
+        !entryGpu.UploadTextures(scriptHost.EntryExits().PreparedModel()))) {
         std::printf("play-fail script entity textures\n");
         return 1;
     }
@@ -812,10 +853,10 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             SDL_Delay(50);
             continue;
         }
+        if (frames && !paused) {
+            gameNs += deltaNs;
+        }
         if (newGame && frames) {
-            if (!paused) {
-                gameNs += deltaNs;
-            }
             if (gameNs / 1'000'000 > std::numeric_limits<std::uint32_t>::max() ||
                 !scriptHost.AdvanceTime(static_cast<std::uint32_t>(gameNs / 1'000'000), gameplayError)) {
                 std::printf("play-fail script clock: %s\n", gameplayError.c_str());
@@ -919,6 +960,39 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             hour = std::fmod(hour + dt / 60.0f, 24.0f);
             environment.SetHour(hour);
         }
+        auto waterState = environment.GetWaterState();
+        waterState.gameMs = static_cast<std::uint32_t>(gameNs / 1'000'000);
+        if (!environment.SetWaterState(waterState)) {
+            std::printf("play-fail water clock\n");
+            return 1;
+        }
+        if (newGame) {
+            const auto& state = gameplay.State();
+            NativeEntryExitView view;
+            view.Player = {state.PedRoot.X, state.PedRoot.Y, state.PedRoot.Z};
+            view.Camera = {camera.x, camera.y, camera.z};
+            view.Forward = {std::cos(camera.yaw)*std::cos(camera.pitch),
+                std::sin(camera.yaw)*std::cos(camera.pitch), std::sin(camera.pitch)};
+            view.Hour = static_cast<std::uint8_t>(hour);
+            view.Vehicle = state.InVehicle ? NativeEntryExitVehicle::Automobile : NativeEntryExitVehicle::OnFoot;
+            // Current native startup has no interior/mission-start task consumer.
+            // Never advertise those transitions as successfully executed.
+            view.CanStartMission = state.Ready;
+            view.SphereVisible = [&](NativeScriptPosition point, float radius) {
+                return camera.SphereVisible(point, radius, width, height, std::max(1600.0f, environment.GetParams().farClip));
+            };
+            auto& entries = scriptHost.EntryExits();
+            if (!entries.Tick(view, waterState.gameMs, gameplayError)) {
+                std::printf("play-fail entry markers: %s\n", gameplayError.c_str());
+                return 1;
+            }
+            const auto activation = entries.Activation(view);
+            if (activation.Status == NativeEntryExitActivationStatus::TransitionRequired) {
+                std::printf("play-entry-terminal status=Unsupported entry=%zu destination=%zu area=%u transition-completed=0\n",
+                    activation.Transition.Entry, activation.Transition.Destination, unsigned(activation.Transition.Area));
+                return 1;
+            }
+        }
         environment.DrawSky(camera.x, camera.y, camera.z);
         environment.BeginWorld();
         world.active->gpu.Render();
@@ -931,7 +1005,7 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             }
             environment.EndWorld();
         }
-        environment.DrawWater();
+        environment.DrawWater(camera.x, camera.y, false);
         if (gameplayEnabled) {
             environment.BeginObjects();
             actorGpu.DrawActors(gameplay.Actors(), GpuScene::ActorPass::Alpha);
@@ -939,6 +1013,9 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
                 scriptGpu.DrawActors(scriptHost.Entities().Actors(), GpuScene::ActorPass::Alpha);
             }
             environment.EndWorld();
+        }
+        if (newGame) {
+            entryGpu.DrawMarkers(scriptHost.EntryExits().Actors());
         }
         RealtimeHudView hudView;
         hudView.cameraYaw = camera.yaw;

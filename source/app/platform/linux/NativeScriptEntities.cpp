@@ -88,6 +88,7 @@ struct Dictionary {
     }
     ~Dictionary() { Value->destroy(); }
 };
+WorldShotScene ReadStaticModel(const std::string& model, const std::string& txd, const NativeScriptStaticModelOptions& options = {});
 WorldShotScene ReadModel(NativeScriptPropertyGeometry& property) {
     auto ide = ReadFile("data/maps/generic/dynamic.ide");
     ide.push_back(0);
@@ -128,6 +129,9 @@ WorldShotScene ReadModel(NativeScriptPropertyGeometry& property) {
         offset += size;
     }
     Require(found, "missing property COL bounds");
+    return ReadStaticModel(model, txd);
+}
+WorldShotScene ReadStaticModel(const std::string& model, const std::string& txd, const NativeScriptStaticModelOptions& options) {
     auto textureBytes = ReadEntry(txd + ".txd");
     Dictionary dictionary(textureBytes);
     auto modelBytes = ReadEntry(model + ".dff");
@@ -146,9 +150,13 @@ WorldShotScene ReadModel(NativeScriptPropertyGeometry& property) {
         const auto count = geometry->numVertices;
         std::vector<rw::V3d> positions(count), normals(count);
         auto* frame = atomic->getFrame(); Require(frame, "property atomic frame");
-        rw::V3d::transformPoints(positions.data(), geometry->morphTargets[0].vertices, count, frame->getLTM());
+        if (options.ResetFrame) std::copy_n(geometry->morphTargets[0].vertices, count, positions.begin());
+        else rw::V3d::transformPoints(positions.data(), geometry->morphTargets[0].vertices, count, frame->getLTM());
         auto* sourceNormals = geometry->morphTargets[0].normals;
-        if (sourceNormals) rw::V3d::transformVectors(normals.data(), sourceNormals, count, frame->getLTM());
+        if (sourceNormals) {
+            if (options.ResetFrame) std::copy_n(sourceNormals, count, normals.begin());
+            else rw::V3d::transformVectors(normals.data(), sourceNormals, count, frame->getLTM());
+        }
         WorldShotMesh mesh{}; mesh.tris = geometry->numTriangles;
         std::fill(std::begin(mesh.color), std::end(mesh.color), 1.0f);
         for (int t = 0; t < mesh.tris; ++t) {
@@ -171,6 +179,10 @@ WorldShotScene ReadModel(NativeScriptPropertyGeometry& property) {
             mesh.triCol.insert(mesh.triCol.end(), {mat->color.red / 255.0f, mat->color.green / 255.0f, mat->color.blue / 255.0f});
             WorldShotSurface surface;
             surface.color = {mat->color.red / 255.0f, mat->color.green / 255.0f, mat->color.blue / 255.0f, mat->color.alpha / 255.0f};
+            if (options.FirstMaterialColor && tri.matId == 0) {
+                surface.color = *options.FirstMaterialColor;
+                std::copy_n(surface.color.begin(), 3, mesh.triCol.end()-3);
+            }
             surface.ambient = mat->surfaceProps.ambient; surface.diffuse = mat->surfaceProps.diffuse;
             mesh.surfaces.push_back(surface);
             const auto a = positions[tri.v[0]], b = positions[tri.v[1]], c = positions[tri.v[2]];
@@ -189,6 +201,7 @@ WorldShotScene ReadModel(NativeScriptPropertyGeometry& property) {
         }
         scene.stats.triangles += mesh.tris; scene.stats.vertices += count; ++scene.stats.atomics;
         scene.meshes.push_back(std::move(mesh));
+        if (options.FirstAtomicOnly) break;
     }
     Require(scene.stats.triangles && !scene.images.empty(), "empty/untextured locked property model");
     std::snprintf(scene.stats.dffName, sizeof(scene.stats.dffName), "%s.dff", model.c_str());
@@ -213,6 +226,14 @@ void Bounds(WorldShotScene& scene) {
 }
 }
 
+bool NativeScriptEntities_LoadStaticModel(const char* gameDir, const std::string& model,
+    const std::string& txd, WorldShotScene& scene, std::string& error, const NativeScriptStaticModelOptions& options) {
+    try {
+        RwScope scope; OS_SetFilePathOffset(gameDir);
+        auto prepared = ReadStaticModel(model, txd, options); Bounds(prepared);
+        scene = std::move(prepared); error.clear(); return true;
+    } catch (const std::exception& e) { error = e.what(); return false; }
+}
 bool NativeScriptEntities_LoadRadar(const char* gameDir, WorldShotImage& image, std::string& error) {
     try {
         RwScope scope; OS_SetFilePathOffset(gameDir);
