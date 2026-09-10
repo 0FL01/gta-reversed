@@ -1,5 +1,5 @@
 // Persistent native gameplay slice. No GL, SDL, Wine, or per-tick asset IO.
-// andre is a real skinned ped stand-in, not modular CJ. This is not game parity.
+// Andre, base MODEL_PLAYER, or an explicit modular CJ outfit. Not game parity.
 #pragma once
 
 #include <cstddef>
@@ -9,6 +9,10 @@
 #include <string>
 
 #include "app/platform/linux/WorldShot.h"
+
+struct NativePlayerClothes;
+struct IfpAnimStats;
+enum class RealtimeGameplayModel { Andre, BasePlayer };
 
 struct RealtimeVec3 {
     float X = 0.0f, Y = 0.0f, Z = 0.0f;
@@ -62,6 +66,8 @@ struct RealtimeGameplayCamera {
     RealtimeVec3 Target;
     float Yaw = 0.0f; // atan2(view.y, view.x), suitable for existing GL view
     float Pitch = 0.0f; // asin(view.z)
+    bool ScriptDirectlyBehind = false;
+    float ScriptPedOrientation = 0.0f; // call-time atan2(forward.y, forward.x), [0,2pi)
 };
 
 struct RealtimeGameplayState {
@@ -76,7 +82,7 @@ struct RealtimeGameplayState {
     float VerticalSpeed = 0.0f;
     bool Grounded = false;
     bool InVehicle = false;
-    bool Ready = false; // initialized AND successfully spawned on real ground
+    bool Ready = false; // initialized AND world-validated; authored script spawn may be airborne
     std::uint64_t Ticks = 0, Jumps = 0, Landings = 0, Entries = 0, Exits = 0;
     std::uint64_t BlockedSteps = 0;
     double SimulatedSeconds = 0.0, DroppedSeconds = 0.0;
@@ -84,6 +90,11 @@ struct RealtimeGameplayState {
     const char* Animation = "IDLE_stance";
     float LocomotionPhase = 0.0f; // distance-driven, never reset on speed/contact changes
     float LocomotionBlend = 0.0f, RunBlend = 0.0f, AirBlend = 0.0f;
+    // Script entity origin is separate from collision feet. Source ped1's
+    // bbox minimum is -1 (TempColModels.cpp), not the render mesh minimum.
+    RealtimeVec3 PedRoot;
+    float PedCurrentRotation = 0, PedAimingRotation = 0; // source +Y heading
+    bool CarPresent = true, MissionCreated = false, PlayerOnFootTask = false;
 };
 
 class RealtimeGameplay {
@@ -95,7 +106,16 @@ public:
 
     // Call after StreamPager_Init (same thread). Temporarily uses IfpAnim and
     // CarPose, restores the pager's current TXD; never stops the shared engine.
+    // Optional explicit descriptor is parsed once here, before worker startup.
     bool Initialize(const char* gameDir, std::string& error);
+    bool Initialize(const char* gameDir, std::string& error, const NativePlayerClothes* player);
+    bool Initialize(const char* gameDir, std::string& error, RealtimeGameplayModel model);
+    const IfpAnimStats& PlayerModelStats() const;
+    // 0053 preserves authored Z; no ground snapping and no preview vehicle.
+    // Source entity root = authored base + 1 (ped1 COL bounding box).
+    bool SpawnScriptPlayer(const RealtimeGameplayWorld& world, RealtimeVec3 authoredBase, std::string& error);
+    bool SetScriptHeading(float radians, std::string& error);
+    bool SetScriptCameraBehind(const RealtimeGameplayWorld& world, std::string& error);
     // rayTop is the ceiling for nearest ground, not a requested flat height.
     // Fails explicitly when ground/body clearance/nearby car placement is absent.
     bool Spawn(const RealtimeGameplayWorld& world, float x, float y, float rayTop,
@@ -109,6 +129,7 @@ public:
     const WorldShotScene& Actors() const;
 
 private:
+    bool InitializeModel(const char* gameDir, std::string& error, const NativePlayerClothes* player, RealtimeGameplayModel model);
     struct Impl;
     std::unique_ptr<Impl> m_Impl;
 };

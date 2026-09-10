@@ -69,6 +69,8 @@ void PrintUsage(const char* prog) {
     (void)std::printf("interactive: %s --play [--game-dir PATH] [--seconds N] [--demo] [--freecam]\n"
                       "  [--cam x,y,z] [--hour H] [--weather W] [--freeze-time]\n"
                       "  --demo-curb: real street curb walk/sprint up/down regression replay.\n"
+                      "  --player-cj: actual modular CJ with startup outfit (not SCM boot).\n"
+                      "  --new-game: bounded real SCM startup; unsupported mission services exit 1.\n"
                       "  WASD move/drive, arrows orbit, Shift sprint, Space jump/handbrake, Ctrl brake,\n"
                       "  F enter/exit, Tab free camera (Q/E descend/ascend), Esc quit.\n",
                       prog ? prog : "mad-sa-linux");
@@ -7857,6 +7859,10 @@ int RunCollProbe(int argc, char** argv) {
 } // namespace
 
 int main(int argc, char** argv) {
+    if (HasArg(argc, argv, "--new-game") && !HasArg(argc, argv, "--play")) {
+        std::printf("play-fail --new-game requires --play\n");
+        return 1;
+    }
     if (HasArg(argc, argv, "--play")) {
         return Realtime_Run(argc, argv, ResolveGameDir(argc, argv).c_str());
     }

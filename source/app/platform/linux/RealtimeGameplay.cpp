@@ -294,6 +294,8 @@ struct RealtimeGameplay::Impl {
     float IdlePhase=0,AirPhase=0,MoveBlend=0,RunBlend=0,AirBlend=0;
     size_t PedMeshes=0;
     bool Initialized=false;
+    bool BasePlayer=false;
+    IfpAnimStats PlayerStats{};
     RealtimeGameplayState State;
     RealtimeGameplayCamera Camera;
 
@@ -301,7 +303,7 @@ struct RealtimeGameplay::Impl {
         for (float z:PedCenters) {
             if (world.SphereBlocked(Add(feet,{0,0,z}),PedRadius)) return true;
         }
-        if (car) {
+        if (car && State.CarPresent) {
             const V d=Sub(feet,State.Car);
             if (feet.Z+1.75f>State.Car.Z-static_cast<float>(Measure.clearance) && feet.Z<State.Car.Z+CarHeight &&
                 std::abs(Dot(d,Right(State.CarHeading)))<CarHalfWidth+PedRadius &&
@@ -348,6 +350,7 @@ struct RealtimeGameplay::Impl {
                                 Mul(Forward(State.CarHeading),static_cast<float>(Measure.frontY)*0.3f)));
     }
     void Interact(const RealtimeGameplayWorld& world) {
+        if (!State.CarPresent) return;
         if (std::abs(State.Speed)>0.8f) return;
         if (!State.InVehicle) {
             const V door=Door();
@@ -528,6 +531,8 @@ struct RealtimeGameplay::Impl {
         if (State.InVehicle) { State.Ped=State.Car; State.Grounded=CarVertical==0; }
     }
     void Pose(float dt) {
+        State.PedRoot=Add(State.Ped,{0,0,1.0f});
+        State.PedCurrentRotation=State.PedHeading-Pi*0.5f;
         const float moveTarget=std::clamp(PedSpeed/2.0f,0.0f,1.0f);
         MoveBlend+=(moveTarget-MoveBlend)*(-std::expm1(-12.0f*dt));
         if (moveTarget==0 && MoveBlend<0.001f) MoveBlend=0;
@@ -573,6 +578,8 @@ struct RealtimeGameplay::Impl {
         const size_t kits=(CarBind.meshes.size()-static_cast<size_t>(CarStats.geoms))/4;
         for (size_t i=0;i<CarBind.meshes.size();++i) {
             auto& out=Actors.meshes[PedMeshes+i]; const auto& bind=CarBind.meshes[i];
+            out.tris=State.CarPresent ? bind.tris:0;
+            out.pos.resize(State.CarPresent ? bind.pos.size():0); out.nrm.resize(out.pos.size());
             for (size_t v=0;v<out.pos.size();v+=3) {
                 V p=Load(bind.pos,v),n=Load(bind.nrm,v);
                 if (i>=static_cast<size_t>(CarStats.geoms)) {
@@ -620,7 +627,17 @@ struct RealtimeGameplay::Impl {
 RealtimeGameplay::RealtimeGameplay():m_Impl(std::make_unique<Impl>()) {}
 RealtimeGameplay::~RealtimeGameplay()=default;
 bool RealtimeGameplay::Initialize(const char* gameDir,std::string& error) {
+    return Initialize(gameDir,error,nullptr);
+}
+bool RealtimeGameplay::Initialize(const char* gameDir,std::string& error,const NativePlayerClothes* player) {
+    return InitializeModel(gameDir,error,player,RealtimeGameplayModel::Andre);
+}
+bool RealtimeGameplay::Initialize(const char* gameDir,std::string& error,RealtimeGameplayModel model) {
+    return InitializeModel(gameDir,error,nullptr,model);
+}
+bool RealtimeGameplay::InitializeModel(const char* gameDir,std::string& error,const NativePlayerClothes* player,RealtimeGameplayModel model) {
     auto next=std::make_unique<Impl>();
+    next->BasePlayer=model==RealtimeGameplayModel::BasePlayer;
     char err[512]={};
     // The parse helpers keep their own TXDs but borrow the global engine. Their
     // shutdown functions destroy only their dictionaries; restore current before
@@ -647,16 +664,46 @@ bool RealtimeGameplay::Initialize(const char* gameDir,std::string& error) {
     next->Transmission.Initialize({static_cast<float>(handling.vmaxFileKmh),static_cast<float>(handling.accelFile),
         static_cast<float>(handling.inertia),static_cast<float>(handling.drag),static_cast<uint8_t>(handling.gears),
         handling.driveType,handlingFlags});
+    NativePlayerAssets playerAssets;
+    IfpAnimPlayerBank playerBank;
+    if (player) {
+        if (!NativePlayerAssets_Load(*player,playerAssets,error)) return false;
+        if (!playerBank.Load(gameDir,"ped",err,sizeof(err))) { error=err; return false; }
+    }
     for (auto& clip:next->Clips) {
         std::vector<IfpAnimSeqFrame> seq;
-        if (!IfpAnim_Seq(gameDir,"andre",clip.Name,33,seq,err,sizeof(err))) { error=err; return false; }
+        if (player) {
+            seq.resize(33);
+            for (int i=0;i<33;++i) {
+                auto& frame=seq[i];
+                if (!IfpAnim_InitPlayer(playerAssets,playerBank,clip.Name,IfpAnim_SeqTimeFrac(i,33),
+                    frame.scene,frame.stats,err,sizeof(err),next->Actors.images.empty() && i==0)) {
+                    error=err; return false;
+                }
+                const int tracks=std::string(clip.Name)=="JUMP_glide" ? 26:32;
+                if (frame.stats.bones!=32 || frame.stats.mapped!=tracks) { error="CJ clip has unexpected bone coverage"; return false; }
+            }
+        } else if (!IfpAnim_Seq(gameDir,next->BasePlayer ? "player":"andre",clip.Name,33,seq,err,sizeof(err))) { error=err; return false; }
+        if (next->BasePlayer) {
+            for (const auto& frame:seq) {
+                const auto& s=frame.stats;
+                const int tracks=std::string(clip.Name)=="JUMP_glide" ? 26:32;
+                if (std::string(s.model)!="player" || std::string(s.src)!="gta3.img:player.dff" || s.tried ||
+                    s.bones!=32 || s.mapped!=tracks || s.verts!=6 || s.tris!=2 || std::abs(s.wsum-1.0)>0.001) {
+                    error="MODEL_PLAYER must be direct gta3.img:player.dff (6 vertices, 2 triangles, 32 bones), no fallback"; return false;
+                }
+            }
+        }
+        if (&clip==&next->Clips[0]) next->PlayerStats=seq.front().stats;
         clip.Duration=static_cast<float>(seq.front().stats.animTotal);
         const auto& first=seq.front().stats; const auto& last=seq.back().stats;
         clip.Stride=std::hypot(last.rootWorld[0]-first.rootWorld[0],last.rootWorld[1]-first.rootWorld[1]);
         if (!(clip.Duration>0)) { error="empty real IFP animation"; return false; }
         if (clip.Stride<0.01f) clip.Stride=1.0f; // idle/glide have no locomotion; never used as speed
         for (auto& frame:seq) {
-            const V offset{frame.stats.rootWorld[0],frame.stats.rootWorld[1],first.animMin[2]};
+            // Base MODEL_PLAYER retains source model-space Z at the entity
+            // origin; the six-vertex placeholder is not a feet-height measure.
+            const V offset{frame.stats.rootWorld[0],frame.stats.rootWorld[1],next->BasePlayer ? -1.0f:first.animMin[2]};
             for (auto& mesh:frame.scene.meshes) {
                 for (size_t v=0;v<mesh.pos.size();v+=3) Store(mesh.pos,v,Sub(Load(mesh.pos,v),offset));
             }
@@ -730,6 +777,49 @@ bool RealtimeGameplay::Spawn(const RealtimeGameplayWorld& world,float x,float y,
     p.IdlePhase=p.AirPhase=p.MoveBlend=p.RunBlend=p.AirBlend=0;
     p.Pose(0); p.UpdateCamera(0,world); error.clear(); return true;
 }
+const IfpAnimStats& RealtimeGameplay::PlayerModelStats() const { return m_Impl->PlayerStats; }
+bool RealtimeGameplay::SpawnScriptPlayer(const RealtimeGameplayWorld& world,V authoredBase,std::string& error) {
+    auto& p=*m_Impl;
+    if (!p.Initialized || !p.BasePlayer) { error="0053 requires preloaded base MODEL_PLAYER"; return false; }
+    if (!std::isfinite(authoredBase.X) || !std::isfinite(authoredBase.Y) || !std::isfinite(authoredBase.Z)) {
+        error="nonfinite script player position"; return false;
+    }
+    // MAP_Z_LOW_LIMIT auto-ground is a separate source operation; this slice
+    // accepts the real first-pass authored position only.
+    if (authoredBase.Z<=-100.0f) { error="0053 auto-ground sentinel not implemented"; return false; }
+    float ground;
+    if (!world.Ground(authoredBase.X,authoredBase.Y,authoredBase.Z+1.0f,authoredBase.Z-150.0f,ground)) {
+        error="no resident real triangle ground at script player"; return false;
+    }
+    if (p.PedBlocked(world,authoredBase,false)) { error="script player body intersects resident world"; return false; }
+    p.State={}; p.State.Ped=authoredBase; p.State.CarPresent=false;
+    p.State.PedHeading=p.OrbitYaw=Pi*0.5f; // SetupPlayerPed orientation(0,0,0): forward +Y
+    p.State.Ready=p.State.MissionCreated=p.State.PlayerOnFootTask=true;
+    p.State.Grounded=std::abs(authoredBase.Z-ground)<0.05f;
+    p.CarVertical=p.CarPitch=p.CarRoll=p.Phase=p.PedSpeed=0;
+    p.IdlePhase=p.AirPhase=p.MoveBlend=p.RunBlend=p.AirBlend=0;
+    p.Pose(0); p.UpdateCamera(0,world); error.clear(); return true;
+}
+bool RealtimeGameplay::SetScriptHeading(float radians,std::string& error) {
+    auto& p=*m_Impl;
+    if (!p.State.Ready || !std::isfinite(radians)) { error="heading requires live player and finite angle"; return false; }
+    if (!p.State.InVehicle) {
+        p.State.PedHeading=radians+Pi*0.5f;
+        p.State.PedAimingRotation=radians;
+        p.Pose(0); // actual entity transform and persistent CPU-skinned RW mesh
+        p.State.PedCurrentRotation=radians;
+    }
+    error.clear(); return true;
+}
+bool RealtimeGameplay::SetScriptCameraBehind(const RealtimeGameplayWorld& world,std::string& error) {
+    auto& p=*m_Impl;
+    if (!p.State.Ready) { error="camera requires live player"; return false; }
+    p.OrbitYaw=p.State.PedHeading;
+    p.Camera.ScriptDirectlyBehind=true;
+    p.Camera.ScriptPedOrientation=std::fmod(p.State.PedHeading,2*Pi);
+    if (p.Camera.ScriptPedOrientation<0) p.Camera.ScriptPedOrientation+=2*Pi;
+    p.UpdateCamera(0,world); error.clear(); return true;
+}
 void RealtimeGameplay::Tick(double dt,const RealtimeGameplayInput& input,const RealtimeGameplayWorld& world) {
     auto& p=*m_Impl;
     if (!p.State.Ready || !std::isfinite(dt) || dt<=0) return;
@@ -748,7 +838,7 @@ void RealtimeGameplay::Tick(double dt,const RealtimeGameplayInput& input,const R
     const float h=static_cast<float>(bounded/steps);
     const double walkBefore=p.State.WalkDistance;
     for (int i=0;i<steps;++i) {
-        p.CarStep(h,controls,world);
+        if (p.State.CarPresent) p.CarStep(h,controls,world);
         if (!p.State.InVehicle) p.PedStep(h,controls,world);
     }
     // Average all accepted substeps BEFORE filtering. A rate limiter applied

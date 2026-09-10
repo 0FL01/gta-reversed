@@ -6,6 +6,8 @@
 #include "app/platform/linux/RealtimeGameplay.h"
 #include "app/platform/linux/RealtimeHud.h"
 #include "app/platform/linux/RealtimeStreaming.h"
+#include "app/platform/linux/NativePlayerAssets.h"
+#include "app/platform/linux/RealtimeScriptHost.h"
 
 #include <SDL3/SDL.h>
 #include <EGL/egl.h>
@@ -329,6 +331,13 @@ struct GpuScene {
 struct ResidentWorld {
     std::unique_ptr<realtime_streaming::CpuWorld> cpu;
     GpuScene gpu;
+    // The startup host outlives LiveWorld. Its immutable publication and BVH
+    // stay paired until a worker-owned generation replaces this resident.
+    const RealtimeGameplayWorld* startupCollision = nullptr;
+
+    const RealtimeGameplayWorld& Collision() const {
+        return startupCollision ? *startupCollision : cpu->Collision;
+    }
 };
 
 struct LiveWorld {
@@ -355,6 +364,21 @@ struct LiveWorld {
             return false;
         }
         return active->gpu.Upload(active->cpu->Scene);
+    }
+
+    bool Initialize(const RealtimeScriptHost& host) {
+        const auto& publication = host.Publication();
+        assert(publication.Scene && host.World() && host.WorldRevision());
+        active->cpu = std::make_unique<realtime_streaming::CpuWorld>();
+        auto& cpu = *active->cpu;
+        cpu.Position = {publication.Center.X, publication.Center.Y, publication.Center.Z};
+        // First live resident; the two host startup CPU publications have their
+        // own revision counter. Worker generations continue this live sequence.
+        cpu.Generation = 1;
+        cpu.Frame = publication.Frame;
+        cpu.Scene = *publication.Scene; // owned snapshot, no pager/RW parser or second BVH
+        active->startupCollision = host.World();
+        return active->gpu.Upload(cpu.Scene);
     }
 
     void Start(bool collision) { worker = std::make_unique<realtime_streaming::Worker>(collision); }
@@ -446,6 +470,48 @@ struct Camera {
         glTranslatef(-x, -y, -z);
     }
 };
+
+static bool ScriptFault(const RealtimeScriptHost& host, const NativeScriptResult& result) {
+    if (result.Status != NativeScriptStatus::Unsupported && result.Status != NativeScriptStatus::Error) {
+        return false;
+    }
+    const auto threads = host.Session().Threads();
+    const auto generation = result.ThreadIndex < threads.size() ? threads[result.ThreadIndex].Generation : 0;
+    std::printf("play-script-terminal status=%s thread=%zu generation=%llu ip=%u opcode=%04X executed=%zu message=%s\n",
+        result.Status == NativeScriptStatus::Unsupported ? "Unsupported" : "Error", result.ThreadIndex,
+        static_cast<unsigned long long>(generation), result.IP, result.Opcode, result.Executed, result.Message.c_str());
+    std::fflush(stdout);
+    return true;
+}
+
+static void DrawScriptFade(const NativeScriptFade& fade) {
+    if (fade.Alpha <= 0) {
+        return;
+    }
+    glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_CURRENT_BIT | GL_DEPTH_BUFFER_BIT);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_ALPHA_TEST);
+    glDisable(GL_TEXTURE_2D);
+    glDisable(GL_LIGHTING);
+    glDisable(GL_FOG);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadIdentity();
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadIdentity();
+    glColor4f(0, 0, 0, std::clamp(fade.Alpha / 255.0f, 0.0f, 1.0f));
+    glBegin(GL_QUADS);
+    glVertex2f(-1, -1); glVertex2f(1, -1); glVertex2f(1, 1); glVertex2f(-1, 1);
+    glEnd();
+    glPopMatrix();
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
+    glPopAttrib();
+}
 } // namespace
 
 int Realtime_Run(int argc, char** argv, const char* gameDir) {
@@ -453,6 +519,8 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
     bool demo = false;
     bool demoCurb = false;
     bool freecam = false;
+    bool playerCj = false;
+    bool newGame = false, explicitCamera = false, explicitHour = false;
     bool freezeTime = false;
     float hour = 12.0f;
     const char* weather = "EXTRASUNNY_LA";
@@ -475,9 +543,14 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             demoCurb = true;
         } else if (std::strcmp(argv[i], "--freecam") == 0) {
             freecam = true;
+        } else if (std::strcmp(argv[i], "--player-cj") == 0) {
+            playerCj = true;
+        } else if (std::strcmp(argv[i], "--new-game") == 0) {
+            newGame = true;
         } else if (std::strcmp(argv[i], "--freeze-time") == 0) {
             freezeTime = true;
         } else if (std::strcmp(argv[i], "--hour") == 0) {
+            explicitHour = true;
             char* end = nullptr;
             if (++i == argc) {
                 std::printf("play-fail --hour needs a number in [0,24)\n");
@@ -495,6 +568,7 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             }
             weather = argv[i];
         } else if (std::strcmp(argv[i], "--cam") == 0) {
+            explicitCamera = true;
             int used = 0;
             if (++i == argc || std::sscanf(argv[i], "%f,%f,%f%n", &camera.x, &camera.y, &camera.z, &used) != 3 ||
                 argv[i][used] || !std::isfinite(camera.x) || !std::isfinite(camera.y) || !std::isfinite(camera.z) ||
@@ -503,6 +577,14 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
                 return 1;
             }
         }
+    }
+    if (newGame && (demo || demoCurb || playerCj || freecam || explicitCamera || explicitHour || freezeTime)) {
+        std::printf("play-fail --new-game conflicts with --demo/--demo-curb/--player-cj/--freecam/--cam/--hour/--freeze-time\n");
+        return 1;
+    }
+    if (playerCj && freecam) {
+        std::printf("play-fail --player-cj requires gameplay without --freecam\n");
+        return 1;
     }
     if (demoCurb) {
         if (freecam || demo) {
@@ -555,6 +637,37 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
     }
     std::printf("play-load textAndBinary=%d outdoor=%d binaryFiles=%d binaryInstances=%d radius=%.0f cap=%d\n",
         load.iplTotal, load.iplKept, load.binaryIplFiles, load.binaryInstances, options.radius, options.maxInstances);
+    RealtimeGameplay gameplay;
+    std::string gameplayError;
+    RealtimeScriptHost scriptHost(gameplay); // outlives LiveWorld's startup BVH reference
+    constexpr std::size_t scriptQuota = 256; // one bounded scheduler pass per presented frame
+    if (newGame) {
+        if (!scriptHost.InitializeBeforeWorker(gameDir, gameplayError)) {
+            std::printf("play-fail script init: %s\n", gameplayError.c_str());
+            return 1;
+        }
+        const auto result = scriptHost.RunPass(scriptQuota);
+        if (ScriptFault(scriptHost, result)) {
+            return 1;
+        }
+        if (result.Status != NativeScriptStatus::Waiting || !gameplay.State().Ready || !scriptHost.World()) {
+            std::printf("play-fail script startup has no presentable world/player at first yield\n");
+            return 1;
+        }
+        // Process the source zero-duration fade before the first presentation;
+        // this is a timer update at t=0, not another scheduler pass.
+        if (!scriptHost.AdvanceTime(0, gameplayError)) {
+            std::printf("play-fail script clock: %s\n", gameplayError.c_str());
+            return 1;
+        }
+        const auto& clock = scriptHost.State().Clock;
+        hour = clock.Hours + clock.Minutes / 60.0f + clock.Seconds / 3600.0f;
+        const auto& view = gameplay.Camera();
+        camera = {view.Position.X, view.Position.Y, view.Position.Z, view.Yaw, view.Pitch};
+        std::printf("play-script-startup commands=%zu ip=%u worlds=%llu clock=%02u:%02u fade=%.0f model=MODEL_PLAYER\n",
+            result.Executed, scriptHost.State().IP, static_cast<unsigned long long>(scriptHost.WorldRevision()),
+            unsigned(clock.Hours), unsigned(clock.Minutes), scriptHost.State().Fade.Alpha);
+    }
     GpuScene actorGpu;
     RealtimeEnvironment environment;
     if (!environment.Load(gameDir, error, sizeof(error), hour, weather) ||
@@ -565,8 +678,6 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
     std::printf("play-environment hour=%.2f weather=%s waterTris=%d clock=%s\n", hour, weather,
                 environment.GetWaterTriangleCount(), freezeTime ? "frozen" : "one-minute-per-second");
     const bool gameplayEnabled = !freecam;
-    RealtimeGameplay gameplay;
-    std::string gameplayError;
     LiveWorld world;
     int updates = 0;
     auto reportWorld = [&]() {
@@ -577,21 +688,26 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             cpu.Position.X, cpu.Position.Y, cpu.Position.Z);
         std::fflush(stdout);
     };
-    if (!world.Initialize({camera.x, camera.y, camera.z}, gameplayEnabled)) {
+    if (!(newGame ? world.Initialize(scriptHost) : world.Initialize({camera.x, camera.y, camera.z}, gameplayEnabled))) {
         return 1;
     }
     reportWorld();
     if (gameplayEnabled) {
         const auto initStart = SDL_GetTicksNS();
-        if (!gameplay.Initialize(gameDir, gameplayError) ||
-            !gameplay.Spawn(world.active->cpu->Collision, camera.x, camera.y, camera.z, camera.yaw, gameplayError) ||
+        // Source-backed startup outfit; this preview does not execute the SCM
+        // branch that assigns it or imply that new-game boot is complete.
+        const auto clothes = NativePlayerClothes_Startup();
+        if ((!newGame && (!gameplay.Initialize(gameDir, gameplayError, playerCj ? &clothes : nullptr) ||
+            !gameplay.Spawn(world.active->Collision(), camera.x, camera.y, camera.z, camera.yaw, gameplayError))) ||
             !actorGpu.UploadTextures(gameplay.Actors())) {
             std::printf("play-fail gameplay: %s\n", gameplayError.c_str());
             return 1;
         }
         std::printf("play-gameplay-init seconds=%.3f collisionTris=%zu actorTris=%d textures=%zu\n",
-            static_cast<double>(SDL_GetTicksNS() - initStart) / 1e9, world.active->cpu->Collision.TriangleCount(),
+            static_cast<double>(SDL_GetTicksNS() - initStart) / 1e9, world.active->Collision().TriangleCount(),
             gameplay.Actors().stats.triangles, gameplay.Actors().images.size());
+        std::printf("play-player model=%s outfit=%s\n", (newGame || playerCj) ? "player" : "andre",
+            newGame ? "base-SCM-before-clothes" : playerCj ? "startup-fat200-muscle50-preview" : "model-txd");
     }
     RealtimeHud hud;
     if (!hud.Load(gameDir, error, sizeof(error)) || !hud.Upload(error, sizeof(error))) {
@@ -599,6 +715,9 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
         return 1;
     }
     std::printf("play-hud radar=144-tiles clock=game-time player=%s\n", gameplayEnabled ? "gameplay" : "hidden-freecam");
+    if (newGame) {
+        scriptHost.SealStartup(); // no live LOAD_SCENE callback yet: explicitly Unsupported
+    }
     world.Start(gameplayEnabled); // final startup parser has returned; transfer exclusive pager ownership
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_ALPHA_TEST);
@@ -614,12 +733,15 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
     bool demoJumped = false;
     bool demoEntered = false;
     double demoNextExitAttempt = 9.0;
+    Uint64 gameNs = 0;
+    bool paused = false;
     while (running) {
         const Uint64 now = SDL_GetTicksNS();
         if (seconds > 0 && static_cast<double>(now - start) / 1e9 >= seconds) {
             break;
         }
-        const float dt = std::min(static_cast<float>(now - previous) / 1e9f, 0.1f);
+        const Uint64 deltaNs = now - previous;
+        const float dt = std::min(static_cast<float>(deltaNs) / 1e9f, 0.1f);
         previous = now;
         SDL_Event event{};
         RealtimeGameplayInput input{};
@@ -631,7 +753,7 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat) {
                 input.Jump |= event.key.key == SDLK_SPACE;
                 input.Interact |= event.key.key == SDLK_F;
-                if (event.key.key == SDLK_TAB && gameplayEnabled) {
+                if (event.key.key == SDLK_TAB && gameplayEnabled && !newGame) {
                     freecam = !freecam;
                 }
             }
@@ -645,9 +767,24 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             return 1;
         }
         if (width <= 0 || height <= 0 || (SDL_GetWindowFlags(window.window) & SDL_WINDOW_MINIMIZED)) {
+            paused = true;
             SDL_Delay(50);
             continue;
         }
+        if (newGame && frames) {
+            if (!paused) {
+                gameNs += deltaNs;
+            }
+            if (gameNs / 1'000'000 > std::numeric_limits<std::uint32_t>::max() ||
+                !scriptHost.AdvanceTime(static_cast<std::uint32_t>(gameNs / 1'000'000), gameplayError)) {
+                std::printf("play-fail script clock: %s\n", gameplayError.c_str());
+                return 1;
+            }
+            if (ScriptFault(scriptHost, scriptHost.RunPass(scriptQuota))) {
+                return 1; // no physics, presentation, retry, or main-thread resumption after fault
+            }
+        }
+        paused = false;
         const bool* keys = SDL_GetKeyboardState(nullptr);
         if (freecam) {
             camera.Update(dt, keys, demo);
@@ -661,7 +798,7 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
         if (published) {
             reportWorld();
         }
-        if (gameplayEnabled) {
+        if (gameplayEnabled && (!newGame || frames)) {
             if (!freecam) {
                 input.Forward = keys[SDL_SCANCODE_W] - keys[SDL_SCANCODE_S];
                 input.Side = keys[SDL_SCANCODE_D] - keys[SDL_SCANCODE_A];
@@ -708,7 +845,7 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             } else {
                 input = {};
             }
-            gameplay.Tick(dt, input, world.active->cpu->Collision);
+            gameplay.Tick(dt, input, world.active->Collision());
             if (!freecam) {
                 const auto& view = gameplay.Camera();
                 camera.x = view.Position.X;
@@ -720,7 +857,14 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
         }
         camera.Apply(width, height, std::max(1600.0f, environment.GetParams().farClip));
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-        if (!freezeTime) {
+        if (newGame) {
+            const auto& clock = scriptHost.State().Clock;
+            // Source clock setter is a snapshot. Calendar pacing belongs here;
+            // one game minute per unpaused second, reset at each SCM setter.
+            hour = std::fmod(clock.Hours + clock.Minutes / 60.0f + clock.Seconds / 3600.0f +
+                (gameNs / 1'000'000 - clock.LastTickMs) / 60000.0f, 24.0f);
+            environment.SetHour(hour);
+        } else if (!freezeTime) {
             hour = std::fmod(hour + dt / 60.0f, 24.0f);
             environment.SetHour(hour);
         }
@@ -753,6 +897,9 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             hudState.playerYaw = state.InVehicle ? state.CarHeading : state.PedHeading;
         }
         hud.Draw(hudView, hudState, width, height);
+        if (newGame) {
+            DrawScriptFade(scriptHost.State().Fade);
+        }
         const auto glError = glGetError();
         if (glError != GL_NO_ERROR || !SDL_GL_SwapWindow(window.window)) {
             std::printf("play-fail present GL=0x%x SDL=%s\n", glError, SDL_GetError());
@@ -791,6 +938,10 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             reportFrames = frames;
             reportMaxFrameMs = reportMaxStreamMs = 0;
         }
+    }
+    if (newGame) {
+        std::printf("play-script-stopped swaps=%llu startup-incomplete=1\n", static_cast<unsigned long long>(frames));
+        return 1;
     }
     std::printf("play-ok swaps=%llu seconds=%.3f sceneUpdates=%d\n",
         static_cast<unsigned long long>(frames), static_cast<double>(SDL_GetTicksNS() - start) / 1e9, updates);

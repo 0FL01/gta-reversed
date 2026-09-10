@@ -33,10 +33,12 @@
 #pragma once
 
 #include <cstddef>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "app/platform/linux/WorldShot.h"
+#include "app/platform/linux/NativePlayerAssets.h"
 
 struct IfpAnimStats {
     char model[64]; // resolved DFF base (e.g. "andre")
@@ -124,6 +126,28 @@ struct IfpAnimSeqFrame {
     WorldShotScene scene;
     IfpAnimStats stats;
 };
+// Owned decoded bank: load once on the startup thread, then sample without IO,
+// librw engine state, model lookup, or fallback. Separate from legacy ped APIs.
+class IfpAnimPlayerBank {
+public:
+    IfpAnimPlayerBank();
+    ~IfpAnimPlayerBank();
+    bool Load(const char* gameDir, const char* bank, char* err, std::size_t errSize);
+    struct Impl;
+    const Impl* Data() const { return m_Impl.get(); }
+private:
+    std::unique_ptr<Impl> m_Impl;
+};
+struct IfpAnimPlayerAudit {
+    std::vector<NativePlayerMatrix> Locals, Worlds;
+};
+// Empty animName means bind pose. Images need exporting only for the first
+// scene in a cache; mesh slots, image indices and all static attributes match.
+// Validates owned asset references before skinning; failure preserves outputs.
+bool IfpAnim_InitPlayer(const NativePlayerAssets& assets, const IfpAnimPlayerBank& bank,
+                       const char* animName, double timeFrac, WorldShotScene& scene,
+                       IfpAnimStats& stats, char* err, std::size_t errSize,
+                       bool exportImages = true, IfpAnimPlayerAudit* audit = nullptr);
 bool IfpAnim_Seq(const char* gameDir, const char* model, const char* animName, int frames,
                  std::vector<IfpAnimSeqFrame>& out, char* err, std::size_t errSize);
 bool IfpAnim_LoopGap(const char* gameDir, const char* animName, float* gapOut, int* mappedOut,

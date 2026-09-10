@@ -16,6 +16,8 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <algorithm>
+#include <set>
 
 #include "app/platform/linux/TexSample.h"
 
@@ -386,6 +388,10 @@ int32 BoneNameToTag(const std::string& trimmed) {
 
 // --- IFP bank model (decoded floats, absolute times as stored) ---
 
+} // namespace
+
+// Named implementation types also back the owned public bank's opaque Impl.
+namespace IfpAnimDetail {
 struct IfpFrame {
     float q[4]; // x,y,z,w
     float t[3]; // valid iff hasT
@@ -405,6 +411,12 @@ struct IfpAnimData {
     std::vector<IfpSeq> seqs;
     float total = 0.0f; // max last absTime
 };
+} // namespace IfpAnimDetail
+
+namespace {
+using IfpAnimDetail::IfpFrame;
+using IfpAnimDetail::IfpSeq;
+using IfpAnimDetail::IfpAnimData;
 
 static uint16 ReadU16LE(const uint8* p) {
     return static_cast<uint16>(p[0] | (static_cast<uint16>(p[1]) << 8));
@@ -780,6 +792,224 @@ float QuatAngle(const float a[4], const float b[4]) {
 std::vector<rw::TexDictionary*> s_txds;
 
 } // namespace
+
+struct IfpAnimPlayerBank::Impl {
+    std::string Name, Source;
+    std::vector<IfpAnimData> Anims;
+};
+
+IfpAnimPlayerBank::IfpAnimPlayerBank() = default;
+IfpAnimPlayerBank::~IfpAnimPlayerBank() = default;
+bool IfpAnimPlayerBank::Load(const char* gameDir, const char* bank, char* err, std::size_t errSize) {
+    if (!gameDir || !*gameDir || !bank || !*bank) {
+        SetErr(err, errSize, "player bank requires game directory and bank name"); return false;
+    }
+    OS_SetFilePathOffset(gameDir);
+    s_gameAbs = gameDir;
+    auto next = std::make_unique<Impl>();
+    std::vector<uint8> bytes;
+    if (!LoadBankBytes(gameDir, bank, bytes, next->Source, err, errSize) ||
+        !ParseIfpBank(bytes, next->Name, next->Anims, err, errSize)) return false;
+    m_Impl = std::move(next);
+    SetErr(err, errSize, ""); return true;
+}
+
+namespace {
+rw::Matrix PlayerMatrix(const NativePlayerMatrix& m) {
+    rw::Matrix out{};
+    out.right = {m.Right[0], m.Right[1], m.Right[2]};
+    out.up = {m.Up[0], m.Up[1], m.Up[2]};
+    out.at = {m.At[0], m.At[1], m.At[2]};
+    out.pos = {m.Pos[0], m.Pos[1], m.Pos[2]};
+    return out;
+}
+NativePlayerMatrix PlayerOwnedMatrix(const rw::Matrix& m) {
+    return {{m.right.x,m.right.y,m.right.z}, {m.up.x,m.up.y,m.up.z},
+            {m.at.x,m.at.y,m.at.z}, {m.pos.x,m.pos.y,m.pos.z}};
+}
+bool PlayerAssetsValid(const NativePlayerAssets& a) {
+    if (a.Bones.size()!=32 || a.Vertices.empty() || a.Triangles.empty()) return false;
+    std::set<int> tags;
+    std::vector<int> stack;
+    int parent=-1;
+    for (size_t i=0;i<a.Bones.size();++i) {
+        const auto& b=a.Bones[i];
+        if (b.Parent!=parent || b.Parent>=static_cast<int>(i) || !tags.insert(b.Tag).second) return false;
+        for (const auto& m:{b.InverseBind,b.BindLocal})
+            for (const auto& v:{m.Right,m.Up,m.At,m.Pos})
+                for (float f:v) if (!std::isfinite(f)) return false;
+        if (b.Flags & 2) stack.push_back(parent);
+        parent=static_cast<int>(i);
+        if (b.Flags & 1) {
+            if (stack.empty() && i+1!=a.Bones.size()) return false;
+            parent=stack.empty() ? -1:stack.back();
+            if (!stack.empty()) stack.pop_back();
+        }
+    }
+    if (!stack.empty()) return false;
+    for (const auto& v:a.Vertices) {
+        for (float f:v.Position) if (!std::isfinite(f)) return false;
+        for (float f:v.Normal) if (!std::isfinite(f)) return false;
+        for (float f:v.UV) if (!std::isfinite(f)) return false;
+        float sum=0;
+        for (size_t k=0;k<4;++k) {
+            if (!std::isfinite(v.Weights[k]) || v.Weights[k]<0 ||
+                (v.Weights[k]>0 && v.Bones[k]>=a.Bones.size())) return false;
+            sum+=v.Weights[k];
+        }
+        if (std::abs(sum-1)>0.001f) return false;
+    }
+    size_t triangles=0,vertices=0;
+    for (size_t slot=0;slot<a.Parts.size();++slot) {
+        const auto& p=a.Parts[slot];
+        if (p.FirstTriangle!=triangles || p.FirstVertex!=vertices || !p.TriangleCount || !p.VertexCount ||
+            triangles+p.TriangleCount>a.Triangles.size() || vertices+p.VertexCount>a.Vertices.size()) return false;
+        for (size_t t=triangles;t<triangles+p.TriangleCount;++t) {
+            if (a.Triangles[t].Material!=slot) return false;
+            for (auto v:a.Triangles[t].Vertices) if (v<vertices || v>=vertices+p.VertexCount) return false;
+        }
+        triangles+=p.TriangleCount; vertices+=p.VertexCount;
+    }
+    if (triangles!=a.Triangles.size() || vertices!=a.Vertices.size()) return false;
+    for (const auto& m:a.Materials) if (m.Image>=a.Images.size()) return false;
+    for (const auto& image:a.Images)
+        if (image.Width<=0 || image.Height<=0 || image.RGBA.size()!=size_t(image.Width)*size_t(image.Height)*4) return false;
+    return true;
+}
+}
+
+bool IfpAnim_InitPlayer(const NativePlayerAssets& assets, const IfpAnimPlayerBank& bank,
+                       const char* animName, double timeFrac, WorldShotScene& scene,
+                       IfpAnimStats& stats, char* err, std::size_t errSize,
+                       bool exportImages, IfpAnimPlayerAudit* audit) {
+    if (!PlayerAssetsValid(assets) || !std::isfinite(timeFrac)) {
+        SetErr(err,errSize,"invalid player asset references/hierarchy/weights or pose time"); return false;
+    }
+    const auto* data=bank.Data();
+    const IfpAnimData* anim=nullptr;
+    if (animName && *animName) {
+        if (data) for (const auto& a:data->Anims)
+            if (ToLowerCopy(a.name)==ToLowerCopy(animName)) { anim=&a; break; }
+        if (!anim) { SetErr(err,errSize,"player IFP clip absent from loaded bank"); return false; }
+    }
+    IfpAnimStats st{};
+    st.time=std::clamp(timeFrac,0.0,1.0); st.animTotal=anim ? anim->total:0;
+    st.timeAbs=st.time*st.animTotal; st.interp=1;
+    st.bones=32; st.geoms=5; st.textures=4;
+    st.seqs=anim ? static_cast<int>(anim->seqs.size()):0;
+    st.animsInBank=data ? static_cast<int>(data->Anims.size()):0;
+    std::snprintf(st.model,sizeof(st.model),"cj-explicit-normal");
+    std::snprintf(st.requested,sizeof(st.requested),"explicit NativePlayerClothes");
+    std::snprintf(st.src,sizeof(st.src),"gta3.img:player.dff + player.img:five-parts");
+    std::snprintf(st.txd,sizeof(st.txd),"player.img:explicit-composed-images");
+    std::snprintf(st.anim,sizeof(st.anim),"%s",anim ? anim->name:"bind");
+    if (data) {
+        std::snprintf(st.bank,sizeof(st.bank),"%s",data->Name.c_str());
+        std::snprintf(st.bankSrc,sizeof(st.bankSrc),"%s",data->Source.c_str());
+    }
+    std::vector<rw::Matrix> locals(32),worlds(32),skins(32),bindWorlds(32),bindSkins(32);
+    for (size_t i=0;i<assets.Bones.size();++i) {
+        const auto& bone=assets.Bones[i];
+        locals[i]=PlayerMatrix(bone.BindLocal);
+        bindWorlds[i]=locals[i];
+        if (bone.Parent>=0) rw::Matrix::mult(&bindWorlds[i],&locals[i],&bindWorlds[bone.Parent]);
+        const auto inverse=PlayerMatrix(bone.InverseBind);
+        rw::Matrix::mult(&bindSkins[i],&inverse,&bindWorlds[i]);
+        const IfpSeq* seq=nullptr;
+        if (anim) for (const auto& s:anim->seqs)
+            if (EffectiveTag(s)==bone.Tag && !s.frames.empty()) { seq=&s; break; }
+        if (seq) {
+            ++st.mapped;
+            const float time=static_cast<float>(st.timeAbs);
+            size_t k0=0,k1=0;
+            if (time>=seq->frames.back().absTime) k0=k1=seq->frames.size()-1;
+            else if (time>seq->frames.front().absTime) {
+                for (size_t k=0;k+1<seq->frames.size();++k)
+                    if (seq->frames[k].absTime<=time && time<=seq->frames[k+1].absTime) { k0=k; k1=k+1; break; }
+            }
+            const auto& a=seq->frames[k0]; const auto& b=seq->frames[k1];
+            const float alpha=b.absTime>a.absTime ? (time-a.absTime)/(b.absTime-a.absTime):0;
+            float q0[4],q1[4],q[4],t[3];
+            NormQuatCopy(a.q,q0); NormQuatCopy(b.q,q1);
+            SlerpQuat(q0,q1,alpha,q); NormQuat4(q);
+            for (int c=0;c<3;++c) t[c]=(a.hasT || b.hasT) ? a.t[c]+alpha*(b.t[c]-a.t[c]):bone.BindLocal.Pos[c];
+            QuatPosToMatrix(q,t,locals[i]);
+        }
+        worlds[i]=locals[i];
+        if (bone.Parent>=0) rw::Matrix::mult(&worlds[i],&locals[i],&worlds[bone.Parent]);
+        // Row-vector skinRenderCB order S*A: inverseBind * animatedWorld.
+        // The assembled CJ atomic A is identity (asset constructor contract).
+        rw::Matrix::mult(&skins[i],&inverse,&worlds[i]);
+        if (bone.Tag==0) {
+            st.rootWorld[0]=worlds[i].pos.x; st.rootWorld[1]=worlds[i].pos.y; st.rootWorld[2]=worlds[i].pos.z;
+            st.rootDelta=std::hypot(worlds[i].pos.x-bindWorlds[i].pos.x,
+                worlds[i].pos.y-bindWorlds[i].pos.y,worlds[i].pos.z-bindWorlds[i].pos.z);
+        }
+    }
+    st.unmapped=st.bones-st.mapped;
+    WorldShotScene out{};
+    for (int c=0;c<3;++c) { st.bindMin[c]=st.animMin[c]=INFINITY; st.bindMax[c]=st.animMax[c]=-INFINITY; }
+    std::vector<rw::V3d> positions(assets.Vertices.size()),normals(assets.Vertices.size());
+    for (size_t v=0;v<assets.Vertices.size();++v) {
+        const auto& source=assets.Vertices[v];
+        const rw::V3d p{source.Position[0],source.Position[1],source.Position[2]};
+        const rw::V3d n{source.Normal[0],source.Normal[1],source.Normal[2]};
+        rw::V3d pos{},normal{},bind{};
+        for (size_t k=0;k<4;++k) {
+            const float weight=source.Weights[k]; if (weight==0) continue;
+            const auto bone=source.Bones[k]; rw::V3d a,b,c;
+            rw::V3d::transformPoints(&a,&p,1,&skins[bone]);
+            rw::V3d::transformVectors(&b,&n,1,&skins[bone]);
+            rw::V3d::transformPoints(&c,&p,1,&bindSkins[bone]);
+            pos.x+=a.x*weight; pos.y+=a.y*weight; pos.z+=a.z*weight;
+            normal.x+=b.x*weight; normal.y+=b.y*weight; normal.z+=b.z*weight;
+            bind.x+=c.x*weight; bind.y+=c.y*weight; bind.z+=c.z*weight;
+            st.wsum+=weight;
+        }
+        const float length=std::hypot(normal.x,normal.y,normal.z);
+        if (length>1e-9f) { normal.x/=length; normal.y/=length; normal.z/=length; }
+        positions[v]=pos; normals[v]=normal;
+        const float bp[]{bind.x,bind.y,bind.z},ap[]{pos.x,pos.y,pos.z};
+        for (int c=0;c<3;++c) {
+            st.bindMin[c]=std::min(st.bindMin[c],bp[c]); st.bindMax[c]=std::max(st.bindMax[c],bp[c]);
+            st.animMin[c]=std::min(st.animMin[c],ap[c]); st.animMax[c]=std::max(st.animMax[c],ap[c]);
+        }
+    }
+    st.wsum/=assets.Vertices.size();
+    for (size_t slot=0;slot<assets.Parts.size();++slot) {
+        auto& mesh=out.meshes.emplace_back(); const auto& part=assets.Parts[slot];
+        mesh.tris=static_cast<int>(part.TriangleCount);
+        const auto& material=assets.Materials[slot];
+        WorldShotSurface surface;
+        for (int c=0;c<4;++c) surface.color[c]=material.RGBA[c]/255.0f;
+        for (int c=0;c<3;++c) mesh.color[c]=surface.color[c];
+        for (size_t i=part.FirstTriangle;i<size_t(part.FirstTriangle)+part.TriangleCount;++i) {
+            const auto& tri=assets.Triangles[i];
+            mesh.triImg.push_back(static_cast<int>(material.Image)); mesh.surfaces.push_back(surface);
+            mesh.triCol.insert(mesh.triCol.end(),{mesh.color[0],mesh.color[1],mesh.color[2]});
+            for (auto v:tri.Vertices) {
+                const auto p=positions[v],n=normals[v];
+                mesh.pos.insert(mesh.pos.end(),{p.x,p.y,p.z}); mesh.nrm.insert(mesh.nrm.end(),{n.x,n.y,n.z});
+                mesh.uv.insert(mesh.uv.end(),assets.Vertices[v].UV.begin(),assets.Vertices[v].UV.end());
+                // The assembled lit CJ geometry has no authored prelight.
+                mesh.dayColors.insert(mesh.dayColors.end(),{0,0,0,255});
+            }
+        }
+    }
+    if (exportImages) for (const auto& image:assets.Images) {
+        auto& dst=out.images.emplace_back();
+        std::snprintf(dst.name,sizeof(dst.name),"%s",image.Name.c_str());
+        dst.w=image.Width; dst.h=image.Height; dst.filter=image.FilterAddressing; dst.rgba=image.RGBA;
+    }
+    st.tris=static_cast<int>(assets.Triangles.size()); st.verts=st.tris*3;
+    out.stats.atomics=5; out.stats.triangles=st.tris; out.stats.vertices=st.verts; out.stats.textures=4;
+    for (int c=0;c<3;++c) { out.bboxMin[c]=st.animMin[c]; out.bboxMax[c]=st.animMax[c]; }
+    if (audit) {
+        audit->Locals.clear(); audit->Worlds.clear();
+        for (size_t i=0;i<32;++i) { audit->Locals.push_back(PlayerOwnedMatrix(locals[i])); audit->Worlds.push_back(PlayerOwnedMatrix(worlds[i])); }
+    }
+    scene=std::move(out); stats=st; SetErr(err,errSize,""); return true;
+}
 
 bool IfpAnim_List(const char* gameDir, std::vector<std::string>& names, char* bankSrcOut,
                   std::size_t bankSrcSize, char* err, std::size_t errSize) {

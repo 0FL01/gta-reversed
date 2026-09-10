@@ -21,6 +21,7 @@ mode = parser.add_mutually_exclusive_group(required=True)
 mode.add_argument('--build', action='store_true')
 mode.add_argument('--run', action='store_true')
 parser.add_argument('--seconds', type=int, choices=(16, 28), default=16)
+parser.add_argument('--player-cj', action='store_true')
 args = parser.parse_args()
 source = pathlib.Path(__file__).resolve().parent
 workspace = source.parents[4]
@@ -70,6 +71,8 @@ else:
     env['MANGOHUD_CONFIG'] = ('fps,frametime,gpu_name,gpu_stats,cpu_stats,autostart_log=1,'
         f'log_duration=0,log_interval=100,output_folder={output}')
     command = ['mangohud', str(binary), '--play', '--game-dir', str(game), '--demo', '--seconds', str(args.seconds)]
+    if args.player_cj:
+        command.append('--player-cj')
     path = output / 'RealtimeHudCapture.log'
     with path.open('w') as log:
         log.write(shlex.join(command) + '\nMANGOHUD_CONFIG=' + env['MANGOHUD_CONFIG'] + '\n')
@@ -98,6 +101,8 @@ else:
     assert len(captures) >= 3, 'Expected initial plus 5-second and 12-second captures'
     assert 'play-ok ' in text and 'play-fail ' not in text and 'hud-capture FAIL' not in text
     assert 'driver=wayland EGL=yes' in text and 'play-hud radar=144-tiles' in text
+    if args.player_cj:
+        assert 'play-player model=player outfit=startup-fat200-muscle50-preview' in text
     states = re.findall(r'play-state .*', text)
     replay = bool(states and all(re.search(rf'\b{name}=[1-9]\d*\b', states[-1]) for name in ('jumps', 'landings', 'entries', 'exits')))
     assert replay, 'Integrated demo must finish jump/land/entry/drive/brake/exit'
