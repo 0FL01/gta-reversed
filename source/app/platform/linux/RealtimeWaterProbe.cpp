@@ -6,6 +6,8 @@
 #include "RealtimeWaterProbe.oracle.h"
 #include <EGL/eglext.h>
 #include <rw.h>
+#include <chrono>
+#include <numeric>
 
 bool RealtimeWaterProbeLegacy_Load(const char*, const char*, WaterLevelData&, char*, std::size_t);
 bool RealtimeWaterProbeLegacy_BuildScene(const WaterLevelData&, const uint8_t[4], WorldShotScene&, int&, char*, std::size_t);
@@ -86,6 +88,48 @@ static void CheckOracle(RealtimeEnvironment& env) {
     }
     Require(worst < 1.e-5f, "source-extracted wave/normal/color/glare oracle");
     std::printf("water-oracle cases=%zu max-error=%.9g\n", cases, worst);
+}
+
+static void CheckSeaBedCpu(const RealtimeEnvironment& env) {
+    size_t vertices = 0;
+    for (const auto& ref : water_oracle::seaBedFixtures) {
+        const std::array block{RealtimeWaterBlock{int16_t(ref.x),int16_t(ref.y)}};
+        RealtimeSeaBedGeometry actual;
+        Require(RealtimeEnvironment::BuildSeaBed(block,ref.cx,ref.cy,ref.area,actual),"seabed fixture build");
+        Require(actual.size == ref.vertices.size(),"seabed source LOD/edge/area counts");
+        Require(std::equal(ref.vertices.begin(),ref.vertices.end(),actual.vertices.begin()),
+            "seabed independently rational source-store fixture exact XYZ/UV/order");
+        vertices += actual.size;
+    }
+    RealtimeSeaBedGeometry capacity;
+    std::array<RealtimeWaterBlock,70> maximum;
+    maximum.fill({-1,6}); // storage bound, not an authored visibility list
+    Require(RealtimeEnvironment::BuildSeaBed(maximum,-3250,250,0,capacity) && capacity.size==1120,"seabed capacity bound");
+    const auto saved = capacity.vertices;
+    const std::array<RealtimeWaterBlock,71> tooMany{};
+    Require(!RealtimeEnvironment::BuildSeaBed(tooMany,0,0,0,capacity) && capacity.vertices==saved,"seabed oversized list rejected atomically");
+    Require(!RealtimeEnvironment::BuildSeaBed(maximum,NAN,0,0,capacity) && capacity.vertices==saved,"seabed invalid camera atomic");
+    size_t limited = 0, checks = 0;
+    for (const auto& poly : env.GetWaterData().polys) {
+        limited += (poly.flags & 2) != 0;
+        const float z = poly.v[0].z;
+        for (const auto& test : std::array<std::pair<float,bool>,5>{{
+                 {std::nextafter(z-6,INFINITY),true},{std::nextafter(z-6,-INFINITY),(poly.flags&2)==0},
+                 {std::nextafter(z+20,-INFINITY),true},{std::nextafter(z+20,INFINITY),false},{z,true}}}) {
+            Require(RealtimeEnvironment::WaterQueryHeightAllowed(poly.flags,z,test.first)==test.second,
+                "actual authored limited-depth query -6/+20 inclusive boundary");
+            ++checks;
+        }
+    }
+    // Exactly representable boundaries; fractional authored heights above use
+    // adjacent floats on each side of the original unrounded x87 threshold.
+    Require(env.WaterQueryHeightAllowed(3,42,36) && env.WaterQueryHeightAllowed(3,42,62)
+        && !env.WaterQueryHeightAllowed(3,42,35.999996185302734375f)
+        && !env.WaterQueryHeightAllowed(1,42,62.000003814697265625f)
+        && env.WaterQueryHeightAllowed(1,42,-1000000),"exact limited query boundary fixture");
+    Require(limited==21,"authored limited-depth metadata count");
+    std::printf("seabed-cpu fixtures=%zu exact-vertices=%zu capacity=1120 limited-polys=%zu height-boundaries=%zu exact; depth-bit-is-query-not-floor\n",
+        water_oracle::seaBedFixtures.size(),vertices,limited,checks);
 }
 
 static void CheckFlow(RealtimeEnvironment& env) {
@@ -350,7 +394,7 @@ static void CheckFlowTicks(const WaterLevelData& real) {
 }
 
 static void CheckFeedback(RealtimeEnvironment& env, uint32_t ms, bool distant = false, bool flowing = false,
-    const RealtimeWaterState* snapshot = nullptr) {
+    const RealtimeWaterState* snapshot = nullptr, bool ocean = false) {
     auto state = snapshot ? *snapshot : RealtimeWaterState{};
     if (flowing) {
         state.accumulateFlow = true; state.firstFlowUV = state.secondFlowUV = {.99999f,-.25f};
@@ -369,14 +413,19 @@ static void CheckFeedback(RealtimeEnvironment& env, uint32_t ms, bool distant = 
     for (const auto& v : body->v)
         Require(v.z == 0 && v.bigWaves == .199f && v.smallWaves == .241f, "authored body parameters");
     glViewport(0, 0, kWidth, kHeight);
-    const float left = distant ? 730 : 800, bottom = distant ? -1900 : -1894;
-    const float width = distant ? 180 : 40, height = distant ? 40 : 24;
+    const float left = ocean ? (distant ? -3505 : -3270) : distant ? 730 : 800;
+    const float bottom = ocean ? (distant ? -5 : 236) : distant ? -1900 : -1894;
+    const float width = distant ? (ocean ? 510 : 180) : 40, height = distant ? (ocean ? 510 : 40) : 24;
+    const float cx = ocean ? -3250 : 820, cy = ocean ? 250 : -1880;
     glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(left, left+width, bottom, bottom+height, -10, 10);
     glMatrixMode(GL_MODELVIEW); glLoadIdentity();
     std::vector<float> feedback(1000000);
     glFeedbackBuffer(static_cast<GLsizei>(feedback.size()), GL_3D_COLOR_TEXTURE, feedback.data());
     glRenderMode(GL_FEEDBACK);
-    env.DrawWater(820, distant ? -1780 : -1880);
+    if (ocean) {
+        const std::array blocks{RealtimeWaterBlock{-1,6}};
+        env.DrawWater(cx,distant ? 850 : cy,false,blocks);
+    } else env.DrawWater(cx, distant ? -1780 : cy);
     const int count = glRenderMode(GL_RENDER);
     Require(count > 0, "GL geometry feedback capacity");
     size_t checked = 0;
@@ -395,15 +444,15 @@ static void CheckFeedback(RealtimeEnvironment& env, uint32_t ms, bool distant = 
             const float* v = &feedback[cursor];
             const float x = left + v[0] / kWidth * width, y = bottom + v[1] / kHeight * height;
             if (distant) {
-                if ((std::abs(x-736) > .001f && std::abs(x-904) > .001f) ||
-                    (std::abs(y+1896) > .001f && std::abs(y+1864) > .001f)) continue;
-            } else if (x <= 800.01f || x >= 839.99f || y <= -1893.99f || y >= -1870.01f) continue; // clipped vertices
+                if ((std::abs(x-(ocean ? -3500 : 736)) > .001f && std::abs(x-(ocean ? -3000 : 904)) > .001f) ||
+                    (std::abs(y-(ocean ? 0 : -1896)) > .001f && std::abs(y-(ocean ? 500 : -1864)) > .001f)) continue;
+            } else if (x <= left+.01f || x >= left+width-.01f || y <= bottom+.01f || y >= bottom+height-.01f) continue;
             Require(std::abs(x-std::round(x/2)*2) < .001f && std::abs(y-std::round(y/2)*2) < .001f,
                 "source 2m detail grid");
-            const float attenuation = std::clamp((1-std::hypot(x-820, y+1880)/48)*2, 0.f, 1.f);
+            const float attenuation = std::clamp((1-std::hypot(x-cx, y-cy)/48)*2, 0.f, 1.f);
             const auto ref = distant ? RealtimeWaterSample{0, .577f, 0, {0,0,1}} :
-                Oracle(int(std::round(x)), int(std::round(y)), 0, body->v[0].bigWaves * attenuation,
-                    body->v[0].smallWaves * attenuation, state);
+                Oracle(int(std::round(x)), int(std::round(y)), 0, (ocean ? 1 : body->v[0].bigWaves) * attenuation,
+                     (ocean ? 0 : body->v[0].smallWaves) * attenuation, state);
             zError = std::max(zError, std::abs((.5f-v[2])*20 - ref.z));
             const int alpha = int(std::round(v[6]*255));
             Require(alpha == firstAlpha || alpha == secondAlpha, "source layer alpha geometry");
@@ -422,7 +471,7 @@ static void CheckFeedback(RealtimeEnvironment& env, uint32_t ms, bool distant = 
         }
     }
     std::printf("water-geometry %s ms=%u vertices=%zu z-error=%g uv-error=%g rgba-error=%g\n",
-        distant ? "far" : flowing ? "near-flow" : snapshot ? "near-selected-flow" : "near", ms, checked, zError, uvError, colorError);
+        ocean ? (distant ? "ocean-far" : "ocean-near") : distant ? "far" : flowing ? "near-flow" : snapshot ? "near-selected-flow" : "near", ms, checked, zError, uvError, colorError);
     Require(checked >= (distant ? 12u : 100u) && zError < .0001f && uvError < .0001f && colorError < .0001f,
         "GL geometry/UV/color source oracle");
 }
@@ -482,11 +531,16 @@ static void CheckState(RealtimeEnvironment& env) {
     const auto before = snapshot();
     env.DrawWater(820, -1880);
     Require(before == snapshot(), "water GL state/program/texture-matrix restoration");
+    RealtimeSeaBedGeometry bed;
+    const std::array blocks{RealtimeWaterBlock{0,6}};
+    Require(RealtimeEnvironment::BuildSeaBed(blocks,-2990,250,0,bed),"state seabed build");
+    env.DrawSeaBed(bed);
+    Require(before == snapshot(),"seabed GL state/program/texture-matrix restoration");
     glPopMatrix();
     env.EndWorld();
     glMatrixMode(GL_MODELVIEW); glActiveTexture(GL_TEXTURE0);
     Require(glGetError() == GL_NO_ERROR, "water state GL errors");
-    std::printf("water-state restored-values=%zu\n", before.size());
+    std::printf("water-state restored-values=%zu seabed-state-restored=%zu\n", before.size(),before.size());
 }
 
 static void CheckPixels(RealtimeEnvironment& env) {
@@ -564,6 +618,148 @@ static void Capture(const char* directory, const char* name, const std::vector<u
     for (int y = kHeight-1; y >= 0; --y) for (int x = 0; x < kWidth; ++x)
         Require(std::fwrite(&pixels[(y*kWidth+x)*4], 1, 3, f) == 3, "capture write");
     Require(std::fclose(f) == 0, "capture close");
+}
+
+static void CheckSeaBedGpu(RealtimeEnvironment& env, const char* output) {
+    RealtimeWaterState sourceStartup{}; sourceStartup.gameMs=1700;
+    Require(env.SetWaterState(sourceStartup),"seabed captures use actual zero-flow startup, not preceding residual-flow fixture");
+    size_t checked = 0;
+    float worst = 0;
+    glViewport(0,0,kWidth,kHeight);
+    // Actual immediate-mode output versus exact-rational source fixtures,
+    // including source winding/indices, static color, and near/far UV geometry.
+    for (const auto& ref : water_oracle::seaBedFixtures) {
+        RealtimeSeaBedGeometry bed;
+        const std::array blocks{RealtimeWaterBlock{int16_t(ref.x),int16_t(ref.y)}};
+        Require(env.BuildSeaBed(blocks,ref.cx,ref.cy,ref.area,bed),"seabed feedback build");
+        const float left=ref.x*500-3001, bottom=ref.y*500-3001;
+        glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(left,left+502,bottom,bottom+502,-200,200);
+        glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+        std::array<float,2048> feedback{};
+        glFeedbackBuffer(feedback.size(),GL_3D_COLOR_TEXTURE,feedback.data()); glRenderMode(GL_FEEDBACK);
+        env.DrawSeaBed(bed);
+        const int count=glRenderMode(GL_RENDER);
+        Require(count>=0,"seabed feedback capacity");
+        size_t offset=0, triangle=0;
+        constexpr int indices[]{0,1,2,3,1,2};
+        while (offset<size_t(count)) {
+            Require(feedback[offset++]==GL_POLYGON_TOKEN && feedback[offset++]==3,"seabed triangle topology");
+            for (int i=0;i<3;++i) {
+                const auto& v=ref.vertices.at((triangle/2)*4+indices[(triangle%2)*3+i]);
+                const float expected[]{(v.x-left)/502*kWidth,(v.y-bottom)/502*kHeight,.675f,
+                    80.f/255,80.f/255,80.f/255,1,v.u,v.v,0,1};
+                for (int field=0;field<11;++field) {
+                    const float error=std::abs(feedback[offset++]-expected[field]);
+                    worst=std::max(worst,error);
+                    Require(error<.001f,"seabed actual GL source geometry/color/UV oracle");
+                }
+                ++checked;
+            }
+            ++triangle;
+        }
+        Require(triangle==ref.vertices.size()/2,"seabed actual GL source triangle count");
+    }
+    // One real texel footprint, with source color (not water/timecyc RGB).
+    const auto& image=env.GetSeaBedImage();
+    size_t alphaZero=0,alphaPartial=0;
+    for (size_t i=3;i<image.rgba.size();i+=4) {
+        alphaZero+=image.rgba[i]==0; alphaPartial+=image.rgba[i]>0&&image.rgba[i]<255;
+    }
+    std::printf("seabed-asset name=%s size=%dx%d rgba-fnv=%016llx alpha-zero=%zu partial=%zu\n",
+        image.name,image.w,image.h,(unsigned long long)Hash(image.rgba),alphaZero,alphaPartial);
+    Require(std::strcmp(image.name,"seabd32")==0,"real seabed texture dictionary name");
+    Require(alphaZero==0 && alphaPartial==0,"installed seabed texture is opaque");
+    const std::array blocks{RealtimeWaterBlock{0,6}};
+    RealtimeSeaBedGeometry bed;
+    Require(env.BuildSeaBed(blocks,-2990,123.5f,0,bed),"seabed pixel build");
+    const float u=.16f,v=1.976f;
+    const auto texel = [&](int channel) {
+        const float tx=(u-std::floor(u))*image.w-.5f,ty=(v-std::floor(v))*image.h-.5f;
+        const int ix=int(std::floor(tx)),iy=int(std::floor(ty));
+        const auto at = [&](int x,int y) {
+            return image.rgba[(((y+image.h)%image.h)*image.w+(x+image.w)%image.w)*4+channel]/255.f;
+        };
+        return std::lerp(std::lerp(at(ix,iy),at(ix+1,iy),tx-ix),std::lerp(at(ix,iy+1),at(ix+1,iy+1),tx-ix),ty-iy);
+    };
+    glViewport(0,0,1,1);
+    glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(-2991,-2989,122.5,124.5,0,3000);
+    glMatrixMode(GL_MODELVIEW);
+    const auto& params=env.GetParams();
+    int pixelWorst=0;
+    for (float eyeDepth : {20.f,70.f,(params.fogStart+params.farClip)*.5f,params.farClip+2}) {
+        glLoadIdentity(); glTranslatef(0,0,70-eyeDepth);
+        glDepthMask(GL_TRUE); glClearDepth(1); glClearColor(.2f,.3f,.4f,.5f);
+        glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+        std::array<unsigned char,4> initial{},pixel{};
+        glReadPixels(0,0,1,1,GL_RGBA,GL_UNSIGNED_BYTE,initial.data());
+        glDepthMask(GL_FALSE); // caller state must not disable the source floor depth writes
+        env.DrawSeaBed(bed);
+        glReadPixels(0,0,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel.data());
+        const float fog=std::clamp((params.farClip-eyeDepth)/(params.farClip-params.fogStart),0.f,1.f);
+        for (int c=0;c<4;++c) {
+            const int expected=c==3 ? 255 : int(std::round(std::lerp(params.skyBottom[c],80.f/255*texel(c),fog)*255));
+            pixelWorst=std::max(pixelWorst,std::abs(int(pixel[c])-expected));
+            Require(std::abs(int(pixel[c])-expected)<=2,"seabed real TXD/constant-RGBA/fog pixel oracle");
+        }
+        GLfloat depth=0; glReadPixels(0,0,1,1,GL_DEPTH_COMPONENT,GL_FLOAT,&depth);
+        Require(std::abs(depth-eyeDepth/3000)<2.e-7f,"seabed writes original -70 plane depth");
+        GLboolean mask=GL_TRUE; glGetBooleanv(GL_DEPTH_WRITEMASK,&mask); Require(!mask,"seabed restores depth write mask");
+        glDepthMask(GL_TRUE); glClearDepth(0); glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+        env.DrawSeaBed(bed);
+        glReadPixels(0,0,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel.data());
+        Require(pixel==initial,"seabed respects opaque world depth occlusion");
+    }
+    glClearDepth(1); glDepthMask(GL_TRUE);
+    std::printf("seabed-GL fixture-vertices=%zu max-feedback-error=%g max-pixel-byte-error=%d TXD/alpha/fog/depth/occlusion-ok\n",checked,worst,pixelWorst);
+    // Actual water.dat at the west ocean boundary; no fabricated beach mesh.
+    // Only render views where the source floor exists. The source floor does
+    // not move at the water surface boundary; underwater post-FX are separate.
+    for (int view=0;view<4;++view) {
+        Camera camera;
+        camera.x=-2990; camera.y=123.5f; camera.yaw=0; camera.pitch=-1.4f;
+        camera.z=view==0?4: view==1?100: view==2?-2:-71;
+        if (view==3) camera.pitch=1.4f; // source cullNONE: underside is visible
+        const auto render = [&](bool seaBed,int area) {
+            camera.Apply(kWidth,kHeight,params.farClip);
+            glDepthMask(GL_TRUE); glClearColor(.2f,.3f,.4f,1); glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+            env.DrawSky(camera.x,camera.y,camera.z);
+            if (seaBed) Require(env.DrawSeaBed(camera.x,camera.y,area),"seabed actual perspective/frustum/area");
+            env.DrawWater(camera.x,camera.y);
+            glFinish(); return Pixels();
+        };
+        const auto baseline=render(false,0), actual=render(true,0), repeated=render(true,0), hidden=render(true,1), area5=render(true,5);
+        Require(actual==repeated && hidden==baseline && area5==actual,"seabed stable presentation and source area gate");
+        // Independent visibility coverage oracle: submit a generous complete
+        // 9x9 block grid (one block per call avoids the source list's 70 cap),
+        // letting GL clip it. It must reproduce the frustum-scanned floor.
+        // This tests actual pixels, not a second copy of the hull scanner.
+        camera.Apply(kWidth,kHeight,params.farClip);
+        glDepthMask(GL_TRUE); glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+        env.DrawSky(camera.x,camera.y,camera.z);
+        for (int bx=-4;bx<=4;++bx) for (int by=2;by<=10;++by) {
+            const std::array candidate{RealtimeWaterBlock{int16_t(bx),int16_t(by)}};
+            RealtimeSeaBedGeometry full;
+            Require(env.BuildSeaBed(candidate,camera.x,camera.y,0,full),"independent full-grid visibility oracle");
+            env.DrawSeaBed(full);
+        }
+        env.DrawWater(camera.x,camera.y);
+        Require(actual==Pixels(),"frustum-scanned seabed pixels equal independent unculled block coverage");
+        size_t changed=0;
+        for (size_t i=0;i<actual.size();i+=4) changed+=!std::equal(actual.begin()+i,actual.begin()+i+3,baseline.begin()+i);
+        Require(changed>100,"real ocean boundary seabed pass changes pixels");
+        auto state=env.GetWaterState(); state.gameMs+=1700; Require(env.SetWaterState(state),"seabed independent clock");
+        // Compare the bed-only pass at fixed view to avoid surface-wave changes.
+        camera.Apply(kWidth,kHeight,params.farClip); glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+        Require(env.DrawSeaBed(camera.x,camera.y),"bed only time A"); const auto a=Pixels();
+        state.gameMs+=1700; Require(env.SetWaterState(state),"seabed independent second clock");
+        glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT); Require(env.DrawSeaBed(camera.x,camera.y),"bed only time B");
+        Require(a==Pixels(),"seabed remains static across real game-time changes");
+        const char* names[]{"seabed-close","seabed-far","seabed-underwater","seabed-underside"};
+        Capture(output,names[view],actual);
+        std::printf("seabed-boundary %s camera-z=%g changed=%zu fnv=%016llx same-clock/area0/area5/hidden-area/static-floor-ok\n",
+            names[view],camera.z,changed,(unsigned long long)Hash(actual));
+    }
+    Require(glGetError()==GL_NO_ERROR,"seabed GL final error");
 }
 static void CheckTriangles(RealtimeEnvironment& env, const char* output) {
     int bodies = 0;
@@ -781,19 +977,23 @@ static void CheckShore(RealtimeEnvironment& env, const WorldShotScene& scene, co
         camera.z = close ? 4 : 55;
         camera.yaw = close ? 1.570796327f : std::atan2(120.f, 90.f);
         camera.pitch = close ? -.12f : -std::atan2(55.f, 150.f);
-        auto render = [&](uint32_t ms, bool water) {
+        auto render = [&](uint32_t ms, bool water, bool seaBed = true) {
             auto state = RealtimeWaterState{}; state.gameMs = ms;
             Require(env.SetWaterState(state), "render explicit time");
             camera.Apply(kWidth, kHeight, env.GetParams().farClip);
             glDepthMask(GL_TRUE); glClearColor(0, 0, 0, 1); glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             env.DrawSky(camera.x, camera.y, camera.z);
             env.BeginWorld(); gpu.Draw(scene); env.EndWorld();
-            if (water) env.DrawWater(camera.x, camera.y);
+            if (water) {
+                if (seaBed) Require(env.DrawSeaBed(camera.x,camera.y),"shore seabed source pass");
+                env.DrawWater(camera.x, camera.y);
+            }
             glFinish();
             Require(glGetError() == GL_NO_ERROR, "shore GL errors");
             return Pixels();
         };
         const auto baseline = render(0, false), first = render(0, true), second = render(1700, true), repeat = render(1700, true);
+        Require(second==render(1700,true,false),"pier shore unchanged: no source seabed beneath interior blocks");
         Require(second == repeat, "game-clock deterministic render");
         size_t coverage = 0, changed = 0;
         for (size_t p = 0; p < first.size(); p += 4) {
@@ -808,15 +1008,155 @@ static void CheckShore(RealtimeEnvironment& env, const WorldShotScene& scene, co
         Capture(output, close ? "close-1700" : "far-1700", second);
     }
 }
+static void CheckPerformance(RealtimeEnvironment& env, WorldShotScene& scene) {
+    constexpr int width=1280,height=720, modes=5;
+    const char* names[]{"before-authored", "after-convenience", "bed-only", "ocean-only", "after-replayed"};
+    using Clock=std::chrono::steady_clock;
+    const auto ms=[](auto a,auto b) { return std::chrono::duration<double,std::milli>(b-a).count(); };
+    RealtimeWaterState state{}; state.gameMs=1700;
+    Require(env.SetWaterState(state),"performance frozen source clock");
+    for (int view=0;view<3;++view) {
+        const char* label=view==0 ? "cj" : view==1 ? "water" : "boundary";
+        Camera camera;
+        if (view==0) {
+            // Production idle follow-camera: unoccluded 4.6m arm, .27 pitch,
+            // source-COL ground from the supplied production log. No actor
+            // animation or streaming work enters this environment-only A/B.
+            camera.x=1600-4.6f*std::cos(-1.43f)*std::cos(.27f);
+            camera.y=-1700-4.6f*std::sin(-1.43f)*std::cos(.27f);
+            camera.z=27.303447723f+1.15f+4.6f*std::sin(.27f);
+            camera.yaw=-1.43f; camera.pitch=-.27f;
+        } else {
+            camera.x=view==1 ? 820 : -2990; camera.y=view==1 ? -1880 : 123.5f;
+            camera.z=view==1 ? 6 : 20; // production free-camera yaw/pitch defaults
+            char error[512]{}; E2EPagerFrame frame{};
+            scene={};
+            Require(StreamPager_Update(camera.x,camera.y,camera.z,scene,frame,error,sizeof(error)),error);
+        }
+        GpuScene gpu; Require(gpu.Upload(scene),"performance actual production GpuScene upload");
+        camera.Apply(width,height,std::max(1600.f,env.GetParams().farClip));
+        std::array<RealtimeWaterBlock,70> blocks{}; size_t count=0;
+        Require(env.ScanOutsideWaterBlocks(camera.x,camera.y,blocks,count),"performance actual block scan");
+        const auto span=std::span{blocks.data(),count};
+        RealtimeSeaBedGeometry bed;
+        Require(env.BuildSeaBed(span,camera.x,camera.y,0,bed),"performance source geometry");
+        GLfloat projection[16]; glGetFloatv(GL_PROJECTION_MATRIX,projection);
+        std::printf("water-perf-view %s drawable=%dx%d camera=%.6f,%.6f,%.6f yaw=%.6f pitch=%.6f world-tris=%d textures=%zu timecycFar=%g projectionFar=%.6f blocks=%zu seabed-vertices=%zu seabed-tris=%zu list=",
+            label,width,height,camera.x,camera.y,camera.z,camera.yaw,camera.pitch,scene.stats.triangles,scene.images.size(),
+            env.GetParams().farClip,double(projection[14])/(double(projection[10])+1),count,bed.size,bed.size/2);
+        for (auto b:span) std::printf("(%d,%d)",b.x,b.y);
+        std::puts("");
+        const auto pass=[&](int mode) {
+            if (mode==1 || mode==2) Require(env.DrawSeaBed(camera.x,camera.y),"performance convenience bed");
+            else if (mode==4) env.DrawSeaBed(bed);
+            if (mode==1 || mode==3) env.DrawWater(camera.x,camera.y,false);
+            else env.DrawWater(camera.x,camera.y,false,mode==4 ? span : std::span<const RealtimeWaterBlock>{});
+        };
+        const auto world=[&] {
+            camera.Apply(width,height,std::max(1600.f,env.GetParams().farClip));
+            glDepthMask(GL_TRUE); glClearColor(0,0,0,1); glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+            env.DrawSky(camera.x,camera.y,camera.z);
+            env.BeginWorld(); gpu.Render(); env.EndWorld(); // production immutable display-list chunks
+        };
+        const auto pixels=[&] {
+            std::vector<unsigned char> p(width*height*4);
+            glReadPixels(0,0,width,height,GL_RGBA,GL_UNSIGNED_BYTE,p.data()); return p;
+        };
+        const auto depths=[&] {
+            std::vector<float> d(width*height); glReadPixels(0,0,width,height,GL_DEPTH_COMPONENT,GL_FLOAT,d.data()); return d;
+        };
+        std::array<std::vector<unsigned char>,modes> images;
+        std::vector<float> afterDepth;
+        GLuint query; glGenQueries(1,&query);
+        for (int mode=0;mode<modes;++mode) {
+            world(); pass(mode); glFinish(); images[mode]=pixels();
+            if (mode==1) afterDepth=depths();
+            if (mode==4) Require(afterDepth==depths(),"replayed/convenience source depth exact");
+            world(); pass(mode); glFinish(); Require(images[mode]==pixels(),"performance frozen frame repeat exact");
+            glBeginQuery(GL_PRIMITIVES_GENERATED,query); pass(mode); glEndQuery(GL_PRIMITIVES_GENERATED);
+            GLuint primitives=0; glGetQueryObjectuiv(query,GL_QUERY_RESULT,&primitives);
+            size_t changed=0;
+            for (size_t i=0;i<images[mode].size();i+=4)
+                changed+=!std::equal(images[mode].begin()+i,images[mode].begin()+i+3,images[0].begin()+i);
+            std::printf("water-perf-output %s mode=%s input-primitives=%u changed-vs-before=%zu rgba-fnv=%016llx\n",
+                label,names[mode],primitives,changed,(unsigned long long)Hash(images[mode]));
+        }
+        Require(images[1]==images[4],"replayed/convenience source pixels exact");
+        glDeleteQueries(1,&query); glGenQueries(1,&query); // query objects retain their first target
+        Require(glGetError()==GL_NO_ERROR,"performance geometry/capture GL errors");
+        // Microbenchmarks exclude pending GPU work; separately quantify the
+        // two matrix reads, entire scanner, and CPU geometry construction.
+        glFinish(); size_t checksum=0;
+        for (int operation=0;operation<3;++operation) {
+            const auto start=Clock::now();
+            for (int i=0;i<20000;++i) {
+                if (operation==0) { GLfloat p[16],m[16]; glGetFloatv(GL_PROJECTION_MATRIX,p); glGetFloatv(GL_MODELVIEW_MATRIX,m); }
+                else if (operation==1) { size_t n=0; Require(env.ScanOutsideWaterBlocks(camera.x,camera.y,blocks,n),"timed scan"); checksum+=n; }
+                else { RealtimeSeaBedGeometry g; Require(env.BuildSeaBed(span,camera.x,camera.y,0,g),"timed build"); checksum+=g.size; }
+            }
+            std::printf("water-perf-micro %s operation=%s us=%.6f checksum=%zu\n",label,
+                operation==0 ? "two-matrix-queries" : operation==1 ? "scan-including-queries" : "CPU-build",ms(start,Clock::now())*1000/20000,checksum);
+        }
+        for (int i=0;i<100;++i) { world(); pass(i%modes); glFinish(); }
+        struct Timing { double wall=0,submit=0,gpu=0; };
+        std::array<std::vector<double>,modes> rounds;
+        // Eight warmed interleaved rounds, reversing/rotating mode order.
+        // Every frame is freshly drawn, clock and all scene/camera state fixed.
+        for (int round=0;round<8;++round) for (int slot=0;slot<modes;++slot) {
+            const int mode=(round+(round%2 ? modes-1-slot : slot))%modes;
+            Timing sum;
+            for (int i=0;i<16;++i) {
+                glFinish(); const auto start=Clock::now();
+                glBeginQuery(GL_TIME_ELAPSED,query);
+                world(); const auto beforePass=Clock::now(); pass(mode); const auto submitted=Clock::now();
+                glEndQuery(GL_TIME_ELAPSED); glFinish(); const auto end=Clock::now();
+                GLuint64 elapsed=0; glGetQueryObjectui64v(query,GL_QUERY_RESULT,&elapsed);
+                sum.wall+=ms(start,end); sum.submit+=ms(beforePass,submitted); sum.gpu+=double(elapsed)/1.e6;
+            }
+            rounds[mode].push_back(sum.wall/16);
+            std::printf("water-perf-round %s round=%d mode=%s frame-ms=%.6f pass-submit-ms=%.6f gpu-ms=%.6f\n",
+                label,round,names[mode],sum.wall/16,sum.submit/16,sum.gpu/16);
+        }
+        for (int mode=0;mode<modes;++mode) {
+            auto ordered=rounds[mode]; std::sort(ordered.begin(),ordered.end());
+            std::printf("water-perf-summary %s mode=%s frames=128 mean-ms=%.6f median-round-ms=%.6f min-round-ms=%.6f max-round-ms=%.6f\n",
+                label,names[mode],std::accumulate(ordered.begin(),ordered.end(),0.)/ordered.size(),
+                (ordered[3]+ordered[4])*.5,ordered.front(),ordered.back());
+        }
+        // Isolate the pass from queued production world work. glGet* may wait
+        // for preceding driver work; that wait is not CPU water-generation
+        // cost. Finish the identical world before starting each pass timer.
+        // Interleave modes every frame here to control short-term load drift.
+        for (int round=0;round<8;++round) {
+            std::array<Timing,modes> totals{};
+            for (int frame=0;frame<8;++frame) for (int slot=0;slot<modes;++slot) {
+                const int mode=(round+(frame%2 ? modes-1-slot : slot))%modes;
+                world(); glFinish();
+                const auto start=Clock::now(); glBeginQuery(GL_TIME_ELAPSED,query);
+                pass(mode); const auto submitted=Clock::now();
+                glEndQuery(GL_TIME_ELAPSED); glFinish(); const auto end=Clock::now();
+                GLuint64 elapsed=0; glGetQueryObjectui64v(query,GL_QUERY_RESULT,&elapsed);
+                totals[mode].wall+=ms(start,end); totals[mode].submit+=ms(start,submitted); totals[mode].gpu+=double(elapsed)/1.e6;
+            }
+            for (int mode=0;mode<modes;++mode) std::printf(
+                "water-perf-isolated %s round=%d mode=%s wall-ms=%.6f submit-ms=%.6f gpu-ms=%.6f\n",
+                label,round,names[mode],totals[mode].wall/8,totals[mode].submit/8,totals[mode].gpu/8);
+        }
+        glDeleteQueries(1,&query);
+        Require(glGetError()==GL_NO_ERROR,"performance GL errors");
+    }
+    std::puts("water-perf-ok same-context/production-world/1280x720/frozen-clock/8-interleaved-rounds/finish/GPU-timer");
+}
 } // namespace
 
 int main(int argc, char** argv) {
-    Require(argc == 3, "usage: probe game-dir artifact-dir");
+    const bool performance=argc==4 && std::strcmp(argv[3],"--perf")==0;
+    Require(argc == 3 || performance, "usage: probe game-dir artifact-dir [--perf]");
     char error[512]{};
-    CheckOffline(argv[1]);
+    if (!performance) CheckOffline(argv[1]);
     E2ELoadInfo load{};
     Pager pager;
-    Require(StreamPager_Init(argv[1], load, error, sizeof(error), {true, 600, 4096}), error);
+    Require(StreamPager_Init(argv[1], load, error, sizeof(error), {true, performance ? 900.f : 600.f, 4096}), error);
     auto* savedDictionary = rw::TexDictionary::getCurrent();
     RealtimeEnvironment env;
     Require(env.Load(argv[1], error, sizeof(error)), error);
@@ -826,13 +1166,16 @@ int main(int argc, char** argv) {
         (unsigned long long)Hash(image.rgba), env.GetWaterData().rows, env.GetWaterTriangleCount());
     Require(std::strcmp(image.name, "waterclear256") == 0 && image.w > 0 && image.h > 0, "actual particle water texture");
     Require(env.GetWaterTriangleCount() == 604, "authored visibility flags");
-    CheckOracle(env);
-    CheckFlow(env);
-    CheckNearest(env.GetWaterData());
-    CheckFlowTicks(env.GetWaterData());
+    if (!performance) {
+        CheckSeaBedCpu(env);
+        CheckOracle(env);
+        CheckFlow(env);
+        CheckNearest(env.GetWaterData());
+        CheckFlowTicks(env.GetWaterData());
+    }
     WorldShotScene scene{};
     E2EPagerFrame frame{};
-    Require(StreamPager_Update(836, -1866, 0, scene, frame, error, sizeof(error)), error);
+    Require(StreamPager_Update(performance ? 1600 : 836, performance ? -1700 : -1866, performance ? 70 : 0, scene, frame, error, sizeof(error)), error);
     Require(!scene.meshes.empty() && Hash(image.rgba) != 0, "owned texture survives pager dictionary churn");
     EGLDisplay display = eglGetPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
     Require(display != EGL_NO_DISPLAY && eglInitialize(display, nullptr, nullptr), "EGL initialize");
@@ -841,13 +1184,15 @@ int main(int argc, char** argv) {
         EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8, EGL_DEPTH_SIZE, 24, EGL_STENCIL_SIZE, 8, EGL_NONE};
     EGLConfig config{}; EGLint count{};
     Require(eglChooseConfig(display, attributes, &config, 1, &count) && count == 1, "EGL config");
-    const EGLint surfaceAttributes[]{EGL_WIDTH, kWidth, EGL_HEIGHT, kHeight, EGL_NONE};
+    const EGLint surfaceAttributes[]{EGL_WIDTH, performance ? 1280 : kWidth, EGL_HEIGHT, performance ? 720 : kHeight, EGL_NONE};
     const auto surface = eglCreatePbufferSurface(display, config, surfaceAttributes);
     const auto context = eglCreateContext(display, config, EGL_NO_CONTEXT, nullptr);
     Require(eglMakeCurrent(display, surface, surface, context), "EGL current");
     std::printf("water-GL version=%s renderer=%s\n", glGetString(GL_VERSION), glGetString(GL_RENDERER));
     {
         CheckUpload(env, error, sizeof(error));
+        if (performance) CheckPerformance(env,scene);
+        else {
         GpuScene gpu;
         Require(gpu.Upload(scene), "shore world GPU upload");
         glDisable(GL_DITHER);
@@ -858,9 +1203,15 @@ int main(int argc, char** argv) {
         CheckFeedback(env, 1700, false, true);
         CheckState(env);
         CheckPixels(env);
+        CheckFeedback(env,0,false,false,nullptr,true);
+        CheckFeedback(env,1700,false,false,nullptr,true);
+        CheckFeedback(env,0,true,false,nullptr,true);
+        CheckFeedback(env,1700,true,false,nullptr,true);
         CheckTriangles(env, argv[2]);
         CheckSelectedFlowGpu(env, argv[2]);
+        CheckSeaBedGpu(env, argv[2]);
         CheckShore(env, scene, gpu, argv[2]);
+        }
         env.ReleaseGpu();
     }
     eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);

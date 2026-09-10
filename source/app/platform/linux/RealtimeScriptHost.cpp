@@ -1,4 +1,5 @@
 #include "app/platform/linux/RealtimeScriptHost.h"
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <filesystem>
@@ -41,15 +42,80 @@ bool RealtimeScriptHost::InitializeBeforeWorker(const char* gameDir, std::string
     if (!m_Gameplay.Initialize(gameDir, error, RealtimeGameplayModel::BasePlayer)) return false;
     if (!m_Entities.LoadBeforeWorker(gameDir, error)) return false;
     if (!m_EntryExits.LoadBeforeWorker(gameDir, error)) return false;
+    if (!m_Garages.LoadBeforeWorker(gameDir, *m_CollisionContext, error)) return false;
+    std::vector<NativePlacementOverride> placements;
+    for (const auto& door : m_Garages.Doors()) {
+        if (!door.RequiresDynamicPublication) continue;
+        const auto* garage = door.Garage ? m_Garages.Resolve(*door.Garage) : nullptr;
+        // Early SCM world queries observe InitDoorsAtStart, before the first
+        // common garage update. Door metadata may already describe that update.
+        placements.push_back({NativePlacementIdentity::From(door.Placement), door.SourcePose.Position,
+                              door.SourcePose.Basis, garage ? bool(garage->Flags & 0x40) : door.CollisionEnabled});
+    }
+    m_InitialPlacementOverrides = std::make_shared<const NativePlacementOverrides>(std::move(placements));
     m_Initialized = true;
     error.clear(); return true;
 }
+bool RealtimeScriptHost::PrepareInitialGarageWorldBeforeWorker(std::string& error) try {
+    const auto root = m_Gameplay.State().PedRoot;
+    if (!m_Initialized || m_Sealed || m_Loader || m_PendingLoad || !ResolvePed(PedRef()) ||
+        !Finite({root.X, root.Y, root.Z}) || m_Gameplay.State().Ticks != 0 || !m_LoadedScene || !m_Publication.Scene ||
+        m_Publication.Center != *m_LoadedScene || !m_Publication.SourceCollision ||
+        m_Publication.Overrides != m_InitialPlacementOverrides ||
+        m_Publication.SourceCollision->Overrides != m_InitialPlacementOverrides || m_Garages.m_LastFrame) {
+        error = "initial garage world preparation requires the startup player/world before sealing or garage Tick";
+        return false;
+    }
+    auto entries = std::vector<NativePlacementOverride>(m_InitialPlacementOverrides->Entries().begin(), m_InitialPlacementOverrides->Entries().end());
+    bool changed = false;
+    for (const auto& door : m_Garages.Doors()) {
+        if (!door.Garage) continue;
+        const auto* garage = m_Garages.Resolve(*door.Garage);
+        if (!garage) { error = "initial garage world has an unresolved door owner"; return false; }
+        const auto pose = NativeGarages::DoorPose(*garage, door);
+        const auto* published = m_InitialPlacementOverrides->Find(door.Placement);
+        const auto rendered = published ? NativeGarageMatrix{published->Position, published->Basis} : door.Authored;
+        if (pose != rendered) {
+            error = "initial garage world preparation requires unchanged rendered door poses";
+            return false;
+        }
+        const bool collision = NativeGarages::UpdateCollisionFlags(*garage) & 0x40;
+        if (collision == (published ? published->CollisionEnabled : true)) continue;
+        changed = true;
+        const auto identity = NativePlacementIdentity::From(door.Placement);
+        const auto it = std::ranges::find_if(entries, [&](const auto& entry) { return entry.Identity == identity; });
+        if (it != entries.end()) it->CollisionEnabled = collision;
+        else entries.push_back({identity, pose.Position, pose.Basis, collision});
+    }
+    if (!changed) { m_InitialGarageWorldPrepared = true; error.clear(); return true; }
+    if (m_InitialGarageWorldPrepared) { error = "initial garage world was already prepared with different collision state"; return false; }
+    auto overrides = std::make_shared<const NativePlacementOverrides>(std::move(entries));
+    auto snapshot = std::make_shared<NativeCollisionSnapshot>();
+    auto world = std::make_shared<RealtimeGameplayWorld>();
+    const auto p = m_Publication.Center;
+    if (!m_CollisionContext->Snapshot(p.X, p.Y, *snapshot, error, overrides) || !world->Rebuild(*snapshot, error)) return false;
+    if (!world->TriangleCount() && !world->SphereCount() && !world->BoxCount()) {
+        error = "prepared garage world has no source COL primitives"; return false;
+    }
+    // All allocating/fallible work precedes the single main-thread handoff.
+    // Scene reuse is valid only because every effective pose was checked above.
+    auto publication = m_Publication;
+    publication.Overrides = overrides;
+    publication.SourceCollision = std::move(snapshot);
+    publication.Collision = world;
+    m_Publication = std::move(publication);
+    m_World = std::move(world);
+    m_InitialPlacementOverrides = std::move(overrides);
+    m_InitialGarageWorldPrepared = true;
+    ++m_WorldRevision;
+    error.clear(); return true;
+} catch (const std::exception& e) { error = e.what(); return false; }
 void RealtimeScriptHost::SetLiveWorldLoader(WorldLoader loader, CancelLoad cancel) {
     assert(!m_PendingLoad);
     assert(!loader || cancel); // every asynchronous owner has cancellation
     m_Loader = std::move(loader); m_Cancel = std::move(cancel);
 }
-void RealtimeScriptHost::SealStartup() { m_Sealed = true; m_EntryExits.SealStartup(); }
+void RealtimeScriptHost::SealStartup() { m_Sealed = true; m_EntryExits.SealStartup(); m_Garages.SealStartup(); }
 NativeScriptResult RealtimeScriptHost::RunPass(std::size_t quota) {
     if (!m_Initialized) return {NativeScriptStatus::Error, 0, 0, 0, "script host not initialized"};
     return m_Session.RunPass(*this, quota);
@@ -68,7 +134,7 @@ std::optional<NativeScriptServiceResult> RealtimeScriptHost::Replay(const Realti
     if (m_Entities.OwnsRequest(event.Id)) return Error("service request ID already owned by property/radar service");
     for (const auto& old : m_Events) {
         if (old.Id != event.Id) continue;
-        if (old.Opcode != event.Opcode || old.Arguments != event.Arguments || old.Index != event.Index || old.StateArgument != event.StateArgument)
+        if (old.Opcode != event.Opcode || old.Arguments != event.Arguments || old.Index != event.Index || old.StateArgument != event.StateArgument || old.Name != event.Name)
             return Error("service request ID reused with different command/arguments");
         return Ready();
     }
@@ -96,23 +162,25 @@ NativeScriptServiceResult RealtimeScriptHost::PublishWorld(const NativeScriptSce
         }
         else m_PendingLoad.reset();
         if (result.Status != NativeScriptServiceStatus::Ready) return result;
+        if (publication.Overrides != m_InitialPlacementOverrides) return Error("world loader placement snapshot mismatch");
     } else {
         if (m_Sealed) return Unsupported("startup sealed: collision/scene needs live worker world loader");
         char err[512]{};
         auto scene = std::make_shared<WorldShotScene>();
         const auto p = request.Position;
-        if (!StreamPager_Update(p.X, p.Y, p.Z, *scene, publication.Frame, err, sizeof(err))) return Error(err);
+        publication.Overrides = m_InitialPlacementOverrides;
+        if (!StreamPager_Update(p.X, p.Y, p.Z, *scene, publication.Frame, err, sizeof(err), publication.Overrides)) return Error(err);
         publication.Scene = std::move(scene); publication.Center = p;
     }
     if (!publication.Scene || publication.Center != request.Position || publication.Frame.instances <= 0 ||
         publication.Frame.tris <= 0 || publication.Scene->meshes.empty()) return Error("world loader did not supply requested resident scene");
     auto world = std::make_shared<RealtimeGameplayWorld>();
     std::string error;
-    NativeCollisionSnapshot snapshot;
+    auto snapshot = std::make_shared<NativeCollisionSnapshot>();
     // Pure owned data, including when a live loader supplies the render scene.
     // Never trust a callback's collision as a replacement for source residency.
-    if (!m_CollisionContext->Snapshot(request.Position.X, request.Position.Y, snapshot, error) ||
-        !world->Rebuild(snapshot, error)) return Error(error);
+    if (!m_CollisionContext->Snapshot(request.Position.X, request.Position.Y, *snapshot, error, publication.Overrides) ||
+        !world->Rebuild(*snapshot, error)) return Error(error);
     if (!world->TriangleCount() && !world->SphereCount() && !world->BoxCount())
         return Error("loaded region has no source COL primitives");
     float ground;
@@ -120,6 +188,7 @@ NativeScriptServiceResult RealtimeScriptHost::PublishWorld(const NativeScriptSce
     if (requireGround && !world->Ground(p.X, p.Y, p.Z + 1.0f, p.Z - 150.0f, ground))
         return Error("LOAD_SCENE has no actual resident ground at requested position");
     publication.Collision = world;
+    publication.SourceCollision = std::move(snapshot);
     m_World = std::move(world); m_Publication = std::move(publication); ++m_WorldRevision;
     return Ready();
 }
@@ -231,5 +300,15 @@ NativeScriptServiceResult RealtimeScriptHost::SetEntryExitFlag(const NativeScrip
     if (auto result = Replay(event)) return *result;
     const auto result = m_EntryExits.SetFlag(request);
     if (result.Status == NativeScriptServiceStatus::Ready) Commit(event);
+    return result;
+}
+NativeScriptServiceResult RealtimeScriptHost::DeactivateGarage(const NativeScriptGarageRequest& request) {
+    if (!m_Initialized) return Error("garage service requires initialized host");
+    if (m_PendingLoad) return Error("garage service cannot cross pending world request");
+    RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=0x02B9, .Name=request.Name};
+    if (auto result=Replay(event)) return *result;
+    if (const auto ref=m_Garages.Find(request.Name)) event.Reference=static_cast<int32>(ref->Index);
+    const auto result=m_Garages.Deactivate(request.Name);
+    if (result.Status==NativeScriptServiceStatus::Ready) Commit(event);
     return result;
 }

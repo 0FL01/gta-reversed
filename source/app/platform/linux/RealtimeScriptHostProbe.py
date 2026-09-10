@@ -38,12 +38,13 @@ def build_probe(name):
     subprocess.run(['ninja', '-C', str(build)] + [a for a in link if a.endswith('.cpp.o')], check=True)
     link[link.index('-o') + 1] = str(OUTPUT / name)
     names = [name]
-    for extra in ('NativeScriptEntities', 'NativeCollisionAssets', 'NativeEntryExits'):
+    for extra in ('NativeScriptEntities', 'NativeCollisionAssets', 'NativeEntryExits', 'NativeGarages', 'NativeGaragesRuntime'):
         if (SOURCE / (extra + '.cpp')).exists() and not any(a.endswith('/' + extra + '.cpp.o') for a in link):
             names.append(extra)
     if name == 'RealtimeScriptHostProbe':
         names.append('RealtimeScriptHostGpuProbe')
         names.append('NativeEntryExitsProbe')
+        names.append('NativeGaragesProbe')
     compile_commands = []
     for unit in names:
         obj = OUTPUT / (unit + '.o')
@@ -80,4 +81,4 @@ if __name__ == '__main__':
         (OUTPUT / (name + '.log')).write_text(result.stdout)
         print(result.stdout, end='')
         result.check_returncode()
-        assert 'host-probe failures=0 firstpass=53 mission-prefix=135 terminal=02B9@201129' in result.stdout
+        assert 'host-probe failures=0 firstpass=53 mission-prefix=516 terminal=0213@205545' in result.stdout

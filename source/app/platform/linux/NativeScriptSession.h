@@ -97,6 +97,10 @@ struct NativeScriptEntryExitFlagRequest {
     float X = 0, Y = 0, Radius = 0;
     std::int32_t Mask = 0, State = 0;
 };
+struct NativeScriptGarageRequest {
+    NativeScriptRequestId Id;
+    std::array<char, 8> Name{};
+};
 
 class NativeScriptServices {
 public:
@@ -121,6 +125,7 @@ public:
     virtual NativeScriptReferenceResult<NativeScriptBlipRef> CreateContactBlip(const NativeScriptContactBlipRequest&) { return {}; }
     virtual NativeScriptServiceResult SetBlipDisplay(const NativeScriptBlipDisplayRequest&) { return {}; }
     virtual NativeScriptServiceResult SetEntryExitFlag(const NativeScriptEntryExitFlagRequest&) { return {}; }
+    virtual NativeScriptServiceResult DeactivateGarage(const NativeScriptGarageRequest&) { return {}; }
 };
 
 enum class NativeScriptStatus { Advanced, BudgetYield, Waiting, Pending, Unsupported, Error };

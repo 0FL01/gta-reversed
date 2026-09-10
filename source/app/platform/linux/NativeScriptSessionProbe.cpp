@@ -96,6 +96,14 @@ struct MockServices final : NativeScriptServices {
     std::array<unsigned, 5> EntityCalls{}, EntityCompletions{};
     std::array<NativeScriptRequestId, 5> EntityIds{};
     NativeScriptEntryExitFlagRequest EntryExit;
+    NativeScriptGarageRequest Garage;
+    ServiceStatus GarageMode = ServiceStatus::Unsupported;
+    unsigned GarageCalls = 0;
+    NativeScriptServiceResult DeactivateGarage(const NativeScriptGarageRequest& r) override {
+        Garage=r; ++GarageCalls;
+        if (Throw) throw std::runtime_error("TEST-ONLY garage service exception");
+        return {GarageMode,"TEST-ONLY garage service"};
+    }
     NativeScriptServiceResult SetEntryExitFlag(const NativeScriptEntryExitFlagRequest& r) override {
         EntryExit = r; return EntityRespond(3, r.Id);
     }
@@ -1025,6 +1033,29 @@ void EntryExitBarriers() {
     Bytes infinite; Op(infinite, 0x09B4); F(infinite, std::numeric_limits<float>::infinity()); F(infinite, 0); F(infinite, 10); I16(infinite, 16384); I8(infinite, 0);
     RejectCode(infinite);
 }
+void GarageBarriers() {
+    Bytes code; Op(code,0x02B9); code.push_back(9);
+    const std::array<char,8> name{'f','i','x','t','u','r','e',0}; code.insert(code.end(),name.begin(),name.end());
+    NativeScriptSession session; MockServices services;
+    LoadFixture(session,services,code); const auto before=session.State();
+    services.GarageMode=ServiceStatus::Pending;
+    Check(session.Step(services).Status==Status::Pending && session.State()==before && services.Garage.Name==name,"02B9 TEST service typed text8 Pending atomic");
+    const auto id=services.Garage.Id;
+    Check(session.Step(services).Status==Status::Pending && services.Garage.Id==id && services.Garage.Name==name && session.State()==before,"02B9 Pending exact identity/name stable");
+    services.GarageMode=ServiceStatus::Ready;
+    Check(session.Step(services).Status==Status::Advanced && session.State().IP==FixtureCode+code.size() && session.State().Commands==before.Commands+1 && session.State().LastOutputWrite==before.LastOutputWrite && session.State().Condition==before.Condition,"02B9 Ready one instruction no compare/output mutation");
+    for (const auto status:{ServiceStatus::Error,ServiceStatus::Unsupported}) {
+        LoadFixture(session,services,code); const auto old=session.State(); services.GarageMode=status;
+        const auto result=session.Step(services);
+        Check(result.Status==(status==ServiceStatus::Error ? Status::Error : Status::Unsupported) && session.State()==old,"02B9 failure fully atomic");
+        const auto calls=services.GarageCalls;
+        Check(session.Step(services).Executed==0 && services.GarageCalls==calls,"02B9 terminal never repeats side effect");
+    }
+    LoadFixture(session,services,code); const auto old=session.State(); services.Throw=true;
+    Check(session.Step(services).Status==Status::Error && session.State()==old,"02B9 throwing service fully atomic");
+    for (std::size_t n=2;n<code.size();++n) RejectCode(Bytes(code.begin(),code.begin()+n));
+    auto bad=code; bad[2]=6; RejectCode(bad);
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1038,5 +1069,6 @@ int main(int argc, char** argv) {
     NewBarriers();
     EntityBarriers();
     EntryExitBarriers();
+    GarageBarriers();
     std::printf("native-script-probe PASS checks=%zu services=TEST-ONLY no-worldboot-claim\n", s_Checks);
 }

@@ -52,7 +52,11 @@ bool StreamPager_Init(const char* gameDir, E2ELoadInfo& info, char* err, std::si
 // Rebuilds `scene` (world-space soup, deterministic order) around the
 // camera ground position. False => err message (never silent world-ok).
 bool StreamPager_Update(float camX, float camY, float camZ, WorldShotScene& scene, E2EPagerFrame& frame,
-                        char* err, std::size_t errSize);
+                        char* err, std::size_t errSize,
+                        const std::shared_ptr<const NativePlacementOverrides>& overrides = {},
+                        std::vector<NativePlacementIdentity>* rendered = nullptr);
+// Overrides replace exact source rows before culling/placement. Optional rendered
+// identities correspond one-to-one with scene.meshes (owned diagnostic output).
 void StreamPager_Counters(int& sectorsLoaded, int& sectorsEvicted, int& modelsPeak, int& trisPeak);
 void StreamPager_Shutdown();
 // COPY of the actual pre-render-filter IPL population, including binary source

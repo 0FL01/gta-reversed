@@ -8,6 +8,7 @@
 #include "app/platform/linux/RealtimeStreaming.h"
 #include "app/platform/linux/NativePlayerAssets.h"
 #include "app/platform/linux/RealtimeScriptHost.h"
+#include "app/platform/linux/NativeGaragesRuntime.h"
 
 #ifndef GL_GLEXT_PROTOTYPES
 #define GL_GLEXT_PROTOTYPES
@@ -418,12 +419,14 @@ struct LiveWorld {
         cpu.Generation = 1;
         cpu.Frame = publication.Frame;
         cpu.Scene = *publication.Scene; // owned snapshot, no pager/RW parser or second BVH
+        cpu.Overrides = publication.Overrides;
+        cpu.SourceCollision = publication.SourceCollision;
         active->startupCollision = publication.Collision;
         return active->gpu.Upload(cpu.Scene);
     }
 
     void Start(bool collision) {
-        worker = std::make_unique<realtime_streaming::Worker>(collision, collisionContext);
+        worker = std::make_unique<realtime_streaming::Worker>(collision, collisionContext, active->cpu->Overrides);
     }
 
     // Call once, BEFORE Tick: physics and draw see exactly the same generation.
@@ -707,6 +710,7 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             stats.Empty, stats.Unsupported, collisionContext->Population.Instances.size(), collisionContext->Radius);
     }
     RealtimeScriptHost scriptHost(gameplay);
+    NativeGaragesRuntime garageRuntime(scriptHost.Garages(), gameplay);
     constexpr std::size_t scriptQuota = 256; // one bounded scheduler pass per presented frame
     if (newGame) {
         if (!scriptHost.InitializeBeforeWorker(gameDir, gameplayError, collisionContext)) {
@@ -719,6 +723,12 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
         }
         if (result.Status != NativeScriptStatus::Waiting || !gameplay.State().Ready || !scriptHost.World()) {
             std::printf("play-fail script startup has no presentable world/player at first yield\n");
+            return 1;
+        }
+        // Prepare the first common garage collision update without committing
+        // its flags yet. Upload this paired world before the real update below.
+        if (!scriptHost.PrepareInitialGarageWorldBeforeWorker(gameplayError)) {
+            std::printf("play-fail initial garage world: %s\n", gameplayError.c_str());
             return 1;
         }
         // Process the source zero-duration fade before the first presentation;
@@ -945,6 +955,13 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             }
         }
         if (newGame) {
+            const auto garageResult = garageRuntime.Tick(*world.active->cpu, {frames});
+            if (garageResult.Status != NativeScriptServiceStatus::Ready) {
+                std::printf("play-garage-terminal status=%s frame=%llu message=%s\n",
+                    garageResult.Status == NativeScriptServiceStatus::Unsupported ? "Unsupported" : "Error",
+                    static_cast<unsigned long long>(frames), garageResult.Message.c_str());
+                return 1;
+            }
             const auto& state = gameplay.State();
             auto& entities = scriptHost.Entities();
             NativeScriptPropertyInput propertyInput;
@@ -1043,6 +1060,12 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
                 scriptGpu.DrawActors(scriptHost.Entities().Actors(), GpuScene::ActorPass::Opaque);
             }
             environment.EndWorld();
+        }
+        // Current runtime is exterior area 0. Interior area routing remains an
+        // explicit transition dependency, never an invented seabed floor.
+        if (!environment.DrawSeaBed(camera.x, camera.y, 0)) {
+            std::printf("play-fail seabed camera\n");
+            return 1;
         }
         environment.DrawWater(camera.x, camera.y, false);
         if (gameplayEnabled) {

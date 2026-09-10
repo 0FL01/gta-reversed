@@ -5,6 +5,7 @@
 #include "app/platform/linux/NativeScriptSession.h"
 #include "app/platform/linux/NativeScriptEntities.h"
 #include "app/platform/linux/NativeEntryExits.h"
+#include "app/platform/linux/NativeGarages.h"
 #include "app/platform/linux/RealtimeGameplay.h"
 #include "app/platform/linux/StreamPager.h"
 #include <functional>
@@ -17,6 +18,8 @@ struct RealtimeScriptWorldPublication {
     NativeScriptPosition Center;
     E2EPagerFrame Frame;
     std::shared_ptr<const RealtimeGameplayWorld> Collision;
+    std::shared_ptr<const NativeCollisionSnapshot> SourceCollision;
+    std::shared_ptr<const NativePlacementOverrides> Overrides;
 };
 
 struct RealtimeScriptGroup {
@@ -32,6 +35,7 @@ struct RealtimeScriptHostEvent {
     std::uint16_t Opcode = 0;
     std::array<float, 4> Arguments{};
     std::int32_t Index = 0, Reference = -1, StateArgument = 0;
+    std::array<char, 8> Name{};
     RealtimeGameplayState Player{};
     RealtimeGameplayCamera Camera{};
 };
@@ -54,6 +58,12 @@ public:
     // once BEFORE launching the RW streaming worker. Pager lifecycle stays parent-owned.
     bool InitializeBeforeWorker(const char* gameDir, std::string& error,
         std::shared_ptr<const NativeCollisionContext> collision = {});
+    // After main53 has created the actual player, before world adoption/upload,
+    // SealStartup and the worker. Publishes expected first common-update COL;
+    // verifies unchanged render poses and never commits garage flags or a Tick.
+    // Idempotent before sealing if the expected placement state is unchanged.
+    // Failure leaves the publication, overrides and revision intact.
+    bool PrepareInitialGarageWorldBeforeWorker(std::string& error);
     // Install a worker handoff/poll callback under exclusive host ownership. Callback
     // must only hand off owned results; never parse on the GL/main thread.
     // SealStartup MUST precede launching the worker, even when no loader exists.
@@ -72,6 +82,8 @@ public:
     static constexpr const char* CollisionSource = "source COL triangles/spheres/oriented boxes; owned text+binary IPL residency";
     const RealtimeGameplayWorld* World() const { return m_World.get(); }
     const RealtimeScriptWorldPublication& Publication() const { return m_Publication; }
+    // Pass to CpuWorld::Build / Worker and return it with every live publication.
+    std::shared_ptr<const NativePlacementOverrides> InitialPlacementOverrides() const { return m_InitialPlacementOverrides; }
     std::uint64_t WorldRevision() const { return m_WorldRevision; }
     const std::vector<RealtimeScriptHostEvent>& Events() const { return m_Events; }
     const RealtimeGameplay* ResolvePed(NativeScriptPedRef ref) const;
@@ -80,6 +92,8 @@ public:
     const NativeScriptEntities& Entities() const { return m_Entities; }
     NativeEntryExits& EntryExits() { return m_EntryExits; }
     const NativeEntryExits& EntryExits() const { return m_EntryExits; }
+    NativeGarages& Garages() { return m_Garages; }
+    const NativeGarages& Garages() const { return m_Garages; }
     const RealtimeScriptPlayerInfo& PlayerInfo() const { return m_PlayerInfo; }
     // Parent supplies real collect-key edge/target/busy/global suppression and
     // unpaused frame counter. Balance/mission inputs are overwritten from owned
@@ -98,6 +112,7 @@ public:
     NativeScriptReferenceResult<NativeScriptBlipRef> CreateContactBlip(const NativeScriptContactBlipRequest&) override;
     NativeScriptServiceResult SetBlipDisplay(const NativeScriptBlipDisplayRequest&) override;
     NativeScriptServiceResult SetEntryExitFlag(const NativeScriptEntryExitFlagRequest&) override;
+    NativeScriptServiceResult DeactivateGarage(const NativeScriptGarageRequest&) override;
 
 private:
     NativeScriptServiceResult PublishWorld(const NativeScriptSceneRequest& request, bool requireGround = false);
@@ -111,7 +126,9 @@ private:
     NativeScriptEntities m_Entities;
     RealtimeScriptPlayerInfo m_PlayerInfo;
     NativeEntryExits m_EntryExits;
+    NativeGarages m_Garages;
     std::shared_ptr<const NativeCollisionContext> m_CollisionContext;
+    std::shared_ptr<const NativePlacementOverrides> m_InitialPlacementOverrides;
     std::shared_ptr<const RealtimeGameplayWorld> m_World;
     RealtimeScriptWorldPublication m_Publication;
     WorldLoader m_Loader;
@@ -127,5 +144,5 @@ private:
     bool m_PedActive = false;
     RealtimeScriptGroup m_Group;
     std::uint64_t m_WorldRevision = 0;
-    bool m_Initialized = false, m_Sealed = false;
+    bool m_Initialized = false, m_Sealed = false, m_InitialGarageWorldPrepared = false;
 };

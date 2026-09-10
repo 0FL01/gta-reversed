@@ -6,6 +6,7 @@
 
 #include <array>
 #include <cstddef>
+#include <span>
 
 struct RealtimeEnvironmentParams {
     float hour = 12.0f;
@@ -38,6 +39,23 @@ struct RealtimeWaterState {
 struct RealtimeWaterSample {
     float z = 0.0f, colorMult = 0.0f, glare = 0.0f;
     std::array<float, 3> normal{0, 0, 1};
+};
+
+struct RealtimeWaterBlock {
+    int16_t x = 0, y = 0;
+    bool operator==(const RealtimeWaterBlock&) const = default;
+};
+
+struct RealtimeSeaBedVertex {
+    float x = 0, y = 0, z = -70, u = 0, v = 0;
+    bool operator==(const RealtimeSeaBedVertex&) const = default;
+};
+
+struct RealtimeSeaBedGeometry {
+    // BlockHit admits 70 blocks; each emits at most four independent quads.
+    // Consecutive groups of four use original indices {0,1,2,3,1,2}.
+    std::array<RealtimeSeaBedVertex, 70 * 4 * 4> vertices{};
+    size_t size = 0;
 };
 
 struct RealtimeWaterFlowTick {
@@ -108,6 +126,28 @@ public:
     const WaterLevelData& GetWaterData() const { return m_Water; }
     int GetWaterTriangleCount() const { return m_WaterTriangles; }
     const WorldShotImage& GetWaterImage() const { return m_WaterImage; }
+    const WorldShotImage& GetSeaBedImage() const { return m_SeaBedImage; }
+    // RenderWater's actual ocean floor, NOT a floor for limited-depth polygons.
+    // Original seabed has no COL, clock, weather-color or wave dependency:
+    // Z=-70, RGBA={80,80,80,255}, local block UV*8. Fog uses current timecyc.
+    // Blocks are the ordered ScanThroughBlocks/BlockHit list, maximum 70.
+    static bool BuildSeaBed(std::span<const RealtimeWaterBlock> blocks, float cameraX,
+        float cameraY, int area, RealtimeSeaBedGeometry& out);
+    // Read-only capture of the same presentation scanner used by both passes.
+    static bool ScanOutsideWaterBlocks(float cameraX, float cameraY,
+        std::array<RealtimeWaterBlock,70>& blocks, size_t& count);
+    void DrawSeaBed(const RealtimeSeaBedGeometry& geometry) const;
+    // Convenience path derives the five source frustum points from the current
+    // rigid GL view + symmetric perspective projection, scans edge/ocean blocks
+    // in row order, then builds/draws the pass. False on unsupported/invalid view.
+    // Call after opaque objects, BEFORE DrawWater, once per presentation.
+    bool DrawSeaBed(float cameraX, float cameraY, int area = 0) const;
+    // Source water-level query's height rejection when wave parameters are
+    // requested, AFTER polygon containment and base-height interpolation.
+    // Authored bit 1 limits depth to six metres;
+    // neither it nor the +20m query ceiling changes the rendered surface/floor.
+    // This predicate is not a substitute for the full water/COL height query.
+    static bool WaterQueryHeightAllowed(uint32_t authoredFlags, float baseHeight, float queryZ);
     // Explicit simulation clock/weather/accumulated flow; never wall time.
     // Read-modify-write GetWaterState to retain Load's named-weather default.
     bool SetWaterState(const RealtimeWaterState& state);
@@ -124,7 +164,7 @@ public:
 
     // Caller installs the camera's projection/view first (far plane >= farClip),
     // clears color/depth, then DrawSky(camera), BeginWorld(), draws world lists,
-    // EndWorld(), BeginObjects(), draw actors, EndWorld(), DrawWater(). Scopes
+    // EndWorld(), BeginObjects(), draw actors, EndWorld(), DrawSeaBed(), DrawWater(). Scopes
     // must not nest; they restore compatibility state and the previous program.
     // GLSL 1.20 vertex inputs: normal; unlit material RGBA in glColor; base UV
     // in texcoord0; authored day/night RGBA in texcoord1/2; material ambient /
@@ -136,9 +176,14 @@ public:
     void EndWorld() const;
     void DrawWater() const;
     void DrawWater(float cameraX, float cameraY, bool interior = false) const;
+    // Explicit original BlockHit list, useful for source replay/orthographic
+    // probes. The three-argument presentation path scans the current frustum.
+    void DrawWater(float cameraX, float cameraY, bool interior,
+        std::span<const RealtimeWaterBlock> outsideBlocks) const;
 
     // Scope: timecyc ambient/directional lighting, sky-color dome, linear GL
-    // eye-depth fog, authored waterclear256 layers and water.dat waves/normals.
+    // eye-depth fog, authored waterclear256 layers, water.dat waves/normals,
+    // outside-world ocean water and the source seabd32 ocean-floor pass.
     // Not full SA parity: no clouds/sun sprites, weather transitions/boxes,
     // local object lighting/shadows, custom car env/specular lighting, underwater
     // effects, reflections/refraction, glare/wakes/foam or sorted transparency.
@@ -151,9 +196,11 @@ private:
     RealtimeEnvironmentParams m_Params{};
     WaterLevelData m_Water{};
     WorldShotImage m_WaterImage{}; // owned pixels; no RW objects survive Load
+    WorldShotImage m_SeaBedImage{};
     RealtimeWaterState m_WaterState{};
     RealtimeWaterFlow m_WaterFlow{};
     unsigned int m_WaterTexture = 0;
+    unsigned int m_SeaBedTexture = 0;
     unsigned int m_LightingProgram = 0;
     mutable int m_PreviousProgram = 0; // lighting scopes must not nest
     mutable bool m_LightingActive = false;

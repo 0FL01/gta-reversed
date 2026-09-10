@@ -42,7 +42,7 @@ static void AdvanceFlowUV(RealtimeWaterState& water) {
     }
 }
 
-static bool LoadWaterTexture(WorldShotImage& image, char* err, std::size_t errSize) {
+static bool LoadWaterTexture(WorldShotImage& image, WorldShotImage& seaBed, char* err, std::size_t errSize) {
     // Same NULL-platform plugin set as the other native asset loaders. Borrow
     // the shared engine; never shut it down or retain a dictionary across Load.
     if (rw::Engine::state == rw::Engine::Dead) {
@@ -90,6 +90,9 @@ static bool LoadWaterTexture(WorldShotImage& image, char* err, std::size_t errSi
     auto* texture = guard.owned->find("waterclear256");
     if (!texture || !TexSample_Decode(texture, image))
         return Fail(err, errSize, "water particle:waterclear256 decode");
+    texture = guard.owned->find("seabd32"); // CWaterLevel::LoadTextures, not "seab32"
+    if (!texture || !TexSample_Decode(texture, seaBed))
+        return Fail(err, errSize, "water particle:seabd32 decode");
     return true;
 }
 
@@ -113,7 +116,7 @@ RealtimeEnvironment::~RealtimeEnvironment() {
 
 bool RealtimeEnvironment::Load(const char* gameDir, char* err, std::size_t errSize,
                                float hour, const char* weather) {
-    assert(!m_WaterTexture && !m_LightingProgram && "ReleaseGpu before reloading environment");
+    assert(!m_WaterTexture && !m_SeaBedTexture && !m_LightingProgram && "ReleaseGpu before reloading environment");
     m_Loaded = false;
     m_WaterTriangles = 0;
     if (!std::isfinite(hour) || hour < 0.0f || hour >= 24.0f) {
@@ -132,7 +135,7 @@ bool RealtimeEnvironment::Load(const char* gameDir, char* err, std::size_t errSi
     if (!WaterLevel_Load(gameDir, "data/water.dat", m_Water, err, errSize)) {
         return false;
     }
-    if (!LoadWaterTexture(m_WaterImage, err, errSize)) return false;
+    if (!LoadWaterTexture(m_WaterImage, m_SeaBedImage, err, errSize)) return false;
     m_WaterState = {};
     m_WaterFlow.Initialise(m_Water);
     // OriginalWeatherConstants wind table, read-only retail 94D510; CWeather
@@ -255,13 +258,17 @@ void main() {
     GLint unpackBuffer = 0;
     glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &unpackBuffer);
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-    glGenTextures(1, &m_WaterTexture);
-    glBindTexture(GL_TEXTURE_2D, m_WaterTexture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, m_WaterImage.w, m_WaterImage.h, 0, GL_RGBA, GL_UNSIGNED_BYTE, m_WaterImage.rgba.data());
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    const auto upload = [](GLuint& texture, const WorldShotImage& image) {
+        glGenTextures(1, &texture);
+        glBindTexture(GL_TEXTURE_2D, texture);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, image.w, image.h, 0, GL_RGBA, GL_UNSIGNED_BYTE, image.rgba.data());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    };
+    upload(m_WaterTexture, m_WaterImage);
+    upload(m_SeaBedTexture, m_SeaBedImage);
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, static_cast<GLuint>(unpackBuffer));
     glPopClientAttrib();
     glPopAttrib();
@@ -285,6 +292,160 @@ void RealtimeEnvironment::ReleaseGpu() {
         glDeleteTextures(1, &m_WaterTexture);
         m_WaterTexture = 0;
     }
+    if (m_SeaBedTexture) {
+        glDeleteTextures(1, &m_SeaBedTexture);
+        m_SeaBedTexture = 0;
+    }
+}
+
+bool RealtimeEnvironment::WaterQueryHeightAllowed(uint32_t flags, float height, float z) {
+    assert(std::isfinite(height) && std::isfinite(z));
+    // Retail quad 720456/720559, triangle 7207A1/7208BA. The limited-depth
+    // bit is bit 2 in CWaterPolygon, bit 1 in water.dat (AddWaterLevelQuad).
+    return !((flags & 2) && double(height) - 6.0 > double(z)) && double(height) + 20.0 >= double(z);
+}
+
+bool RealtimeEnvironment::BuildSeaBed(std::span<const RealtimeWaterBlock> blocks,
+    float cameraX, float cameraY, int area, RealtimeSeaBedGeometry& out) {
+    if (blocks.size() > 70 || !std::isfinite(cameraX) || !std::isfinite(cameraY)) return false;
+    out.size = 0;
+    if (area != 0 && area != 5) return true; // CGame::CanSeeWater
+    for (const auto block : blocks) {
+        // RenderWater retail 728B89..728D2A. Detail compares distance to the
+        // WHOLE block centre, even when only its 20m border strip is emitted.
+        const float dx = cameraX - float((double(block.x) + .5) * 500.0 - 3000.0);
+        const float dy = cameraY - float((double(block.y) + .5) * 500.0 - 3000.0);
+        const bool detailed = std::sqrt(float(double(dx) * dx + double(dy) * dy)) < 600.0f;
+        const auto segment = [&](float x0, float x1, float y0, float y1) {
+            // RenderSeaBedSegment 720EF0; RenderDetailedSeaBedSegment 7210A0.
+            // Fractional block bounds, NOT metres. Detailed step count is *2,
+            // not the water surface's 2m grid. Float stores match the x87 path.
+            const int nx = detailed ? std::max(1, int((double(x1) - x0) * 2.0)) : 1;
+            const int ny = detailed ? std::max(1, int((double(y1) - y0) * 2.0)) : 1;
+            const auto at = [](float a, float b, int i, int n) {
+                return float(double(i) * (double(b) - a) / double(n) + double(a));
+            };
+            for (int x = 0; x < nx; ++x) for (int y = 0; y < ny; ++y) {
+                const float xs[]{at(x0,x1,x,nx), at(x0,x1,x+1,nx)};
+                const float ys[]{at(y0,y1,y,ny), at(y0,y1,y+1,ny)};
+                for (int corner = 0; corner < 4; ++corner) {
+                    const float u = xs[corner / 2], v = ys[corner % 2];
+                    assert(out.size < out.vertices.size());
+                    out.vertices[out.size++] = {
+                        float((double(block.x) + u) * 500.0 - 3000.0),
+                        float((double(block.y) + v) * 500.0 - 3000.0), -70.f,
+                        float(double(u) * 8.0), float(double(v) * 8.0)};
+                }
+            }
+        };
+        if (block.x < 0 || block.x >= 12 || block.y < 0 || block.y >= 12) {
+            segment(0,1,0,1);
+        } else {
+            // Corner blocks draw TWO FULL strips; their 20x20 overlap is in the
+            // source too. Do not shrink the second strip to "repair" overlap.
+            if (block.x == 0) segment(0,.04f,0,1);
+            else if (block.x == 11) segment(.96f,1,0,1);
+            if (block.y == 0) segment(0,1,0,.04f);
+            else if (block.y == 11) segment(0,1,.96f,1);
+        }
+    }
+    return true;
+}
+
+void RealtimeEnvironment::DrawSeaBed(const RealtimeSeaBedGeometry& geometry) const {
+    assert(m_Loaded && m_SeaBedTexture);
+    assert(geometry.size <= geometry.vertices.size() && geometry.size % 4 == 0);
+    if (!geometry.size) return;
+    GLint program = 0, active = 0, mode = 0, units = 0;
+    glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+    glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
+    glGetIntegerv(GL_MATRIX_MODE, &mode);
+    glGetIntegerv(GL_MAX_TEXTURE_UNITS, &units);
+    glPushAttrib(GL_ALL_ATTRIB_BITS);
+    glUseProgram(0);
+    for (int unit = 0; unit < units; ++unit) {
+        glActiveTexture(GL_TEXTURE0 + unit);
+        for (GLenum target : {GL_TEXTURE_1D, GL_TEXTURE_2D, GL_TEXTURE_3D, GL_TEXTURE_CUBE_MAP}) glDisable(target);
+    }
+    glActiveTexture(GL_TEXTURE0);
+    glMatrixMode(GL_TEXTURE); glPushMatrix(); glLoadIdentity();
+    for (GLenum coord : {GL_TEXTURE_GEN_S, GL_TEXTURE_GEN_T, GL_TEXTURE_GEN_R, GL_TEXTURE_GEN_Q}) glDisable(coord);
+    glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, m_SeaBedTexture);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+    glDisable(GL_LIGHTING); glDisable(GL_CULL_FACE);
+    glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LEQUAL); glDepthMask(GL_TRUE);
+    glEnable(GL_BLEND); glBlendEquation(GL_FUNC_ADD); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_ALPHA_TEST); glAlphaFunc(GL_GREATER, 0); // DefinedState + RenderWater ref=0
+    glShadeModel(GL_SMOOTH);
+    ApplyFog();
+    glColor4ub(80,80,80,255);
+    glBegin(GL_TRIANGLES);
+    for (size_t base = 0; base < geometry.size; base += 4) for (int corner : {0,1,2,3,1,2}) {
+        const auto& v = geometry.vertices[base + corner];
+        glTexCoord2f(v.u, v.v); glVertex3f(v.x, v.y, v.z);
+    }
+    glEnd();
+    glPopMatrix(); glMatrixMode(mode);
+    glPopAttrib(); glActiveTexture(active); glUseProgram(program);
+}
+
+bool RealtimeEnvironment::ScanOutsideWaterBlocks(float cameraX, float cameraY,
+    std::array<RealtimeWaterBlock,70>& blocks, size_t& count) {
+    count = 0;
+    // CCamera::GetFrustumPoints -> ScanThroughBlocks: far-plane corners then
+    // camera origin. GL's camera looks along -Z instead of RW's +Z.
+    GLfloat p[16], m[16];
+    glGetFloatv(GL_PROJECTION_MATRIX, p); glGetFloatv(GL_MODELVIEW_MATRIX, m);
+    if (p[0] <= 0 || p[5] <= 0 || p[11] != -1 || p[15] != 0 || p[8] != 0 || p[9] != 0) return false;
+    const float far = float(double(p[14]) / (double(p[10]) + 1));
+    if (!std::isfinite(far) || far <= 0 || !std::isfinite(cameraX) || !std::isfinite(cameraY)) return false;
+    std::array<std::array<float,2>,5> points{};
+    for (size_t i = 0; i < 4; ++i) {
+        const float x = (i == 0 || i == 3 ? -far : far) / p[0];
+        const float y = (i < 2 ? far : -far) / p[5];
+        points[i] = {(cameraX + x*m[0] + y*m[1] - far*m[2]) / 500.f + 6.f,
+                     (cameraY + x*m[4] + y*m[5] - far*m[6]) / 500.f + 6.f};
+    }
+    points[4] = {cameraX / 500.f + 6.f, cameraY / 500.f + 6.f};
+    for (const auto& point : points) for (float v : point)
+        if (!std::isfinite(v) || v < -32767 || v > 32766) return false;
+    // ScanWorld forms the convex hull, visits floor(minY)..floor(maxY), then
+    // floor(left)..floor(right), both inclusive (retail 75F5C7/75F830). Obtain
+    // each row's hull extrema directly from all point pairs, avoiding the
+    // global mutable scan buffers. Interior pairs cannot enlarge the hull.
+    float minY = points[0][1], maxY = minY;
+    for (const auto& point : points) { minY = std::min(minY,point[1]); maxY = std::max(maxY,point[1]); }
+    for (int y = int(std::floor(minY)); y <= int(std::floor(maxY)) && count < blocks.size(); ++y) {
+        float left = 1.e10f, right = -1.e10f;
+        const auto add = [&](double x) { left = std::min(left,float(x)); right = std::max(right,float(x)); };
+        for (size_t i = 0; i < points.size(); ++i) {
+            const auto a = points[i];
+            if (a[1] >= y && a[1] <= y+1) add(a[0]);
+            for (size_t j = i+1; j < points.size(); ++j) {
+                const auto b = points[j];
+                if (a[1] == b[1]) continue;
+                for (int edge : {y,y+1}) {
+                    const double t = (double(edge)-a[1]) / (double(b[1])-a[1]);
+                    if (t >= 0 && t <= 1) add(double(a[0]) + t*(double(b[0])-a[0]));
+                }
+            }
+        }
+        if (left > right) continue;
+        for (int x = int(std::floor(left)); x <= int(std::floor(right)) && count < blocks.size(); ++x)
+            if (x <= 0 || x >= 11 || y <= 0 || y >= 11) blocks[count++] = {int16_t(x),int16_t(y)};
+    }
+    return true;
+}
+
+bool RealtimeEnvironment::DrawSeaBed(float cameraX, float cameraY, int area) const {
+    if (area != 0 && area != 5) return true;
+    std::array<RealtimeWaterBlock,70> blocks{};
+    size_t count = 0;
+    if (!ScanOutsideWaterBlocks(cameraX,cameraY,blocks,count)) return false;
+    RealtimeSeaBedGeometry geometry;
+    if (!BuildSeaBed(std::span{blocks.data(),count}, cameraX, cameraY, area, geometry)) return false;
+    DrawSeaBed(geometry);
+    return true;
 }
 
 void RealtimeEnvironment::ApplyFog() const {
@@ -588,6 +749,20 @@ std::array<float, 2> RealtimeEnvironment::WaterTextureShift(int layer) const {
 }
 
 void RealtimeEnvironment::DrawWater(float cameraX, float cameraY, bool interior) const {
+    std::array<RealtimeWaterBlock,70> blocks{};
+    size_t count = 0;
+    if (!ScanOutsideWaterBlocks(cameraX,cameraY,blocks,count)) {
+        GLfloat projection[16]; glGetFloatv(GL_PROJECTION_MATRIX,projection);
+        assert(projection[11] == 0 && "invalid source perspective water camera");
+        // Legacy orthographic probes have no source RW perspective frustum.
+        // Explicit-list overload below can replay ocean blocks in those views.
+    }
+    DrawWater(cameraX,cameraY,interior,std::span{blocks.data(),count});
+}
+
+void RealtimeEnvironment::DrawWater(float cameraX, float cameraY, bool interior,
+    std::span<const RealtimeWaterBlock> outsideBlocks) const {
+    assert(outsideBlocks.size() <= 70);
     assert(m_Loaded && m_WaterTexture && std::isfinite(cameraX) && std::isfinite(cameraY));
     GLint program = 0;
     glGetIntegerv(GL_CURRENT_PROGRAM, &program);
@@ -873,6 +1048,15 @@ void RealtimeEnvironment::DrawWater(float cameraX, float cameraY, bool interior)
             if (v[0].x > v[1].x) std::swap(v[0], v[1]);
             triangle(triangle, {v[0], v[1], v[2]});
         }
+    }
+    // RenderWater retail 729446..7295BA: general ocean surface accompanies the
+    // seabed OUTSIDE the 12x12 world only. Edge blocks 0/11 already have authored
+    // water.dat. Source RenPar is exactly {z=0,big=1,small=0,flow=0}, all corners.
+    for (const auto block : outsideBlocks) {
+        if (block.x >= 0 && block.x < 12 && block.y >= 0 && block.y < 12) continue;
+        const float x = float(int(block.x)*500-3000), y = float(int(block.y)*500-3000);
+        rectangle(rectangle, std::array<WaterVert,4>{{{x,y,0,0,0,1,0}, {x+500,y,0,0,0,1,0},
+            {x,y+500,0,0,0,1,0}, {x+500,y+500,0,0,0,1,0}}});
     }
     glMatrixMode(GL_TEXTURE);
     glPopMatrix();

@@ -298,13 +298,17 @@ std::shared_ptr<const NativeCollisionContext> NativeCollisionContext::LoadBefore
 }
 
 bool NativeCollisionAssets::Snapshot(const NativeCollisionPopulation& population, float x, float y, float radius,
-                                     NativeCollisionSnapshot& out, std::string& error, int interior) const try {
+                                     NativeCollisionSnapshot& out, std::string& error, int interior,
+                                     std::shared_ptr<const NativePlacementOverrides> overrides) const try {
     Require(std::isfinite(x) && std::isfinite(y) && std::isfinite(radius) && radius>0,"invalid collision window");
     Require(!m_Models.empty(),"collision assets not loaded");
     Require(population.IncludesStreamed,"collision population lacks binary IPL");
     NativeCollisionSnapshot next;
+    next.Overrides = std::move(overrides);
     for (const auto& p:population.Instances) {
         if (p.Interior!=interior) { ++next.InteriorExcluded; continue; }
+        const auto* replacement = next.Overrides ? next.Overrides->Find(p) : nullptr;
+        if (replacement && !replacement->CollisionEnabled) continue;
         const auto key=Lower(p.Model); auto found=m_Models.find(key); bool shared=false;
         const auto id=population.Models.find(p.ModelId);
         Require(id!=population.Models.end() && Lower(id->second.Name)==key,"IPL/IDE collision identity mismatch: "+key);
@@ -317,9 +321,10 @@ bool NativeCollisionAssets::Snapshot(const NativeCollisionPopulation& population
         Require(model.Unsupported.empty(),"referenced unsupported COL: "+key+" "+model.Unsupported);
         if (model.Empty) { ++next.EmptyModels; continue; }
         NativeCollisionInstance inst; inst.Placement=p; inst.Model=found->second; inst.TimeShared=shared;
-        inst.Basis=Basis(p.Quaternion);
-        for (auto v:p.Position) Require(std::isfinite(v),"nonfinite collision IPL position");
-        inst.Min=inst.Max=p.Position;
+        inst.Basis=replacement ? replacement->Basis : Basis(p.Quaternion);
+        if (replacement) inst.Placement.Position = replacement->Position;
+        for (auto v:inst.Placement.Position) Require(std::isfinite(v),"nonfinite collision IPL position");
+        inst.Min=inst.Max=inst.Placement.Position;
         for (int i=0;i<3;++i) for (int j=0;j<3;++j) {
             const float r=inst.Basis[j][i];
             inst.Min[i]+=r*(r>=0 ? model.Min[j]:model.Max[j]);

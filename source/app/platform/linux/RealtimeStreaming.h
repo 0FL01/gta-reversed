@@ -29,16 +29,19 @@ struct CpuWorld {
     WorldShotScene Scene;
     RealtimeGameplayWorld Collision;
     std::shared_ptr<const NativeCollisionSnapshot> SourceCollision;
+    std::shared_ptr<const NativePlacementOverrides> Overrides;
     E2EPagerFrame Frame{};
     std::string Error;
     double Started{}, PagerMs{}, CollisionMs{};
 
     // Without a context, retain the legacy render fixture path. Runtime physics always
     // supplies a source context; both outputs belong to Position/Generation.
-    void Build(bool collision, const std::shared_ptr<const NativeCollisionContext>& context = {}) {
+    void Build(bool collision, const std::shared_ptr<const NativeCollisionContext>& context = {},
+               std::shared_ptr<const NativePlacementOverrides> overrides = {}) {
+        Overrides = std::move(overrides);
         Started = Milliseconds();
         char error[512]{};
-        if (!StreamPager_Update(Position.X, Position.Y, Position.Z, Scene, Frame, error, sizeof(error))) {
+        if (!StreamPager_Update(Position.X, Position.Y, Position.Z, Scene, Frame, error, sizeof(error), Overrides)) {
             Error = error;
             return;
         }
@@ -46,7 +49,7 @@ struct CpuWorld {
         if (collision) {
             if (context) {
                 auto snapshot = std::make_shared<NativeCollisionSnapshot>();
-                if (!context->Snapshot(Position.X, Position.Y, *snapshot, Error) ||
+                if (!context->Snapshot(Position.X, Position.Y, *snapshot, Error, Overrides) ||
                     !Collision.Rebuild(*snapshot, Error)) return;
                 SourceCollision = std::move(snapshot);
             } else {
@@ -70,8 +73,9 @@ struct CpuWorld {
 // not independent: librw current dictionary, plugins, frame lists are global.
 class Worker {
 public:
-    explicit Worker(bool collision, std::shared_ptr<const NativeCollisionContext> context = {})
-        : m_Collision(collision), m_Context(std::move(context)), m_Thread([this] { Run(); }) {}
+    explicit Worker(bool collision, std::shared_ptr<const NativeCollisionContext> context = {},
+                    std::shared_ptr<const NativePlacementOverrides> overrides = {})
+        : m_Collision(collision), m_Context(std::move(context)), m_Overrides(std::move(overrides)), m_Thread([this] { Run(); }) {}
     ~Worker() { Stop({}, {}); }
     Worker(const Worker&) = delete;
     Worker& operator=(const Worker&) = delete;
@@ -157,7 +161,7 @@ private:
             next->Position = center;
             next->Generation = ++m_Generation;
             try {
-                next->Build(m_Collision, m_Context);
+                next->Build(m_Collision, m_Context, m_Overrides);
             } catch (const std::exception& error) {
                 next->Error = error.what();
             }
@@ -170,6 +174,7 @@ private:
 
     bool m_Collision;
     std::shared_ptr<const NativeCollisionContext> m_Context;
+    const std::shared_ptr<const NativePlacementOverrides> m_Overrides;
     std::mutex m_Mutex;
     std::condition_variable m_Wake;
     bool m_Stop = false, m_Wanted = false, m_Busy = false, m_Building = false;

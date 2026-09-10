@@ -2,7 +2,7 @@
 """Build in native container (--build), run in a graphical host session (--run).
 
 Checks real production startup presentation and exact terminal Unsupported exit.
-Optional MAD_SA_BOOT_CAPTURE writes a diagnostic PPM of the same GL_BACK frame.
+Optional MAD_SA_BOOT_CAPTURE is a prefix for three diagnostic GL_BACK PPMs.
 """
 import os
 import re
@@ -27,8 +27,15 @@ if __name__ == '__main__':
         (OUTPUT / (name + '.log')).write_text(result.stdout + f'runner-exit={result.returncode}\n')
         print(result.stdout, end='')
         assert result.returncode == 1, f'Expected runtime terminal exit 1, got {result.returncode}'
-        assert 'boot-capture PASS frame=1 black=1 clock=08:00 paired=1 actor=1 startup=1' in result.stdout
-        assert 'boot-runtime PASS exit=1 swaps=1 fullboot=0' in result.stdout
-        assert len(re.findall(r'play-script-terminal status=Unsupported thread=1 generation=1 ip=201129 opcode=02B9 executed=135 ', result.stdout)) == 1
+        captures = re.findall(r'^boot-capture .*$', result.stdout, re.MULTILINE)
+        assert len(captures) == 3, captures
+        for frame, (capture, count, ip, revision) in enumerate(zip(captures, (0, 256, 512), (200000, 202662, 205508), (0, 12, 13)), 1):
+            assert capture.startswith(f'boot-capture PASS frame={frame} black=1 clock=08:00 paired=1 actor=1 startup=1 scheduler=1 mission={count} ip={ip} '), capture
+            assert f'worldRevision=3 sourceCOL=1 overrides=14 disabled=13 garageReady=1 updates=50 flagsCleared=13 garageRevision={revision} cameraUnchanged=1 sourceBody=1 physics=1 ticks={frame - 1} ' in capture, capture
+        assert 'boot-runtime PASS exit=1 swaps=3 fullboot=0' in result.stdout
+        terminals = re.findall(r'^play-.*terminal .*$', result.stdout, re.MULTILINE)
+        assert len(terminals) == 1 and terminals[0].startswith('play-script-terminal status=Unsupported thread=1 generation=1 ip=205545 opcode=0213 executed=4 '), terminals
         assert 'play-ok' not in result.stdout and 'play-fail' not in result.stdout and 'FAIL' not in result.stdout
-        print('boot-probe PASS actual-startup-frame=1 mission-prefix=135 terminal=02B9@201129 runtime-exit=1 fullboot=0')
+        print('boot-probe PASS actual-captures=3 mission-quanta=0/256/512+4 mission-prefix=516 terminal=0213@205545 '
+            'worldRevision=3 sourceCOL-overrides=14/13-disabled garage-ready=50-each-frame camera-unchanged=1 '
+            'actual-source-body=1 real-physics=1 clothes-not-reached=1 runtime-exit=1 fullboot=0')

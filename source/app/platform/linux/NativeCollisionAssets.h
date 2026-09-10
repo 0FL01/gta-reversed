@@ -1,12 +1,15 @@
 // Owned source COL data. No RenderWare pointers, global loader or render residency.
 #pragma once
 #include <array>
+#include <cassert>
+#include <cmath>
 #include <cstdint>
 #include <map>
 #include <memory>
 #include <span>
 #include <string>
 #include <vector>
+#include <utility>
 
 using NativeCollisionVector = std::array<float, 3>;
 struct NativeCollisionSurface {
@@ -30,6 +33,45 @@ struct NativeCollisionPlacement {
     NativeCollisionVector Position{};
     // Authored IPL quaternion (inverse rotation), conjugated exactly once at binding.
     std::array<float, 4> Quaternion{0, 0, 0, 1};
+};
+// Source identity, never a model-wide replacement or a render-residency index.
+struct NativePlacementIdentity {
+    std::string Ipl, Model;
+    uint32_t Record{};
+    int ModelId = -1;
+    bool Binary{};
+    static NativePlacementIdentity From(const NativeCollisionPlacement& p) {
+        return {p.Ipl, p.Model, p.Record, p.ModelId, p.Binary};
+    }
+    bool Matches(const NativeCollisionPlacement& p) const {
+        return Record == p.Record && ModelId == p.ModelId && Binary == p.Binary && Model == p.Model && Ipl == p.Ipl;
+    }
+    bool operator==(const NativePlacementIdentity&) const = default;
+};
+struct NativePlacementOverride {
+    NativePlacementIdentity Identity;
+    NativeCollisionVector Position{};
+    // Already-bound world basis: do not conjugate or normalize again.
+    std::array<NativeCollisionVector, 3> Basis{};
+    bool CollisionEnabled = true;
+};
+// Owned immutable initial state. No garage, catalog, pager or RW pointers.
+class NativePlacementOverrides {
+public:
+    explicit NativePlacementOverrides(std::vector<NativePlacementOverride> entries) : m_Entries(std::move(entries)) {
+        for (size_t i = 0; i < m_Entries.size(); ++i) {
+            for (size_t j = 0; j < i; ++j) assert(!(m_Entries[i].Identity == m_Entries[j].Identity));
+            for (auto v : m_Entries[i].Position) { assert(std::isfinite(v)); (void)v; }
+            for (const auto& axis : m_Entries[i].Basis) for (auto v : axis) { assert(std::isfinite(v)); (void)v; }
+        }
+    }
+    std::span<const NativePlacementOverride> Entries() const { return m_Entries; }
+    const NativePlacementOverride* Find(const NativeCollisionPlacement& p) const {
+        for (const auto& entry : m_Entries) if (entry.Identity.Matches(p)) return &entry;
+        return nullptr;
+    }
+private:
+    const std::vector<NativePlacementOverride> m_Entries;
 };
 struct NativeCollisionIde {
     std::string Name;
@@ -59,6 +101,8 @@ struct NativeCollisionModel {
     std::vector<uint8_t> SourceChunk;
 };
 struct NativeCollisionInstance {
+    // Identity/quaternion remain source provenance; Position is effective.
+    // Basis below is the authoritative world rotation for every COL consumer.
     NativeCollisionPlacement Placement;
     std::shared_ptr<const NativeCollisionModel> Model;
     std::array<NativeCollisionVector, 3> Basis{};
@@ -66,6 +110,7 @@ struct NativeCollisionInstance {
     bool TimeShared{};
 };
 struct NativeCollisionSnapshot {
+    std::shared_ptr<const NativePlacementOverrides> Overrides;
     std::vector<NativeCollisionInstance> Instances;
     // Census over the requested interior's complete population, not just the
     // window: missing assets have no trustworthy geometry bounds to window by.
@@ -82,7 +127,8 @@ public:
     // Explicit absolute OS_File paths; immutable assets can be shared by workers.
     bool Load(const char* gameDir, const NativeCollisionPopulation& population, std::string& error);
     bool Snapshot(const NativeCollisionPopulation& population, float x, float y, float radius,
-                  NativeCollisionSnapshot& out, std::string& error, int interior = 0) const;
+                  NativeCollisionSnapshot& out, std::string& error, int interior = 0,
+                  std::shared_ptr<const NativePlacementOverrides> overrides = {}) const;
     const NativeCollisionAssetStats& Stats() const { return m_Stats; }
     // Pure, bounded parser for source-format verification. Atomic on failure.
     static bool Parse(std::span<const uint8_t> chunk, const std::string& library,
@@ -101,7 +147,8 @@ struct NativeCollisionContext {
     float Radius{};
     static std::shared_ptr<const NativeCollisionContext> LoadBeforeWorker(
         const char* gameDir, float radius, std::string& error);
-    bool Snapshot(float x, float y, NativeCollisionSnapshot& out, std::string& error) const {
-        return Assets.Snapshot(Population, x, y, Radius, out, error);
+    bool Snapshot(float x, float y, NativeCollisionSnapshot& out, std::string& error,
+                  std::shared_ptr<const NativePlacementOverrides> overrides = {}) const {
+        return Assets.Snapshot(Population, x, y, Radius, out, error, 0, std::move(overrides));
     }
 };

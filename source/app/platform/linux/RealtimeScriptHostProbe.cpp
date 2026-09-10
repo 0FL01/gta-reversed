@@ -13,6 +13,7 @@
 void RealtimeScriptHostGpuPrepare(const char* dir);
 void RealtimeScriptHostGpuProbe(NativeScriptEntities& entities, RealtimeScriptHost& host);
 void NativeEntryExitsProbe(RealtimeScriptHost& host);
+int NativeGaragesProbe(const char* dir, std::uint64_t& commands, std::uint16_t& opcode, std::uint32_t& ip);
 
 namespace {
 int s_Failures = 0;
@@ -37,6 +38,10 @@ int main(int argc, char** argv) {
     ColLoad_Shutdown();
     E2ELoadInfo info{};
     Require(StreamPager_Init(dir, info, err, sizeof(err), {.includeStreamed=true, .radius=300, .maxInstances=1200}), err);
+    // Separate fresh host: run the actual continuation before legacy probes
+    // deliberately exercise pool releases, camera/world replacements and mocks.
+    std::uint64_t garageCommands{}; std::uint16_t garageOpcode{}; std::uint32_t garageIP{};
+    s_Failures += NativeGaragesProbe(dir, garageCommands, garageOpcode, garageIP);
     {
         RealtimeGameplay game;
         RealtimeScriptHost host(game);
@@ -170,17 +175,11 @@ int main(int argc, char** argv) {
                 static_cast<unsigned long long>(thread.Commands),thread.LastInstructionIP,thread.LastOpcode,thread.IP,
                 static_cast<unsigned long long>(host.Entities().Revision()));
         }
-        const auto fault = host.RunPass(1000);
-        Check(fault.Status == NativeScriptStatus::Unsupported && fault.ThreadIndex == 1 && fault.IP == 201129 &&
-            fault.Opcode == 0x02B9 && fault.Executed == 0 && host.State() == beforeFault &&
+        Check(host.State() == beforeFault &&
             host.Session().Threads()[1].Commands == 135 && host.Session().Threads()[1].LastOutputWrite.Sequence == 127 &&
-            host.Session().Threads()[1].LastOutputWrite.IP == 201106 && host.Session().Threads()[1].LastOutputWrite.Variable == 6496,
-            "real mission0 commits owned sale/green radar, strict garage 02B9 barrier before main resumes");
-        const auto missionBeforeFault = host.Session().Threads()[1];
-        const auto repeated = host.RunPass(1000);
-        Check(repeated.Status == NativeScriptStatus::Unsupported && repeated.Opcode == 0x02B9 && repeated.IP == 201129 &&
-            repeated.Executed == 0 && host.State() == beforeFault && host.Session().Threads()[1] == missionBeforeFault,
-            "unsupported mission remains terminal with unchanged main and mission states");
+            host.Session().Threads()[1].LastOutputWrite.IP == 201106 && host.Session().Threads()[1].LastOutputWrite.Variable == 6496 &&
+            host.Session().Threads()[1].IP == 201129,
+            "legacy property/ENEX regression host pauses by quota135; separate clean host proves garage continuation");
         auto& entities = host.Entities();
         NativeEntryExitsProbe(host);
         Check(entities.Revision() == 12, "exactly four actual pickup allocations, four blips and four display writes");
@@ -350,6 +349,10 @@ int main(int argc, char** argv) {
         const auto entrance = host.EntryExits().Entries()[46].Center;
         Check(host.SetEntryExitFlag({deferred.Id,entrance.X,entrance.Y,1,0x4000,1}).Status == NativeScriptServiceStatus::Error &&
             host.EntryExits().Revision() == enexRevision, "pending world identity cannot mutate ENEX registry");
+        const auto garageRevision=host.Garages().Revision(); const auto garageName=host.Garages().Entries()[13].Name;
+        Check(host.DeactivateGarage({deferred.Id,garageName}).Status==NativeScriptServiceStatus::Error &&
+            host.Garages().Revision()==garageRevision && !(host.Garages().Entries()[13].Flags&2),
+            "pending world identity cannot mutate registered garage or publish a journal effect");
         workerReady = true;
         Check(host.LoadScene(deferred).Status == NativeScriptServiceStatus::Ready && host.LoadScene(deferred).Status == NativeScriptServiceStatus::Ready &&
             polls == 3 && host.WorldRevision() == stableRevision + 1, "Ready publishes once and replay skips completed worker request");
@@ -462,7 +465,8 @@ int main(int argc, char** argv) {
         game.Tick(1.0/60, {}, *host.World());
         Check(game.State().Ticks == 1 && !game.State().CarPresent && game.Actors().stats.triangles == 2,
             "persistent entity/pose keeps ticking without startup preview vehicle");
-        std::printf("host-probe failures=%d firstpass=53 mission-prefix=135 terminal=02B9@201129 mission0-complete=0\n", s_Failures);
+        std::printf("host-probe failures=%d firstpass=53 mission-prefix=%llu terminal=%04X@%u mission0-complete=0\n", s_Failures,
+            static_cast<unsigned long long>(garageCommands), garageOpcode, garageIP);
     }
     StreamPager_Shutdown();
     return s_Failures ? 1 : 0;

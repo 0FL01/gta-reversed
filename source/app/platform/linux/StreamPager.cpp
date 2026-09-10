@@ -1141,16 +1141,33 @@ bool StreamPager_Init(const char* gameDir, E2ELoadInfo& info, char* err, std::si
 }
 
 bool StreamPager_Update(float camX, float camY, float camZ, WorldShotScene& scene, E2EPagerFrame& frame,
-                        char* err, std::size_t errSize) {
+                        char* err, std::size_t errSize,
+                        const std::shared_ptr<const NativePlacementOverrides>& overrides,
+                        std::vector<NativePlacementIdentity>* rendered) {
     const float kRadius = s_options.radius;
     const int kMaxInstances = s_options.maxInstances;
     (void)camZ; // window is x/y based (verticality comes free with instances)
     frame = E2EPagerFrame{};
     scene.meshes.clear();
+    if (rendered) rendered->clear();
     if (!s_init) {
         SetErr(err, errSize, "pager not initialized");
         return false;
     }
+
+    // The source population and static grid stay authored. Replaced rows leave
+    // that grid for this build and are culled at their requested world position.
+    std::map<int, const NativePlacementOverride*> replacements;
+    if (overrides) {
+        for (size_t row = 0; row < s_insts.size(); ++row) {
+            const auto& source = s_collisionPopulation.Instances[s_insts[row].order - 1];
+            if (const auto* replacement = overrides->Find(source)) replacements.emplace(static_cast<int>(row), replacement);
+        }
+    }
+    const auto position = [&](int row) -> const float* {
+        const auto it = replacements.find(row);
+        return it == replacements.end() ? s_insts[row].pos : it->second->Position.data();
+    };
 
     // --- 1. Wanted cells (rect intersects the R disc). ---
     std::set<Cell> wanted;
@@ -1205,6 +1222,7 @@ bool StreamPager_Update(float camX, float camY, float camZ, WorldShotScene& scen
             continue;
         }
         for (int row : git->second) {
+            if (replacements.contains(row)) continue;
             const PagerInst& p = s_insts[static_cast<size_t>(row)];
             float dx = p.pos[0] - camX;
             float dy = p.pos[1] - camY;
@@ -1213,6 +1231,11 @@ bool StreamPager_Update(float camX, float camY, float camZ, WorldShotScene& scen
                 cands.push_back(Cand{ d, p.order, row });
             }
         }
+    }
+    for (const auto& [row, replacement] : replacements) {
+        const float dx = replacement->Position[0] - camX, dy = replacement->Position[1] - camY;
+        const float d = std::sqrt(dx * dx + dy * dy);
+        if (d <= kRadius) cands.push_back(Cand{d, s_insts[row].order, row});
     }
     std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) {
         if (a.d != b.d) {
@@ -1230,8 +1253,9 @@ bool StreamPager_Update(float camX, float camY, float camZ, WorldShotScene& scen
         const float wide = 750.0f;
         for (size_t row = 0; row < s_insts.size(); ++row) {
             const PagerInst& p = s_insts[row];
-            float dx = p.pos[0] - camX;
-            float dy = p.pos[1] - camY;
+            const auto* pos = position(static_cast<int>(row));
+            float dx = pos[0] - camX;
+            float dy = pos[1] - camY;
             float d = std::sqrt(dx * dx + dy * dy);
             if (d <= wide) {
                 cands.push_back(Cand{ d, p.order, static_cast<int>(row) });
@@ -1402,6 +1426,12 @@ bool StreamPager_Update(float camX, float camY, float camZ, WorldShotScene& scen
         float fwd[3];
         float up[3];
         QuatToBasis(p.quat, right, fwd, up);
+        if (const auto it = replacements.find(c.row); it != replacements.end()) {
+            std::copy_n(it->second->Basis[0].begin(), 3, right);
+            std::copy_n(it->second->Basis[1].begin(), 3, fwd);
+            std::copy_n(it->second->Basis[2].begin(), 3, up);
+        }
+        const auto* pos = position(c.row);
         WorldShotMesh mesh;
         MeshColor(placed, mesh.color);
         mesh.tris = cached.tris;
@@ -1440,9 +1470,9 @@ bool StreamPager_Update(float camX, float camY, float camZ, WorldShotScene& scen
             float lx = cached.pos[i];
             float ly = cached.pos[i + 1];
             float lz = cached.pos[i + 2];
-            float wx = p.pos[0] + right[0] * lx + fwd[0] * ly + up[0] * lz;
-            float wy = p.pos[1] + right[1] * lx + fwd[1] * ly + up[1] * lz;
-            float wz = p.pos[2] + right[2] * lx + fwd[2] * ly + up[2] * lz;
+            float wx = pos[0] + right[0] * lx + fwd[0] * ly + up[0] * lz;
+            float wy = pos[1] + right[1] * lx + fwd[1] * ly + up[1] * lz;
+            float wz = pos[2] + right[2] * lx + fwd[2] * ly + up[2] * lz;
             mesh.pos[i] = wx;
             mesh.pos[i + 1] = wy;
             mesh.pos[i + 2] = wz;
@@ -1495,6 +1525,7 @@ bool StreamPager_Update(float camX, float camY, float camZ, WorldShotScene& scen
             }
         }
         scene.meshes.push_back(std::move(mesh));
+        if (rendered) rendered->push_back(NativePlacementIdentity::From(s_collisionPopulation.Instances[p.order - 1]));
         usedModels.insert(p.key);
         ++placed;
         tris += cached.tris;
