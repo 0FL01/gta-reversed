@@ -11,7 +11,7 @@
 
 namespace {
 constexpr float kPi = std::numbers::pi_v<float>;
-constexpr int kCentre = 144, kNorth = 145, kDisc = 146, kFont = 147;
+constexpr int kCentre = 144, kNorth = 145, kDisc = 146, kFont = 147, kProperty = 148;
 struct Point { float x, y; };
 
 // CRadar::CachedRotateClockwise, with GTA heading = native yaw - pi/2.
@@ -159,6 +159,11 @@ bool RealtimeHud::Load(const char* gameDir, char* err, std::size_t errSize) {
     assert(!m_Textures[0] && "ReleaseGpu before reload");
     m_Loaded = RadarMap_LoadAssets(gameDir, m_Radar, err, errSize)
         && MenuShot_LoadPricedownFont(gameDir, m_Font, err, errSize);
+    if (m_Loaded) {
+        std::string error;
+        m_Loaded = NativeScriptEntities_LoadRadar(gameDir, m_PropertyRadar, error);
+        if (!m_Loaded && err && errSize) std::snprintf(err, errSize, "%s", error.c_str());
+    }
     return m_Loaded;
 }
 
@@ -181,15 +186,16 @@ bool RealtimeHud::Upload(char* err, std::size_t errSize) {
     glGenTextures(m_Textures.size(), m_Textures.data());
     for (int i = 0; i < int(m_Textures.size()); ++i) {
         const TexImage* image = i < 144 ? &m_Radar.tiles[i] : i == kCentre ? &m_Radar.centre
-            : i == kNorth ? &m_Radar.north : i == kDisc ? &m_Radar.disc : nullptr;
+            : i == kNorth ? &m_Radar.north : i == kDisc ? &m_Radar.disc : i == kProperty ? &m_PropertyRadar : nullptr;
+        const auto& font = m_Font;
         glBindTexture(GL_TEXTURE_2D, m_Textures[i]);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, image ? image->w : m_Font.w,
-            image ? image->h : m_Font.h, 0, GL_RGBA, GL_UNSIGNED_BYTE,
-            image ? image->rgba.data() : m_Font.rgba.data());
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, image ? image->w : font.w,
+            image ? image->h : font.h, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+            image ? image->rgba.data() : font.rgba.data());
     }
     glPopClientAttrib();
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, unpackBuffer);
@@ -253,6 +259,15 @@ void RealtimeHud::Draw(const RealtimeHudView& view, const RealtimeHudState& stat
         const auto n = RadarToScreen({std::sin(orientation), std::cos(orientation)});
         glBindTexture(GL_TEXTURE_2D, m_Textures[kNorth]);
         Quad(n.x - 8, n.y - 8, n.x + 8, n.y + 8);
+        glBindTexture(GL_TEXTURE_2D, m_Textures[kProperty]);
+        for (const auto& blip : state.scriptBlips) {
+            auto p = WorldToRadar({blip.Position.X, blip.Position.Y}, view, state);
+            const auto distance = std::sqrt(p.x*p.x + p.y*p.y);
+            if (!NativeScriptRadarVisible(blip, distance, state.playerOnMission, state.radarZoom, state.exterior)) continue;
+            if (distance > 1) { p.x /= distance; p.y /= distance; }
+            const auto screen = RadarToScreen(p);
+            Quad(screen.x - 8, screen.y - 8, screen.x + 8, screen.y + 8);
+        }
         // CRadar::DrawBlips + DrawRotatingRadarSprite + CSprite2d::SetVertices:
         // UV corners 00,10,11,01 map to rotating vertices 0,1,2,3.
         glBindTexture(GL_TEXTURE_2D, m_Textures[kCentre]);
@@ -275,5 +290,27 @@ void RealtimeHud::Draw(const RealtimeHudView& view, const RealtimeHudState& stat
         }
         glColor4ub(225, 225, 225, 255);
         ClockText(text, m_Font.unprop, 0, 0);
+    }
+    if (!state.helpText.empty() && state.helpAlpha) {
+        const auto lines = NativeScriptHelpLines(state.helpText, m_Font.prop);
+        // CHud uses FONT_SUBTITLES=1: same font1 texture as clock, WITHOUT
+        // Pricedown glyph remapping. SetAlphaFade affects text; box gets alpha directly.
+        glDisable(GL_TEXTURE_2D); glColor4ub(0, 0, 0, state.helpAlpha);
+        Quad(30, 24, 234, 32 + float(lines.size()) * 19.8f);
+        glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, m_Textures[kFont]);
+        glColor4ub(225, 225, 225, state.helpAlpha);
+        float y = 28;
+        for (const auto& line : lines) {
+            float x = 34;
+            for (const unsigned char ch : line) {
+                if (ch < 32 || ch >= 128) continue;
+                const auto glyph = unsigned(ch - 32);
+                const float u = float(glyph % 16 * 32), v = float(glyph / 16 * 40);
+                if (ch != ' ') Quad(x, y, x + 16.64f, y + 22,
+                    (u + 0.5f) / 512, (v + 0.5f) / 512, (u + 31.5f) / 512, (v + 39.5f) / 512);
+                x += m_Font.prop[glyph] * 0.52f;
+            }
+            y += 19.8f;
+        }
     }
 }

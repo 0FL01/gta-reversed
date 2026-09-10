@@ -3,6 +3,8 @@
 
 #include "app/platform/linux/MenuShot.h"
 #include "app/platform/linux/RadarMap.h"
+#include "app/platform/linux/NativeScriptEntities.h"
+#include <string_view>
 
 struct RealtimeHudView {
     // Native camera yaw: atan2(forwardY, forwardX), radians, +X = zero.
@@ -17,6 +19,13 @@ struct RealtimeHudState {
     float playerYaw = 0.0f;
     float radarRange = 180.0f; // CRadar::RADAR_MIN_RANGE; caller owns zoom.
     int hour = 0, minute = 0; // supplied game clock, never wall clock
+    std::span<const NativeScriptRadarBlip> scriptBlips;
+    // Source IsPlayerOnAMission is a declared script-global ==1, NOT the VM's
+    // AlreadyRunningMission storage ownership flag (mission0 startup is not a mission).
+    bool playerOnMission = false, exterior = true;
+    unsigned radarZoom = 0;
+    std::string_view helpText; // Entities.HelpPresentation().Text (owned, timed GXT)
+    std::uint8_t helpAlpha = 0; // Entities.HelpPresentation().Alpha; zero draws nothing
 };
 
 class RealtimeHud {
@@ -43,6 +52,7 @@ public:
 private:
     RadarMapAssets m_Radar;
     MenuHudFont m_Font;
-    std::array<unsigned int, 148> m_Textures{}; // 144 tiles, centre/north/disc/font
+    WorldShotImage m_PropertyRadar{};
+    std::array<unsigned int, 149> m_Textures{}; // tiles, centre/north/disc/font1/propertyR
     bool m_Loaded = false;
 };

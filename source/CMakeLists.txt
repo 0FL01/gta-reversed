@@ -31,7 +31,9 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
         app/platform/linux/RealtimeGameplay.cpp
         app/platform/linux/RealtimeHud.cpp
         app/platform/linux/NativePlayerAssets.cpp
+        app/platform/linux/NativeCollisionAssets.cpp
         app/platform/linux/NativeScriptSession.cpp
+        app/platform/linux/NativeScriptEntities.cpp
         app/platform/linux/RealtimeScriptHost.cpp
         app/platform/linux/WorldShot.cpp
         app/platform/linux/SceneShot.cpp

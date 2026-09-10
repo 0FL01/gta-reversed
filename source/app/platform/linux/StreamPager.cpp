@@ -46,6 +46,7 @@ namespace {
 constexpr float kCellSize = 300.0f;
 constexpr float kHysteresis = 100.0f;
 StreamPagerOptions s_options;
+NativeCollisionPopulation s_collisionPopulation;
 
 void SetErr(char* err, std::size_t errSize, const char* msg) {
     if (!err || errSize == 0) {
@@ -239,6 +240,7 @@ struct IdeEntry {
 void ParseIdeText(const std::string& text, std::map<std::string, IdeEntry>& out,
                   std::set<std::string>& animModels, std::map<int, std::string>& modelIds) {
     int mode = 0; // 0 none, 1 static, 2 anim
+    bool timeModel = false;
     size_t pos = 0;
     while (pos <= text.size()) {
         size_t end = text.find('\n', pos);
@@ -256,10 +258,12 @@ void ParseIdeText(const std::string& text, std::map<std::string, IdeEntry>& out,
         }
         if (head == "objs" || head == "tobj") {
             mode = 1;
+            timeModel = head == "tobj";
             continue;
         }
         if (head == "anim") {
             mode = 2;
+            timeModel = false;
             continue;
         }
         if (mode == 0) {
@@ -276,6 +280,7 @@ void ParseIdeText(const std::string& text, std::map<std::string, IdeEntry>& out,
         std::string key = model;
         ToLowerInPlace(key);
         modelIds[id] = model;
+        s_collisionPopulation.Models[id] = {key, timeModel};
         if (mode == 2) {
             animModels.insert(key);
             continue;
@@ -292,6 +297,8 @@ struct IplInst {
     float pos[3] = {};
     float quat[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
     int lod = -1;
+    int modelId = -1;
+    uint32 flags = 0;
 };
 
 // Layout from tBinaryIplFile (0x4c header) and CFileObjectInstance
@@ -321,6 +328,8 @@ static bool ParseBinaryIpl(const std::vector<uint8>& bytes, const std::map<int, 
         }
         IplInst inst;
         inst.model = model->second;
+        inst.modelId = static_cast<int32>(ReadU32(p + 28));
+        inst.flags = ReadU32(p + 32);
         // Upper instance-type bits are streaming/tunnel flags, NOT interior.
         inst.interior = static_cast<int>(ReadU32(p + 32) & 0xff);
         inst.lod = static_cast<int32>(ReadU32(p + 36));
@@ -379,6 +388,7 @@ void ParseIplText(const std::string& text, std::vector<IplInst>& out) {
             continue;
         }
         inst.model = model;
+        inst.modelId = id;
         inst.quat[0] = qx;
         inst.quat[1] = qy;
         inst.quat[2] = qz;
@@ -932,6 +942,8 @@ bool StreamPager_Init(const char* gameDir, E2ELoadInfo& info, char* err, std::si
                       const StreamPagerOptions& options) {
     assert(std::isfinite(options.radius) && options.radius > 0 && options.maxInstances > 0);
     s_options = options;
+    s_collisionPopulation = {};
+    s_collisionPopulation.IncludesStreamed = options.includeStreamed;
     info = E2ELoadInfo{};
     if (!gameDir || !gameDir[0]) {
         SetErr(err, errSize, "no game dir");
@@ -983,6 +995,19 @@ bool StreamPager_Init(const char* gameDir, E2ELoadInfo& info, char* err, std::si
     }
 
     std::vector<IplInst> all;
+    auto exportInstances = [&](size_t begin, const std::string& source, bool binary) {
+        for (size_t i = begin; i < all.size(); ++i) {
+            const auto& inst = all[i];
+            NativeCollisionPlacement p;
+            p.Model = inst.model; ToLowerInPlace(p.Model);
+            p.ModelId = inst.modelId; p.Interior = inst.interior; p.Lod = inst.lod;
+            p.Flags = inst.flags; p.Ipl = source; p.Binary = binary;
+            p.Record = static_cast<uint32>(i - begin);
+            std::copy_n(inst.pos, 3, p.Position.begin());
+            std::copy_n(inst.quat, 4, p.Quaternion.begin());
+            s_collisionPopulation.Instances.push_back(std::move(p));
+        }
+    };
     int iplFiles = 0;
     for (const std::string& rel : iplPaths) {
         std::string text;
@@ -991,6 +1016,7 @@ bool StreamPager_Init(const char* gameDir, E2ELoadInfo& info, char* err, std::si
         }
         size_t before = all.size();
         ParseIplText(text, all);
+        exportInstances(before, rel, false);
         if (all.size() > before) {
             ++iplFiles;
         }
@@ -1026,12 +1052,14 @@ bool StreamPager_Init(const char* gameDir, E2ELoadInfo& info, char* err, std::si
                     continue;
                 }
                 std::vector<uint8> bytes;
+                const auto before = all.size();
                 if (!ImgReadBytes(img, entry.nameLower, bytes) ||
                     !ParseBinaryIpl(bytes, modelIds, all, err, errSize)) {
                     std::printf("pager-binary-fail file=%s\n", entry.nameLower.c_str());
                     return false;
                 }
                 ++info.binaryIplFiles;
+                exportInstances(before, img.absPath + ":" + entry.nameLower, true);
             }
         }
         info.binaryInstances = static_cast<int>(all.size() - textCount);
@@ -1522,6 +1550,7 @@ void StreamPager_Counters(int& sectorsLoaded, int& sectorsEvicted, int& modelsPe
 }
 
 void StreamPager_Shutdown() {
+    s_collisionPopulation = {};
     for (rw::TexDictionary* txd : s_txdOrder) {
         if (txd) {
             txd->destroy();
@@ -1541,4 +1570,13 @@ void StreamPager_Shutdown() {
         s_empty = nil;
     }
     s_init = false;
+}
+
+bool StreamPager_CollisionPopulation(NativeCollisionPopulation& out, std::string& error) {
+    if (!s_init) { error = "collision population requires initialized pager"; return false; }
+    if (!s_collisionPopulation.IncludesStreamed) {
+        error = "source collision requires pager includeStreamed=true"; return false;
+    }
+    out = s_collisionPopulation;
+    error.clear(); return true;
 }

@@ -36,7 +36,7 @@ char s_BasePath[1024] = { 0 };
 
 void BuildPath(const char* file, char* out, size_t outSize) {
     assert(file && out);
-    if (s_BasePath[0] == '\0') {
+    if (file[0] == '/' || s_BasePath[0] == '\0') {
         (void)snprintf(out, outSize, "%s", file);
         return;
     }

@@ -7,6 +7,7 @@
 #include <cassert>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <exception>
 #include <memory>
 #include <mutex>
@@ -27,11 +28,14 @@ struct CpuWorld {
     uint64_t Generation{};
     WorldShotScene Scene;
     RealtimeGameplayWorld Collision;
+    std::shared_ptr<const NativeCollisionSnapshot> SourceCollision;
     E2EPagerFrame Frame{};
     std::string Error;
     double Started{}, PagerMs{}, CollisionMs{};
 
-    void Build(bool collision) {
+    // Without a context, retain the legacy render fixture path. Runtime physics always
+    // supplies a source context; both outputs belong to Position/Generation.
+    void Build(bool collision, const std::shared_ptr<const NativeCollisionContext>& context = {}) {
         Started = Milliseconds();
         char error[512]{};
         if (!StreamPager_Update(Position.X, Position.Y, Position.Z, Scene, Frame, error, sizeof(error))) {
@@ -40,9 +44,22 @@ struct CpuWorld {
         }
         PagerMs = Milliseconds() - Started;
         if (collision) {
-            Collision.Rebuild(Scene, Error);
+            if (context) {
+                auto snapshot = std::make_shared<NativeCollisionSnapshot>();
+                if (!context->Snapshot(Position.X, Position.Y, *snapshot, Error) ||
+                    !Collision.Rebuild(*snapshot, Error)) return;
+                SourceCollision = std::move(snapshot);
+            } else {
+                Collision.Rebuild(Scene, Error);
+            }
         }
         CollisionMs = Milliseconds() - Started - PagerMs;
+        if (SourceCollision) {
+            std::printf("source-col-world generation=%llu center=%.3f,%.3f,%.3f pagerMs=%.2f collisionMs=%.2f instances=%zu triangles=%zu spheres=%zu boxes=%zu collapsed=%zu missing=%zu empty=%zu\n",
+                static_cast<unsigned long long>(Generation), Position.X, Position.Y, Position.Z, PagerMs, CollisionMs,
+                SourceCollision->Instances.size(), Collision.TriangleCount(), Collision.SphereCount(), Collision.BoxCount(),
+                Collision.CollapsedTriangleCount(), SourceCollision->MissingModels, SourceCollision->EmptyModels);
+        }
     }
 };
 
@@ -53,7 +70,8 @@ struct CpuWorld {
 // not independent: librw current dictionary, plugins, frame lists are global.
 class Worker {
 public:
-    explicit Worker(bool collision) : m_Collision(collision), m_Thread([this] { Run(); }) {}
+    explicit Worker(bool collision, std::shared_ptr<const NativeCollisionContext> context = {})
+        : m_Collision(collision), m_Context(std::move(context)), m_Thread([this] { Run(); }) {}
     ~Worker() { Stop({}, {}); }
     Worker(const Worker&) = delete;
     Worker& operator=(const Worker&) = delete;
@@ -139,7 +157,7 @@ private:
             next->Position = center;
             next->Generation = ++m_Generation;
             try {
-                next->Build(m_Collision);
+                next->Build(m_Collision, m_Context);
             } catch (const std::exception& error) {
                 next->Error = error.what();
             }
@@ -151,6 +169,7 @@ private:
     }
 
     bool m_Collision;
+    std::shared_ptr<const NativeCollisionContext> m_Context;
     std::mutex m_Mutex;
     std::condition_variable m_Wake;
     bool m_Stop = false, m_Wanted = false, m_Busy = false, m_Building = false;

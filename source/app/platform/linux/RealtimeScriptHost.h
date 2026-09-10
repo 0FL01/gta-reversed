@@ -3,6 +3,7 @@
 #pragma once
 
 #include "app/platform/linux/NativeScriptSession.h"
+#include "app/platform/linux/NativeScriptEntities.h"
 #include "app/platform/linux/RealtimeGameplay.h"
 #include "app/platform/linux/StreamPager.h"
 #include <functional>
@@ -10,10 +11,11 @@
 
 struct RealtimeScriptWorldPublication {
     // A live loader transfers exclusive scene ownership at a frame boundary.
-    // The host builds its own BVH copy before publishing either output.
+    // Collision is an owned source-COL query world paired with this scene.
     std::shared_ptr<const WorldShotScene> Scene;
     NativeScriptPosition Center;
     E2EPagerFrame Frame;
+    std::shared_ptr<const RealtimeGameplayWorld> Collision;
 };
 
 struct RealtimeScriptGroup {
@@ -45,7 +47,8 @@ public:
     // Parent: StreamPager_Init(includeStreamed=true), then this, then RunPass.
     // Loads main.scm and base player pose caches, never an outfit. Call exactly
     // once BEFORE launching the RW streaming worker. Pager lifecycle stays parent-owned.
-    bool InitializeBeforeWorker(const char* gameDir, std::string& error);
+    bool InitializeBeforeWorker(const char* gameDir, std::string& error,
+        std::shared_ptr<const NativeCollisionContext> collision = {});
     // Install a worker handoff/poll callback under exclusive host ownership. Callback
     // must only hand off owned results; never parse on the GL/main thread.
     // SealStartup MUST precede launching the worker, even when no loader exists.
@@ -56,18 +59,20 @@ public:
     const NativeScriptState& State() const { return m_Session.State(); }
     const NativeScriptSession& Session() const { return m_Session; }
     // Clock/fade/stats/relationships are owned VM state above. Presentation,
-    // stats notifications, full COL, and mission-0 world services are NOT implemented.
+    // stats notifications and full mission-0 world services are NOT implemented.
     // SetupPlayerPed minimum here is MODEL_PLAYER + registered mission actor,
     // playing native on-foot controller + group leader membership. Group AI task
     // allocation/processing, combat/speech and full upstream ped intelligence
     // are not supplied by this bridge. Unknown opcodes stay terminal VM faults.
-    static constexpr const char* CollisionSource = "pager IPL/DFF render-triangle BVH approximation; not source COL";
+    static constexpr const char* CollisionSource = "source COL triangles/spheres/oriented boxes; owned text+binary IPL residency";
     const RealtimeGameplayWorld* World() const { return m_World.get(); }
     const RealtimeScriptWorldPublication& Publication() const { return m_Publication; }
     std::uint64_t WorldRevision() const { return m_WorldRevision; }
     const std::vector<RealtimeScriptHostEvent>& Events() const { return m_Events; }
     const RealtimeGameplay* ResolvePed(NativeScriptPedRef ref) const;
     const RealtimeScriptGroup* ResolveGroup(NativeScriptGroupRef ref) const;
+    NativeScriptEntities& Entities() { return m_Entities; }
+    const NativeScriptEntities& Entities() const { return m_Entities; }
 
     NativeScriptServiceResult RequestCollision(const NativeScriptCollisionRequest&) override;
     NativeScriptServiceResult LoadScene(const NativeScriptSceneRequest&) override;
@@ -76,21 +81,28 @@ public:
     NativeScriptReferenceResult<NativeScriptPedRef> GetPlayerChar(const NativeScriptPlayerLookupRequest&) override;
     NativeScriptServiceResult SetCameraBehindPlayer(const NativeScriptCameraRequest&) override;
     NativeScriptServiceResult SetCharHeading(const NativeScriptHeadingRequest&) override;
+    NativeScriptReferenceResult<NativeScriptPickupRef> CreateLockedProperty(const NativeScriptLockedPropertyRequest&) override;
+    NativeScriptReferenceResult<NativeScriptBlipRef> CreateContactBlip(const NativeScriptContactBlipRequest&) override;
+    NativeScriptServiceResult SetBlipDisplay(const NativeScriptBlipDisplayRequest&) override;
 
 private:
     NativeScriptServiceResult PublishWorld(const NativeScriptSceneRequest& request, bool requireGround = false);
-    std::optional<NativeScriptServiceResult> Replay(const RealtimeScriptHostEvent& event) const;
+    std::optional<NativeScriptServiceResult> Replay(const RealtimeScriptHostEvent& event);
     void Commit(RealtimeScriptHostEvent event);
     NativeScriptPedRef PedRef() const;
     NativeScriptGroupRef GroupRef() const;
 
     RealtimeGameplay& m_Gameplay;
     NativeScriptSession m_Session;
-    std::unique_ptr<RealtimeGameplayWorld> m_World;
+    NativeScriptEntities m_Entities;
+    std::shared_ptr<const NativeCollisionContext> m_CollisionContext;
+    std::shared_ptr<const RealtimeGameplayWorld> m_World;
     RealtimeScriptWorldPublication m_Publication;
     WorldLoader m_Loader;
     CancelLoad m_Cancel;
     std::optional<NativeScriptRequestId> m_PendingLoad;
+    NativeScriptPosition m_PendingPosition;
+    bool m_PendingGround = false;
     std::optional<NativeScriptPosition> m_CollisionRegion, m_LoadedScene;
     std::vector<RealtimeScriptHostEvent> m_Events;
     // One real persistent player binding, deliberately bounded to player0.

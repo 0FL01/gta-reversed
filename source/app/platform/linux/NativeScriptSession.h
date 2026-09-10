@@ -1,6 +1,6 @@
 // Bounded, owned native SCM startup interpreter. No original-address dispatcher.
 // Supported contract: main first WAIT + mission-0 policy/numeric initialization
-// through the first entity-service barrier (0517 remains unadvanced/Unsupported).
+// through the locked-property/contact-radar service group; unknowns fault.
 // No result means "game booted"; hosts choose an explicit observation boundary.
 #pragma once
 
@@ -53,6 +53,8 @@ struct NativeScriptPlayerRequest {
 // player index, pointer, or unversioned slot for these opaque script references.
 struct NativeScriptGroupRef { std::int32_t Value = -1; };
 struct NativeScriptPedRef { std::int32_t Value = -1; };
+struct NativeScriptPickupRef { std::int32_t Value = -1; };
+struct NativeScriptBlipRef { std::int32_t Value = -1; };
 template<typename Ref> struct NativeScriptReferenceResult {
     NativeScriptServiceResult Result;
     Ref Reference;
@@ -66,6 +68,21 @@ struct NativeScriptHeadingRequest {
     NativeScriptRequestId Id;
     NativeScriptPedRef Ped;
     float Radians = 0; // source FixAngleDegrees (one +/-360 adjustment), then radians
+};
+struct NativeScriptLockedPropertyRequest {
+    NativeScriptRequestId Id;
+    NativeScriptPosition Position;
+    std::array<char, 8> Text{};
+};
+struct NativeScriptContactBlipRequest {
+    NativeScriptRequestId Id;
+    NativeScriptPosition Position;
+    std::int32_t Sprite = 0;
+};
+struct NativeScriptBlipDisplayRequest {
+    NativeScriptRequestId Id;
+    NativeScriptBlipRef Blip;
+    std::int32_t Display = 0;
 };
 
 class NativeScriptServices {
@@ -86,6 +103,9 @@ public:
     // Source no-op if in vehicle; otherwise aiming/current rotation, entity
     // heading AND RW matrix. A Ready result certifies those actual host effects.
     virtual NativeScriptServiceResult SetCharHeading(const NativeScriptHeadingRequest&) { return {}; }
+    virtual NativeScriptReferenceResult<NativeScriptPickupRef> CreateLockedProperty(const NativeScriptLockedPropertyRequest&) { return {}; }
+    virtual NativeScriptReferenceResult<NativeScriptBlipRef> CreateContactBlip(const NativeScriptContactBlipRequest&) { return {}; }
+    virtual NativeScriptServiceResult SetBlipDisplay(const NativeScriptBlipDisplayRequest&) { return {}; }
 };
 
 enum class NativeScriptStatus { Advanced, BudgetYield, Waiting, Pending, Unsupported, Error };

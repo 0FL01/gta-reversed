@@ -10,6 +10,7 @@
 #include <cstddef>
 
 #include "app/platform/linux/WorldShot.h"
+#include "app/platform/linux/NativeCollisionAssets.h"
 
 struct E2ELoadInfo {
     int binaryIplFiles = 0;
@@ -54,3 +55,6 @@ bool StreamPager_Update(float camX, float camY, float camZ, WorldShotScene& scen
                         char* err, std::size_t errSize);
 void StreamPager_Counters(int& sectorsLoaded, int& sectorsEvicted, int& modelsPeak, int& trisPeak);
 void StreamPager_Shutdown();
+// COPY of the actual pre-render-filter IPL population, including binary source
+// and record provenance. Call under pager ownership; result survives shutdown.
+bool StreamPager_CollisionPopulation(NativeCollisionPopulation& out, std::string& error);

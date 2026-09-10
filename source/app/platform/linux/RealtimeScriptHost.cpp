@@ -1,7 +1,9 @@
 #include "app/platform/linux/RealtimeScriptHost.h"
 #include <cassert>
 #include <cmath>
+#include <filesystem>
 #include <utility>
+#include <type_traits>
 
 using int32 = std::int32_t;
 using uint32 = std::uint32_t;
@@ -13,6 +15,8 @@ using uint64 = std::uint64_t;
 #include "oswrapper/oswrapper.h"
 
 namespace {
+static_assert(std::is_nothrow_copy_assignable_v<RealtimeScriptHostEvent>);
+static_assert(std::is_nothrow_move_constructible_v<RealtimeScriptHostEvent>);
 NativeScriptServiceResult Ready() { return {NativeScriptServiceStatus::Ready, {}}; }
 NativeScriptServiceResult Error(std::string message) { return {NativeScriptServiceStatus::Error, std::move(message)}; }
 NativeScriptServiceResult Unsupported(std::string message) { return {NativeScriptServiceStatus::Unsupported, std::move(message)}; }
@@ -23,16 +27,19 @@ RealtimeScriptHost::RealtimeScriptHost(RealtimeGameplay& gameplay): m_Gameplay(g
 RealtimeScriptHost::~RealtimeScriptHost() {
     if (m_PendingLoad && m_Cancel) m_Cancel(*m_PendingLoad);
 }
-bool RealtimeScriptHost::InitializeBeforeWorker(const char* gameDir, std::string& error) {
+bool RealtimeScriptHost::InitializeBeforeWorker(const char* gameDir, std::string& error,
+    std::shared_ptr<const NativeCollisionContext> collision) {
     if (!gameDir || !*gameDir) { error = "script host needs game directory"; return false; }
     if (m_Initialized || m_Sealed) { error = "script host initialization must precede worker startup, once"; return false; }
-    // Session uses an explicit path; the legacy pager leaves OS_File's global
-    // prefix set. Remove it only during exclusive startup SCM loading.
-    OS_SetFilePathOffset("");
-    const bool loaded = m_Session.LoadMain(gameDir, error);
-    OS_SetFilePathOffset(gameDir);
-    if (!loaded) return false;
+    if (!collision) collision = NativeCollisionContext::LoadBeforeWorker(gameDir, 900.0f, error);
+    if (!collision) return false;
+    m_CollisionContext = std::move(collision);
+    std::error_code pathError;
+    const auto absoluteGameDir = std::filesystem::absolute(gameDir, pathError).string();
+    if (pathError) { error = "script host game path: " + pathError.message(); return false; }
+    if (!m_Session.LoadMain(absoluteGameDir.c_str(), error)) return false;
     if (!m_Gameplay.Initialize(gameDir, error, RealtimeGameplayModel::BasePlayer)) return false;
+    if (!m_Entities.LoadBeforeWorker(gameDir, error)) return false;
     m_Initialized = true;
     error.clear(); return true;
 }
@@ -56,13 +63,17 @@ const RealtimeGameplay* RealtimeScriptHost::ResolvePed(NativeScriptPedRef ref) c
 const RealtimeScriptGroup* RealtimeScriptHost::ResolveGroup(NativeScriptGroupRef ref) const {
     return m_Group.Active && ref.Value == GroupRef().Value && ResolvePed(m_Group.Leader) ? &m_Group : nullptr;
 }
-std::optional<NativeScriptServiceResult> RealtimeScriptHost::Replay(const RealtimeScriptHostEvent& event) const {
+std::optional<NativeScriptServiceResult> RealtimeScriptHost::Replay(const RealtimeScriptHostEvent& event) {
+    if (m_Entities.OwnsRequest(event.Id)) return Error("service request ID already owned by property/radar service");
     for (const auto& old : m_Events) {
         if (old.Id != event.Id) continue;
         if (old.Opcode != event.Opcode || old.Arguments != event.Arguments || old.Index != event.Index)
             return Error("service request ID reused with different command/arguments");
         return Ready();
     }
+    // Reserve the event journal before any live effect. Its state snapshots
+    // contain no allocating members, so Commit cannot fail after publication.
+    if (m_Events.size() == m_Events.capacity()) m_Events.reserve(m_Events.empty() ? 16 : m_Events.size() * 2);
     return {};
 }
 void RealtimeScriptHost::Commit(RealtimeScriptHostEvent event) {
@@ -74,10 +85,14 @@ NativeScriptServiceResult RealtimeScriptHost::PublishWorld(const NativeScriptSce
     if (!m_Initialized) return Error("world service requires initialized host");
     if (!Finite(request.Position)) return Error("nonfinite world request");
     if (m_PendingLoad && *m_PendingLoad != request.Id) return Error("another world request is pending");
+    if (m_PendingLoad && (m_PendingPosition != request.Position || m_PendingGround != requireGround))
+        return Error("pending world request ID reused with changed command/position");
     RealtimeScriptWorldPublication publication;
     if (m_Loader) {
         auto result = m_Loader(request, publication);
-        if (result.Status == NativeScriptServiceStatus::Pending) m_PendingLoad = request.Id;
+        if (result.Status == NativeScriptServiceStatus::Pending) {
+            m_PendingLoad = request.Id; m_PendingPosition = request.Position; m_PendingGround = requireGround;
+        }
         else m_PendingLoad.reset();
         if (result.Status != NativeScriptServiceStatus::Ready) return result;
     } else {
@@ -90,15 +105,20 @@ NativeScriptServiceResult RealtimeScriptHost::PublishWorld(const NativeScriptSce
     }
     if (!publication.Scene || publication.Center != request.Position || publication.Frame.instances <= 0 ||
         publication.Frame.tris <= 0 || publication.Scene->meshes.empty()) return Error("world loader did not supply requested resident scene");
-    auto world = std::make_unique<RealtimeGameplayWorld>();
+    auto world = std::make_shared<RealtimeGameplayWorld>();
     std::string error;
-    if (!world->Rebuild(*publication.Scene, error)) return Error(error);
-    if (!world->TriangleCount()) return Error("loaded scene has no collision triangles");
+    NativeCollisionSnapshot snapshot;
+    // Pure owned data, including when a live loader supplies the render scene.
+    // Never trust a callback's collision as a replacement for source residency.
+    if (!m_CollisionContext->Snapshot(request.Position.X, request.Position.Y, snapshot, error) ||
+        !world->Rebuild(snapshot, error)) return Error(error);
+    if (!world->TriangleCount() && !world->SphereCount() && !world->BoxCount())
+        return Error("loaded region has no source COL primitives");
     float ground;
     const auto p = request.Position;
     if (requireGround && !world->Ground(p.X, p.Y, p.Z + 1.0f, p.Z - 150.0f, ground))
         return Error("LOAD_SCENE has no actual resident ground at requested position");
-    // BVH creation uses only owned CPU triangles, no asset parser/RW calls.
+    publication.Collision = world;
     m_World = std::move(world); m_Publication = std::move(publication); ++m_WorldRevision;
     return Ready();
 }
@@ -166,4 +186,22 @@ NativeScriptServiceResult RealtimeScriptHost::SetCharHeading(const NativeScriptH
     std::string error;
     if (!m_Gameplay.SetScriptHeading(request.Radians, error)) return Error(error);
     Commit(event); return Ready();
+}
+NativeScriptReferenceResult<NativeScriptPickupRef> RealtimeScriptHost::CreateLockedProperty(const NativeScriptLockedPropertyRequest& request) {
+    if (!m_Initialized) return {Error("property service requires initialized host"), {}};
+    if (m_PendingLoad) return {Error("entity service cannot cross pending world request"), {}};
+    for (const auto& event : m_Events) if (event.Id == request.Id) return {Error("entity request ID already owned by player/world service"), {}};
+    return m_Entities.CreateLockedProperty(request);
+}
+NativeScriptReferenceResult<NativeScriptBlipRef> RealtimeScriptHost::CreateContactBlip(const NativeScriptContactBlipRequest& request) {
+    if (!m_Initialized) return {Error("radar service requires initialized host"), {}};
+    if (m_PendingLoad) return {Error("entity service cannot cross pending world request"), {}};
+    for (const auto& event : m_Events) if (event.Id == request.Id) return {Error("entity request ID already owned by player/world service"), {}};
+    return m_Entities.CreateContactBlip(request);
+}
+NativeScriptServiceResult RealtimeScriptHost::SetBlipDisplay(const NativeScriptBlipDisplayRequest& request) {
+    if (!m_Initialized) return Error("radar service requires initialized host");
+    if (m_PendingLoad) return Error("entity service cannot cross pending world request");
+    for (const auto& event : m_Events) if (event.Id == request.Id) return Error("entity request ID already owned by player/world service");
+    return m_Entities.SetBlipDisplay(request);
 }

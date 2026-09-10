@@ -92,6 +92,30 @@ struct MockServices final : NativeScriptServices {
     NativeScriptHeadingRequest Heading;
     float PedHeading = 0.25f, CameraHeading = -1;
     bool InVehicle = false;
+    std::array<ServiceStatus, 3> EntityMode{ServiceStatus::Unsupported, ServiceStatus::Unsupported, ServiceStatus::Unsupported};
+    std::array<unsigned, 3> EntityCalls{}, EntityCompletions{};
+    std::array<NativeScriptRequestId, 3> EntityIds{};
+    NativeScriptLockedPropertyRequest Property;
+    NativeScriptContactBlipRequest Blip;
+    NativeScriptBlipDisplayRequest Display;
+    std::int32_t EntityReference = 0x00020001;
+    NativeScriptServiceResult EntityRespond(unsigned kind, NativeScriptRequestId id) {
+        ++EntityCalls[kind]; EntityIds[kind] = id;
+        if (Throw) throw std::runtime_error("test-only entity service exception");
+        if (EntityMode[kind] == ServiceStatus::Ready && std::find(ReadyIds.begin(), ReadyIds.end(), id) == ReadyIds.end()) {
+            ReadyIds.push_back(id); ++EntityCompletions[kind];
+        }
+        return {EntityMode[kind], "test-only entity service"};
+    }
+    NativeScriptReferenceResult<NativeScriptPickupRef> CreateLockedProperty(const NativeScriptLockedPropertyRequest& r) override {
+        Property = r; return {EntityRespond(0, r.Id), {EntityReference}};
+    }
+    NativeScriptReferenceResult<NativeScriptBlipRef> CreateContactBlip(const NativeScriptContactBlipRequest& r) override {
+        Blip = r; return {EntityRespond(1, r.Id), {EntityReference}};
+    }
+    NativeScriptServiceResult SetBlipDisplay(const NativeScriptBlipDisplayRequest& r) override {
+        Display = r; return EntityRespond(2, r.Id);
+    }
 
     NativeScriptServiceResult NewRespond(unsigned kind, NativeScriptRequestId id) {
         ++NewCalls[kind];
@@ -882,6 +906,79 @@ void NewBarriers() {
     Check(result.Status == Status::Waiting && result.Executed == 3 && session.Threads()[1].Commands == 2 && session.State().Commands == 9, "Ready resumes current pass through mission WAIT then main WAIT");
     Check(session.Threads()[1].Locals[32] == 5 && session.State().Locals[32] == 5, "pending continuation never double-advances timers");
 }
+Bytes EntityCode(unsigned kind, std::uint16_t output = 8, bool timer = false) {
+    Bytes code;
+    if (kind < 2) {
+        Op(code, kind == 0 ? 0x0517 : 0x0570);
+        if (timer) Var(code, 32, false); else F(code, 1.5f);
+        F(code, -2.0f); F(code, 12.25f);
+        if (kind == 0) { code.push_back(9); for (const char c : std::array<char, 8>{'P','R','O','P','_','4',0,0}) code.push_back(c); }
+        else I8(code, 32);
+        Var(code, output);
+    } else { Op(code, 0x018B); I32(code, 0x00020001); I8(code, 2); }
+    return code;
+}
+void EntityBarriers() {
+    for (unsigned kind = 0; kind < 3; ++kind) {
+        NativeScriptSession session;
+        MockServices services;
+        const auto code = EntityCode(kind);
+        LoadFixture(session, services, code);
+        const auto before = session.State();
+        services.EntityMode[kind] = ServiceStatus::Pending;
+        Check(session.Step(services).Status == Status::Pending && session.State() == before, "entity Pending writes no output/state");
+        const auto id = services.EntityIds[kind];
+        Check(session.Step(services).Status == Status::Pending && services.EntityIds[kind] == id && session.State() == before &&
+            services.EntityCompletions[kind] == 0, "repeated entity Pending retains ID with no allocation or state commit");
+        services.EntityMode[kind] = ServiceStatus::Ready;
+        const auto result = session.Step(services);
+        Check(result.Status == Status::Advanced && result.Executed == 1 && result.IP == FixtureCode + code.size() && services.EntityCompletions[kind] == 1,
+            "entity Ready advances exact typed instruction once");
+        if (kind < 2) {
+            std::int32_t ref = -1;
+            Check(session.ReadGlobal(8, ref) && ref == services.EntityReference && session.State().LastOutputWrite.Sequence == before.LastOutputWrite.Sequence + 1,
+                "only Ready writes owned service handle output");
+            const auto position = kind == 0 ? services.Property.Position : services.Blip.Position;
+            Check(position == NativeScriptPosition{1.5f, -2, 12.25f}, "typed entity float coordinates unchanged");
+            if (kind == 0) Check(services.Property.Text == std::array<char, 8>{'P','R','O','P','_','4',0,0}, "8-byte GXT key copied exactly into owned request");
+            else Check(services.Blip.Sprite == 32, "typed source radar sprite argument");
+        } else Check(services.Display.Blip.Value == services.EntityReference && services.Display.Display == 2 &&
+            session.State().LastOutputWrite == before.LastOutputWrite, "018B generation reference/display with no output write");
+        for (const auto failure : {ServiceStatus::Error, ServiceStatus::Unsupported}) {
+            LoadFixture(session, services, code);
+            const auto unchanged = session.State();
+            services.EntityMode[kind] = ServiceStatus::Pending;
+            Check(session.Step(services).Status == Status::Pending, "entity deferred failure begins Pending");
+            services.EntityMode[kind] = failure;
+            const auto failed = session.Step(services);
+            Check(failed.Status == (failure == ServiceStatus::Error ? Status::Error : Status::Unsupported) && failed.Executed == 0 && session.State() == unchanged,
+                "entity service capacity/unsupported failure rolls VM back completely");
+            const auto calls = services.EntityCalls;
+            Check(session.Step(services).Executed == 0 && services.EntityCalls == calls && session.State() == unchanged, "entity terminal failure never retries/duplicates");
+        }
+        LoadFixture(session, services, code);
+        const auto unchanged = session.State(); services.Throw = true;
+        Check(session.Step(services).Status == Status::Error && session.State() == unchanged, "entity exception does not write VM output");
+        services.Throw = false;
+        if (kind < 2) {
+            LoadFixture(session, services, code); services.EntityReference = -1; services.EntityMode[kind] = ServiceStatus::Ready;
+            const auto invalid = session.State();
+            Check(session.Step(services).Status == Status::Error && session.State() == invalid, "Ready invalid entity reference rejected before output write");
+            RejectCode(EntityCode(kind, 0)); RejectCode(EntityCode(kind, 22));
+        }
+        for (std::size_t n = 2; n < code.size(); ++n) RejectCode(Bytes(code.begin(), code.begin() + n));
+    }
+    NativeScriptSession session; MockServices services;
+    LoadFixture(session, services, EntityCode(0, 8, true));
+    services.EntityMode[0] = ServiceStatus::Pending;
+    Check(session.Step(services).Status == Status::Pending, "timer-backed property argument starts deferred");
+    const auto request = services.Property;
+    std::string error; Check(session.AdvanceTime(7, error), "timers advance during property Pending");
+    Check(session.Step(services).Status == Status::Pending && services.Property.Id == request.Id && services.Property.Position == request.Position &&
+        services.Property.Text == request.Text, "pending property freezes inputs while underlying local timer mutates");
+    services.EntityMode[0] = ServiceStatus::Ready;
+    Check(session.Step(services).Status == Status::Advanced && services.EntityCompletions[0] == 1, "frozen property commits once after readiness");
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -893,5 +990,6 @@ int main(int argc, char** argv) {
     NumericAndRelationships();
     ArithmeticArraysAndPolicy();
     NewBarriers();
+    EntityBarriers();
     std::printf("native-script-probe PASS checks=%zu services=TEST-ONLY no-worldboot-claim\n", s_Checks);
 }

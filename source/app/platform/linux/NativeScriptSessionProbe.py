@@ -59,7 +59,7 @@ def inspect_mission_prefix(game_dir):
                 args.append((tag, len(value) if tag == 9 else value))
                 pos += struct.calcsize(fmt)
         print(200000 + ip - start, f'{op:04X}', c['name'], args, 'next', 200000 + pos - start)
-        if c.get('attrs', {}).get('is_constructor'):
+        if op == 0x09B4:
             break
         assert not c.get('attrs', {}).get('is_branch'), 'stop at unanalysed control flow'
         counts[op] += 1

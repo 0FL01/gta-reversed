@@ -5,6 +5,7 @@
 #include "app/platform/linux/Handling.h"
 #include "app/platform/linux/IfpAnim.h"
 #include "app/platform/linux/NativeTransmission.h"
+#include "app/platform/linux/NativeCollisionAssets.h"
 
 #include <algorithm>
 #include <array>
@@ -59,6 +60,21 @@ static bool Overlap(V a, V b, V c, V d) {
 static V Closest(V p, V a, V b, V c) {
     // Triangle Voronoi regions, including edge/vertex contacts.
     const V ab=Sub(b,a), ac=Sub(c,a), ap=Sub(p,a);
+    const V area=Cross(ab,ac);
+    if (Dot(area,area)==0) {
+        // Authored COL faces can collapse to a finite segment or point. Keep
+        // that exact boundary for sphere queries instead of dropping the face.
+        V best=a; float distance=Dot(ap,ap);
+        const std::array<V,3> vertices{a,b,c};
+        for (size_t i=0;i<3;++i) {
+            const V start=vertices[i],edge=Sub(vertices[(i+1)%3],start);
+            const float ee=Dot(edge,edge);
+            const V q=ee>0 ? Add(start,Mul(edge,std::clamp(Dot(Sub(p,start),edge)/ee,0.0f,1.0f))):start;
+            const float d=Dot(Sub(p,q),Sub(p,q));
+            if (d<distance) { best=q; distance=d; }
+        }
+        return best;
+    }
     const float d1=Dot(ab,ap), d2=Dot(ac,ap);
     if (d1<=0 && d2<=0) return a;
     const V bp=Sub(p,b);
@@ -117,11 +133,92 @@ static bool ExtraHandling(float& brake, float& lock, float& traction, uint32_t& 
 } // namespace
 
 struct RealtimeGameplayWorld::Impl {
-    struct Triangle { V A,B,C,Lo,Hi; float Up; };
+    struct Triangle { V A,B,C,Lo,Hi; float Up; size_t Source=SIZE_MAX, Volume=SIZE_MAX; };
+    struct Sphere { V Center; float Radius; size_t Source; };
+    struct Box { V Min,Max,Position; std::array<V,3> Basis; size_t Source; };
     struct Node { V Lo,Hi; uint32_t Begin=0,Count=0,Left=0,Right=0; };
+    struct VolumeIndex {
+        struct Bounds { V Lo,Hi; };
+        std::vector<Bounds> BoundsList;
+        std::vector<uint32_t> Order;
+        std::vector<Node> Nodes;
+        static Bounds Outward(V lo,V hi,float arithmeticMagnitude=0) {
+            // Outward rounding also covers float world/local dot products at
+            // kilometre coordinates. This only enlarges bounds, never geometry.
+            const V pad{64*std::numeric_limits<float>::epsilon()*(1+arithmeticMagnitude+std::max(std::abs(lo.X),std::abs(hi.X))),
+                        64*std::numeric_limits<float>::epsilon()*(1+arithmeticMagnitude+std::max(std::abs(lo.Y),std::abs(hi.Y))),
+                        64*std::numeric_limits<float>::epsilon()*(1+arithmeticMagnitude+std::max(std::abs(lo.Z),std::abs(hi.Z)))};
+            return {Sub(lo,pad),Add(hi,pad)};
+        }
+        void AddBounds(V lo,V hi,float arithmeticMagnitude=0) { BoundsList.push_back(Outward(lo,hi,arithmeticMagnitude)); }
+        uint32_t Build(uint32_t begin,uint32_t end) {
+            Node n; n.Lo={INFINITY,INFINITY,INFINITY}; n.Hi={-INFINITY,-INFINITY,-INFINITY};
+            for (auto i=begin;i<end;++i) {
+                const auto& b=BoundsList[Order[i]]; n.Lo=Min(n.Lo,b.Lo); n.Hi=Max(n.Hi,b.Hi);
+            }
+            const auto index=static_cast<uint32_t>(Nodes.size()); Nodes.push_back(n);
+            if (end-begin<=8) { Nodes[index].Begin=begin; Nodes[index].Count=end-begin; return index; }
+            const V extent=Sub(n.Hi,n.Lo);
+            const int axis=extent.X>extent.Y ? (extent.X>extent.Z ? 0:2):(extent.Y>extent.Z ? 1:2);
+            auto key=[&](uint32_t i) { const V c=Add(BoundsList[i].Lo,BoundsList[i].Hi); return axis==0 ? c.X:axis==1 ? c.Y:c.Z; };
+            const auto mid=begin+(end-begin)/2;
+            std::nth_element(Order.begin()+begin,Order.begin()+mid,Order.begin()+end,
+                [&](uint32_t a,uint32_t b) { const float x=key(a),y=key(b); return x==y ? a<b:x<y; });
+            const auto left=Build(begin,mid),right=Build(mid,end);
+            Nodes[index].Left=left; Nodes[index].Right=right; return index;
+        }
+        void Build() {
+            Order.resize(BoundsList.size()); std::iota(Order.begin(),Order.end(),0u);
+            if (!Order.empty()) Build(0,static_cast<uint32_t>(Order.size()));
+        }
+        void Query(uint32_t index,V lo,V hi,std::vector<uint32_t>& candidates) const {
+            if (Nodes.empty()) return;
+            const auto& n=Nodes[index];
+            if (!Overlap(lo,hi,n.Lo,n.Hi)) return;
+            if (n.Count) {
+                for (uint32_t i=n.Begin;i<n.Begin+n.Count;++i) {
+                    const auto id=Order[i]; const auto& b=BoundsList[id];
+                    if (Overlap(lo,hi,b.Lo,b.Hi)) candidates.push_back(id);
+                }
+            } else { Query(n.Left,lo,hi,candidates); Query(n.Right,lo,hi,candidates); }
+        }
+    };
     std::vector<Triangle> Triangles;
     std::vector<uint32_t> Order;
     std::vector<Node> Nodes;
+    std::vector<Sphere> Spheres;
+    std::vector<Box> Boxes;
+    VolumeIndex SphereIndex,BoxIndex;
+    bool IndexVolumes=true;
+    float BoxRadiusScale=1;
+    // Queries already require exclusive ownership (like Tests). Narrowphase
+    // callbacks do not recurse; reuse this unbounded scratch instead of allocating.
+    mutable std::vector<uint32_t> VolumeCandidates;
+    mutable uint64_t VolumeTests=0;
+    template<class T,class F> bool QueryVolumes(const VolumeIndex& index,const std::vector<T>& volumes,V lo,V hi,F&& visit) const {
+        if (!IndexVolumes) {
+            for (const auto& volume:volumes) { ++VolumeTests; if (visit(volume)) return true; }
+            return false;
+        }
+        const auto bounds=VolumeIndex::Outward(lo,hi);
+        VolumeCandidates.clear(); index.Query(0,bounds.Lo,bounds.Hi,VolumeCandidates);
+        // Preserve the old array-order narrowphase and all <= tie winners.
+        std::sort(VolumeCandidates.begin(),VolumeCandidates.end());
+        for (auto id:VolumeCandidates) { ++VolumeTests; if (visit(volumes[id])) return true; }
+        return false;
+    }
+    std::vector<NativeCollisionHit> Sources;
+    size_t SourceTriangles=0, CollapsedTriangles=0;
+    bool SourceWorld=false;
+    static V Local(const Box& box,V p) {
+        p=Sub(p,box.Position); return {Dot(p,box.Basis[0]),Dot(p,box.Basis[1]),Dot(p,box.Basis[2])};
+    }
+    static bool Inside(const Box& box,V p) {
+        return p.X>=box.Min.X && p.X<=box.Max.X && p.Y>=box.Min.Y && p.Y<=box.Max.Y && p.Z>=box.Min.Z && p.Z<=box.Max.Z;
+    }
+    void Source(size_t index,NativeCollisionHit* hit) const {
+        if (hit) *hit=index<Sources.size() ? Sources[index]:NativeCollisionHit{};
+    }
     mutable uint64_t Tests=0;
     uint32_t Build(uint32_t begin, uint32_t end) {
         Node n;
@@ -146,6 +243,7 @@ struct RealtimeGameplayWorld::Impl {
         return index;
     }
     template<class F> bool Query(uint32_t index,V lo,V hi,F&& visit) const {
+        if (Nodes.empty()) return false;
         const auto& n=Nodes[index];
         if (!Overlap(lo,hi,n.Lo,n.Hi)) return false;
         if (n.Count) {
@@ -161,6 +259,98 @@ struct RealtimeGameplayWorld::Impl {
 
 RealtimeGameplayWorld::RealtimeGameplayWorld():m_Impl(std::make_unique<Impl>()) {}
 RealtimeGameplayWorld::~RealtimeGameplayWorld()=default;
+bool RealtimeGameplayWorld::Rebuild(const NativeCollisionSnapshot& snapshot,std::string& error,bool indexVolumes) {
+    auto next=std::make_unique<Impl>(); next->SourceWorld=true;
+    next->IndexVolumes=indexVolumes;
+    auto vec=[](const NativeCollisionVector& v) -> V {return {v[0],v[1],v[2]};};
+    for (const auto& inst:snapshot.Instances) {
+        if (!inst.Model || !inst.Model->Unsupported.empty()) { error="invalid/unsupported owned COL instance"; return false; }
+        const auto& model=*inst.Model;
+        const V position=vec(inst.Placement.Position);
+        std::array<V,3> basis{vec(inst.Basis[0]),vec(inst.Basis[1]),vec(inst.Basis[2])};
+        if (!Finite(position)) { error="invalid source COL placement"; return false; }
+        for (size_t i=0;i<3;++i) for (size_t j=0;j<3;++j) {
+            if (!Finite(basis[i]) || std::abs(Dot(basis[i],basis[j])-(i==j ? 1.0f:0.0f))>0.001f) {
+                error="source COL basis is not rigid"; return false;
+            }
+        }
+        auto world=[&](V p) {return Add(position,Add(Mul(basis[0],p.X),Add(Mul(basis[1],p.Y),Mul(basis[2],p.Z))));};
+        auto source=[&](NativeCollisionPrimitive type,size_t index,NativeCollisionSurface surface) {
+            NativeCollisionHit hit;
+            hit.Model=model.Name; hit.Library=model.Library; hit.Ipl=inst.Placement.Ipl;
+            hit.ModelId=inst.Placement.ModelId; hit.HeaderId=model.HeaderId; hit.Record=inst.Placement.Record;
+            hit.Binary=inst.Placement.Binary; hit.ValidatedHeaderId=model.ValidatedHeaderId; hit.TimeShared=inst.TimeShared;
+            hit.Primitive=type; hit.PrimitiveIndex=static_cast<uint32_t>(index); hit.Surface=surface;
+            next->Sources.push_back(std::move(hit)); return next->Sources.size()-1;
+        };
+        auto triangle=[&](V a,V b,V c,size_t src) {
+            const V n=Cross(Sub(b,a),Sub(c,a)); const float length=Length(n);
+            if (!Finite(a)||!Finite(b)||!Finite(c)||!std::isfinite(length)) return false;
+            next->Triangles.push_back({a,b,c,Min(a,Min(b,c)),Max(a,Max(b,c)),length>0 ? std::abs(n.Z)/length:0,src});
+            if (length==0) ++next->CollapsedTriangles;
+            return true;
+        };
+        for (size_t i=0;i<model.Faces.size();++i) {
+            const auto& face=model.Faces[i];
+            for (auto index:face.Vertices) if (index>=model.Vertices.size()) { error="invalid owned COL face index"; return false; }
+            if (!triangle(world(vec(model.Vertices[face.Vertices[0]])),world(vec(model.Vertices[face.Vertices[1]])),
+                          world(vec(model.Vertices[face.Vertices[2]])),source(NativeCollisionPrimitive::Triangle,i,face.Surface))) {
+                error="nonfinite source COL face: "+model.Name+"["+std::to_string(i)+"]"; return false;
+            }
+            ++next->SourceTriangles;
+        }
+        for (size_t i=0;i<model.Spheres.size();++i) {
+            const auto& s=model.Spheres[i]; const V center=world(vec(s.Center));
+            if (!Finite(center)||!std::isfinite(s.Radius)||s.Radius<0) { error="invalid owned COL sphere"; return false; }
+            next->Spheres.push_back({center,s.Radius,source(NativeCollisionPrimitive::Sphere,i,s.Surface)});
+        }
+        for (size_t i=0;i<model.Boxes.size();++i) {
+            const auto& b=model.Boxes[i]; const V lo=vec(b.Min),hi=vec(b.Max);
+            if (!Finite(lo)||!Finite(hi)||lo.X>hi.X||lo.Y>hi.Y||lo.Z>hi.Z) { error="invalid owned COL box"; return false; }
+            const auto src=source(NativeCollisionPrimitive::Box,i,b.Surface);
+            next->Boxes.push_back({lo,hi,position,basis,src});
+            // Exact boundary tessellation supports face/finite-edge/corner CCD;
+            // retain the oriented volume for containment (a surface alone cannot).
+            std::array<V,8> v;
+            for (size_t k=0;k<8;++k) v[k]=world({k&1 ? hi.X:lo.X,k&2 ? hi.Y:lo.Y,k&4 ? hi.Z:lo.Z});
+            constexpr int faces[6][4]={{0,2,6,4},{1,5,7,3},{0,4,5,1},{2,3,7,6},{0,1,3,2},{4,6,7,5}};
+            for (const auto& f:faces) {
+                // Collapsed sides retain their segment/point CCD boundary too.
+                if (triangle(v[f[0]],v[f[1]],v[f[2]],src)) next->Triangles.back().Volume=next->Boxes.size()-1;
+                if (triangle(v[f[0]],v[f[2]],v[f[3]],src)) next->Triangles.back().Volume=next->Boxes.size()-1;
+            }
+        }
+    }
+    if (next->Triangles.empty() && next->Spheres.empty() && next->Boxes.empty()) { error="owned source collision is empty"; return false; }
+    next->Order.resize(next->Triangles.size()); std::iota(next->Order.begin(),next->Order.end(),0u);
+    if (!next->Order.empty()) next->Build(0,static_cast<uint32_t>(next->Order.size()));
+    for (const auto& s:next->Spheres) {
+        const V r{s.Radius,s.Radius,s.Radius}; next->SphereIndex.AddBounds(Sub(s.Center,r),Add(s.Center,r));
+    }
+    for (const auto& b:next->Boxes) {
+        // Local() uses B^T, which is only approximately orthonormal in float.
+        // Bound its actual inverse, not just forward-transformed box corners.
+        const float det=Dot(b.Basis[0],Cross(b.Basis[1],b.Basis[2]));
+        const std::array<V,3> inverse{Mul(Cross(b.Basis[1],b.Basis[2]),1/det),
+            Mul(Cross(b.Basis[2],b.Basis[0]),1/det),Mul(Cross(b.Basis[0],b.Basis[1]),1/det)};
+        V lo{INFINITY,INFINITY,INFINITY},hi{-INFINITY,-INFINITY,-INFINITY};
+        for (int k=0;k<8;++k) {
+            const V p=Add(b.Position,Add(Mul(inverse[0],k&1 ? b.Max.X:b.Min.X),
+                Add(Mul(inverse[1],k&2 ? b.Max.Y:b.Min.Y),Mul(inverse[2],k&4 ? b.Max.Z:b.Min.Z))));
+            lo=Min(lo,p); hi=Max(hi,p);
+        }
+        // Include intermediate operands even if translation cancels a large
+        // local offset, leaving a small final world bound near the origin.
+        next->BoxIndex.AddBounds(lo,hi,Length(b.Position)+Length(b.Min)+Length(b.Max));
+        // A local radius maps to an ellipsoid. Each inverse row's norm bounds
+        // its world-axis extent; use the largest for the query AABB expansion.
+        for (V row:{V{inverse[0].X,inverse[1].X,inverse[2].X},V{inverse[0].Y,inverse[1].Y,inverse[2].Y},V{inverse[0].Z,inverse[1].Z,inverse[2].Z}})
+            next->BoxRadiusScale=std::max(next->BoxRadiusScale,Length(row));
+    }
+    next->BoxRadiusScale=std::nextafter(next->BoxRadiusScale,INFINITY);
+    if (indexVolumes) { next->SphereIndex.Build(); next->BoxIndex.Build(); }
+    m_Impl=std::move(next); error.clear(); return true;
+}
 bool RealtimeGameplayWorld::Rebuild(const WorldShotScene& scene,std::string& error) {
     auto next=std::make_unique<Impl>();
     for (const auto& m:scene.meshes) {
@@ -181,8 +371,8 @@ bool RealtimeGameplayWorld::Rebuild(const WorldShotScene& scene,std::string& err
     next->Build(0,static_cast<uint32_t>(next->Triangles.size()));
     m_Impl=std::move(next); error.clear(); return true;
 }
-bool RealtimeGameplayWorld::Ground(float x,float y,float top,float bottom,float& height) const {
-    if (m_Impl->Nodes.empty() || top<bottom) return false;
+bool RealtimeGameplayWorld::Ground(float x,float y,float top,float bottom,float& height,NativeCollisionHit* source) const {
+    if (top<bottom) return false;
     float best=top-bottom;
     bool found=false;
     const float origin[3]={x,y,top},direction[3]={0,0,-1};
@@ -190,14 +380,22 @@ bool RealtimeGameplayWorld::Ground(float x,float y,float top,float bottom,float&
         if (t.Up<WalkableUp) return false; // reject unwalkable walls, accept real ramps
         const float a[3]={t.A.X,t.A.Y,t.A.Z},b[3]={t.B.X,t.B.Y,t.B.Z},c[3]={t.C.X,t.C.Y,t.C.Z};
         float hit;
-        if (Collide::RayTri(origin,direction,a,b,c,hit) && hit<=best) { best=hit; found=true; }
+        if (Collide::RayTri(origin,direction,a,b,c,hit) && hit<=best) { best=hit; found=true; m_Impl->Source(t.Source,source); }
+        return false;
+    });
+    m_Impl->QueryVolumes(m_Impl->SphereIndex,m_Impl->Spheres,{x,y,bottom},{x,y,top},[&](const Impl::Sphere& s) {
+        const float dx=x-s.Center.X,dy=y-s.Center.Y,zz=s.Radius*s.Radius-dx*dx-dy*dy;
+        if (zz<0 || s.Radius==0) return false;
+        const float z=std::sqrt(zz),distance=top-s.Center.Z-z;
+        if (z/s.Radius>=WalkableUp && distance>=0 && distance<=best) {
+            best=distance; found=true; m_Impl->Source(s.Source,source);
+        }
         return false;
     });
     if (found) height=top-best;
     return found;
 }
-bool RealtimeGameplayWorld::Raycast(V from,V to,V& hit) const {
-    if (m_Impl->Nodes.empty()) return false;
+bool RealtimeGameplayWorld::Raycast(V from,V to,V& hit,NativeCollisionHit* source) const {
     const V delta=Sub(to,from);
     float best=Length(delta);
     if (best<1e-6f) return false;
@@ -207,27 +405,77 @@ bool RealtimeGameplayWorld::Raycast(V from,V to,V& hit) const {
     m_Impl->Query(0,Min(from,to),Max(from,to),[&](const Impl::Triangle& t) {
         const float a[3]={t.A.X,t.A.Y,t.A.Z},b[3]={t.B.X,t.B.Y,t.B.Z},c[3]={t.C.X,t.C.Y,t.C.Z};
         float distance;
-        if (Collide::RayTri(origin,direction,a,b,c,distance) && distance<=best) { best=distance; found=true; }
+        if (Collide::RayTri(origin,direction,a,b,c,distance) && distance<=best) { best=distance; found=true; m_Impl->Source(t.Source,source); }
+        return false;
+    });
+    m_Impl->QueryVolumes(m_Impl->SphereIndex,m_Impl->Spheres,Min(from,to),Max(from,to),[&](const Impl::Sphere& s) {
+        const V o=Sub(from,s.Center); const float od=Dot(o,d),cc=Dot(o,o)-s.Radius*s.Radius,disc=od*od-cc;
+        if (disc<0) return false;
+        const float distance=cc<=0 ? 0:-od-std::sqrt(disc);
+        if (distance>=0 && distance<=best) { best=distance; found=true; m_Impl->Source(s.Source,source); }
+        return false;
+    });
+    m_Impl->QueryVolumes(m_Impl->BoxIndex,m_Impl->Boxes,from,from,[&](const Impl::Box& b) {
+        if (Impl::Inside(b,Impl::Local(b,from))) { best=0; found=true; m_Impl->Source(b.Source,source); }
         return false;
     });
     if (found) hit=Add(from,Mul(d,best));
     return found;
 }
-bool RealtimeGameplayWorld::SphereBlocked(V center,float radius) const {
-    if (m_Impl->Nodes.empty()) return false;
-    const V r{radius,radius,radius};
+bool RealtimeGameplayWorld::SphereBlocked(V center,float radius,NativeCollisionHit* source) const {
+    const V r{radius,radius,radius},br=Mul(r,m_Impl->BoxRadiusScale);
+    if (m_Impl->QueryVolumes(m_Impl->SphereIndex,m_Impl->Spheres,Sub(center,r),Add(center,r),[&](const Impl::Sphere& s) {
+        const V d=Sub(center,s.Center); const float r=radius+s.Radius;
+        if (Dot(d,d)<r*r) { m_Impl->Source(s.Source,source); return true; }
+        return false;
+    })) return true;
+    if (m_Impl->QueryVolumes(m_Impl->BoxIndex,m_Impl->Boxes,Sub(center,br),Add(center,br),[&](const Impl::Box& b) {
+        const V p=Impl::Local(b,center),closest=Max(b.Min,Min(b.Max,p)),d=Sub(p,closest);
+        if (Impl::Inside(b,p) || Dot(d,d)<radius*radius) { m_Impl->Source(b.Source,source); return true; }
+        return false;
+    })) return true;
     return m_Impl->Query(0,Sub(center,r),Add(center,r),[&](const Impl::Triangle& t) {
         const V d=Sub(center,Closest(center,t.A,t.B,t.C));
-        return Dot(d,d)<radius*radius;
+        if (Dot(d,d)>=radius*radius) return false;
+        m_Impl->Source(t.Source,source); return true;
     });
 }
-bool RealtimeGameplayWorld::SweepSphere(V from,V to,float radius,float& fraction,bool walkableOnly,float maxContactHeight,V* contactNormal) const {
-    if (m_Impl->Nodes.empty()) return false;
+bool RealtimeGameplayWorld::SweepSphere(V from,V to,float radius,float& fraction,bool walkableOnly,float maxContactHeight,V* contactNormal,NativeCollisionHit* source) const {
     const V delta=Sub(to,from),r{radius,radius,radius};
     const float dd=Dot(delta,delta);
     if (dd<1e-12f) return false;
     float best=1.0f; bool found=false; V bestNormal{};
+    auto volumeContact=[&](float f,V normal,V contact,size_t src) {
+        if (f<0 || f>best || Dot(normal,delta)>=-1e-8f) return;
+        if (walkableOnly && (normal.Z<WalkableUp || contact.Z>maxContactHeight+0.001f)) return;
+        best=f; found=true; bestNormal=normal; m_Impl->Source(src,source);
+    };
+    m_Impl->QueryVolumes(m_Impl->SphereIndex,m_Impl->Spheres,Sub(Min(from,to),r),Add(Max(from,to),r),[&](const Impl::Sphere& s) {
+        const V o=Sub(from,s.Center); const float rr=radius+s.Radius;
+        const float od=Dot(o,delta),cc=Dot(o,o)-rr*rr,disc=od*od-dd*cc;
+        if (disc<0) return false;
+        const float f=cc<=0 ? 0:(-od-std::sqrt(disc))/dd;
+        const V d=Sub(Add(from,Mul(delta,f)),s.Center); const float length=Length(d);
+        const V n=length>1e-8f ? Mul(d,1/length):Mul(delta,-1/std::sqrt(dd));
+        volumeContact(f,n,Add(s.Center,Mul(n,s.Radius)),s.Source);
+        return false;
+    });
+    m_Impl->QueryVolumes(m_Impl->BoxIndex,m_Impl->Boxes,from,from,[&](const Impl::Box& b) {
+        const V p=Impl::Local(b,from);
+        if (!Impl::Inside(b,p)) return false;
+        const std::array<float,3> coord{p.X,p.Y,p.Z},lo{b.Min.X,b.Min.Y,b.Min.Z},hi{b.Max.X,b.Max.Y,b.Max.Z};
+        float closest=INFINITY; V normal{},contact{};
+        for (size_t j=0;j<3;++j) for (int side=0;side<2;++side) {
+            const float distance=side ? hi[j]-coord[j]:coord[j]-lo[j]; const V n=Mul(b.Basis[j],side ? 1.0f:-1.0f);
+            if (distance<closest || (distance==closest && Dot(n,delta)>Dot(normal,delta))) {
+                closest=distance; normal=n; contact=Add(from,Mul(n,distance));
+            }
+        }
+        volumeContact(0,normal,contact,b.Source);
+        return false;
+    });
     m_Impl->Query(0,Sub(Min(from,to),r),Add(Max(from,to),r),[&](const Impl::Triangle& t) {
+        if (t.Volume!=SIZE_MAX && Impl::Inside(m_Impl->Boxes[t.Volume],Impl::Local(m_Impl->Boxes[t.Volume],from))) return false;
         if (walkableOnly && t.Up<WalkableUp) return false;
         auto accept=[&](float f,V contact) {
             if (f<0 || f>best) return;
@@ -236,10 +484,13 @@ bool RealtimeGameplayWorld::SweepSphere(V from,V to,float radius,float& fraction
             // Touching while travelling away/tangentially isn't an obstruction.
             if (Dot(normal,delta)>=-1e-8f) return;
             best=f; found=true; bestNormal=Mul(normal,1.0f/Length(normal));
+            m_Impl->Source(t.Source,source);
         };
         const V closest=Closest(from,t.A,t.B,t.C);
         if (Dot(Sub(from,closest),Sub(from,closest))<radius*radius) accept(0,closest);
-        V normal=Cross(Sub(t.B,t.A),Sub(t.C,t.A)); normal=Mul(normal,1/Length(normal));
+        V normal=Cross(Sub(t.B,t.A),Sub(t.C,t.A));
+        const float normalLength=Length(normal);
+        if (normalLength>0) normal=Mul(normal,1/normalLength);
         const float nd=Dot(normal,delta),plane=Dot(normal,Sub(from,t.A));
         if (std::abs(nd)>1e-8f) for (float side:{-1.0f,1.0f}) {
             const float f=(side*radius-plane)/nd;
@@ -269,8 +520,12 @@ bool RealtimeGameplayWorld::SweepSphere(V from,V to,float radius,float& fraction
     if (found) { fraction=best; if (contactNormal) *contactNormal=bestNormal; }
     return found;
 }
-size_t RealtimeGameplayWorld::TriangleCount() const { return m_Impl->Triangles.size(); }
+size_t RealtimeGameplayWorld::TriangleCount() const { return m_Impl->SourceWorld ? m_Impl->SourceTriangles:m_Impl->Triangles.size(); }
+size_t RealtimeGameplayWorld::SphereCount() const { return m_Impl->Spheres.size(); }
+size_t RealtimeGameplayWorld::BoxCount() const { return m_Impl->Boxes.size(); }
+size_t RealtimeGameplayWorld::CollapsedTriangleCount() const { return m_Impl->CollapsedTriangles; }
 uint64_t RealtimeGameplayWorld::TriangleTests() const { return m_Impl->Tests; }
+uint64_t RealtimeGameplayWorld::VolumeTests() const { return m_Impl->VolumeTests; }
 
 struct RealtimeGameplay::Impl {
     struct Clip {

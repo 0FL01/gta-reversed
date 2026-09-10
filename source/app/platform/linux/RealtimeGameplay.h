@@ -12,15 +12,17 @@
 
 struct NativePlayerClothes;
 struct IfpAnimStats;
+struct NativeCollisionSnapshot;
+struct NativeCollisionHit;
 enum class RealtimeGameplayModel { Andre, BasePlayer };
 
 struct RealtimeVec3 {
     float X = 0.0f, Y = 0.0f, Z = 0.0f;
 };
 
-// Owns a BVH COPY of the actual pager triangles: no retained scene pointers,
-// no text-IPL-only collision bindings, no invented ground on a ray miss.
-// Rebuild after a successful pager update, with exclusive ownership. A worker
+// Owns a BVH COPY of source COL triangles plus analytic spheres/oriented box
+// volumes, or the historical render-scene fixture overload. No retained scene
+// pointers or invented ground on a ray miss. Rebuild with exclusive ownership. A worker
 // may build a separate world, then hand it to gameplay at a frame boundary.
 // Queries (including const queries' counters) require single-thread ownership.
 class RealtimeGameplayWorld {
@@ -30,9 +32,11 @@ public:
     RealtimeGameplayWorld(const RealtimeGameplayWorld&) = delete;
     RealtimeGameplayWorld& operator=(const RealtimeGameplayWorld&) = delete;
     bool Rebuild(const WorldShotScene& scene, std::string& error);
-    bool Ground(float x, float y, float top, float bottom, float& height) const;
-    bool Raycast(RealtimeVec3 from, RealtimeVec3 to, RealtimeVec3& hit) const;
-    bool SphereBlocked(RealtimeVec3 center, float radius) const;
+    // Disable volume indexing only for the exhaustive-query verification oracle.
+    bool Rebuild(const NativeCollisionSnapshot& snapshot, std::string& error, bool indexVolumes = true);
+    bool Ground(float x, float y, float top, float bottom, float& height, NativeCollisionHit* source = nullptr) const;
+    bool Raycast(RealtimeVec3 from, RealtimeVec3 to, RealtimeVec3& hit, NativeCollisionHit* source = nullptr) const;
+    bool SphereBlocked(RealtimeVec3 center, float radius, NativeCollisionHit* source = nullptr) const;
     // Continuous sphere/triangle query; fraction is in [0,1]. Walkable queries
     // require both a walkable triangle and an upward-facing contact normal.
     // Optional unit normal points from the contacted face/edge/vertex toward
@@ -40,9 +44,13 @@ public:
     bool SweepSphere(RealtimeVec3 from, RealtimeVec3 to, float radius,
                      float& fraction, bool walkableOnly = false,
                      float maxContactHeight = std::numeric_limits<float>::infinity(),
-                     RealtimeVec3* contactNormal = nullptr) const;
+                     RealtimeVec3* contactNormal = nullptr, NativeCollisionHit* source = nullptr) const;
+    std::size_t SphereCount() const;
+    std::size_t BoxCount() const;
+    std::size_t CollapsedTriangleCount() const; // retained source/box point-segment boundaries
     std::size_t TriangleCount() const;
     std::uint64_t TriangleTests() const;
+    std::uint64_t VolumeTests() const;
 
 private:
     struct Impl;

@@ -331,9 +331,8 @@ struct GpuScene {
 struct ResidentWorld {
     std::unique_ptr<realtime_streaming::CpuWorld> cpu;
     GpuScene gpu;
-    // The startup host outlives LiveWorld. Its immutable publication and BVH
-    // stay paired until a worker-owned generation replaces this resident.
-    const RealtimeGameplayWorld* startupCollision = nullptr;
+    // Own the startup query world: subsequent host publications cannot dangle it.
+    std::shared_ptr<const RealtimeGameplayWorld> startupCollision;
 
     const RealtimeGameplayWorld& Collision() const {
         return startupCollision ? *startupCollision : cpu->Collision;
@@ -343,6 +342,7 @@ struct ResidentWorld {
 struct LiveWorld {
     std::unique_ptr<ResidentWorld> active = std::make_unique<ResidentWorld>();
     std::unique_ptr<ResidentWorld> pending, retiring;
+    std::shared_ptr<const NativeCollisionContext> collisionContext;
     std::unique_ptr<realtime_streaming::Worker> worker;
     double uploadMs = 0;
 
@@ -354,14 +354,26 @@ struct LiveWorld {
         // scene references now. During play retirement is incremental instead.
     }
 
-    bool Initialize(realtime_streaming::Center center, bool collision) {
+    bool Initialize(realtime_streaming::Center center, bool collision, bool requireSource = false) {
+        if (collision && requireSource && !collisionContext) {
+            std::printf("play-fail gameplay requires source COL context\n");
+            return false;
+        }
         active->cpu = std::make_unique<realtime_streaming::CpuWorld>();
         active->cpu->Position = center;
         active->cpu->Generation = 1;
-        active->cpu->Build(collision);
+        active->cpu->Build(collision, collisionContext);
         if (!active->cpu->Error.empty()) {
             std::printf("play-fail initial world: %s\n", active->cpu->Error.c_str());
             return false;
+        }
+        if (collision && collisionContext) {
+            float ground;
+            NativeCollisionHit hit;
+            if (active->Collision().Ground(center.X, center.Y, center.Z + 1, center.Z - 150, ground, &hit)) {
+                std::printf("play-col-ground xy=%.6f,%.6f z=%.9f model=%s IPL=%s record=%u\n",
+                    center.X, center.Y, ground, hit.Model.c_str(), hit.Ipl.c_str(), hit.Record);
+            }
         }
         return active->gpu.Upload(active->cpu->Scene);
     }
@@ -377,11 +389,13 @@ struct LiveWorld {
         cpu.Generation = 1;
         cpu.Frame = publication.Frame;
         cpu.Scene = *publication.Scene; // owned snapshot, no pager/RW parser or second BVH
-        active->startupCollision = host.World();
+        active->startupCollision = publication.Collision;
         return active->gpu.Upload(cpu.Scene);
     }
 
-    void Start(bool collision) { worker = std::make_unique<realtime_streaming::Worker>(collision); }
+    void Start(bool collision) {
+        worker = std::make_unique<realtime_streaming::Worker>(collision, collisionContext);
+    }
 
     // Call once, BEFORE Tick: physics and draw see exactly the same generation.
     bool Advance(realtime_streaming::Center center, bool& published) {
@@ -639,10 +653,23 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
         load.iplTotal, load.iplKept, load.binaryIplFiles, load.binaryInstances, options.radius, options.maxInstances);
     RealtimeGameplay gameplay;
     std::string gameplayError;
-    RealtimeScriptHost scriptHost(gameplay); // outlives LiveWorld's startup BVH reference
+    std::shared_ptr<const NativeCollisionContext> collisionContext;
+    if (!freecam) {
+        const auto started = realtime_streaming::Milliseconds();
+        collisionContext = NativeCollisionContext::LoadBeforeWorker(gameDir, options.radius, gameplayError);
+        if (!collisionContext) {
+            std::printf("play-fail source COL init: %s\n", gameplayError.c_str());
+            return 1;
+        }
+        const auto& stats = collisionContext->Assets.Stats();
+        std::printf("play-col-load ms=%.2f models=%zu triangles=%zu spheres=%zu boxes=%zu empty=%zu unsupported=%zu IPL=%zu radius=%.0f\n",
+            realtime_streaming::Milliseconds() - started, stats.Models, stats.Triangles, stats.Spheres, stats.Boxes,
+            stats.Empty, stats.Unsupported, collisionContext->Population.Instances.size(), collisionContext->Radius);
+    }
+    RealtimeScriptHost scriptHost(gameplay);
     constexpr std::size_t scriptQuota = 256; // one bounded scheduler pass per presented frame
     if (newGame) {
-        if (!scriptHost.InitializeBeforeWorker(gameDir, gameplayError)) {
+        if (!scriptHost.InitializeBeforeWorker(gameDir, gameplayError, collisionContext)) {
             std::printf("play-fail script init: %s\n", gameplayError.c_str());
             return 1;
         }
@@ -668,7 +695,11 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             result.Executed, scriptHost.State().IP, static_cast<unsigned long long>(scriptHost.WorldRevision()),
             unsigned(clock.Hours), unsigned(clock.Minutes), scriptHost.State().Fade.Alpha);
     }
-    GpuScene actorGpu;
+    GpuScene actorGpu, scriptGpu;
+    if (newGame && !scriptGpu.UploadTextures(scriptHost.Entities().PreparedModel())) {
+        std::printf("play-fail script entity textures\n");
+        return 1;
+    }
     RealtimeEnvironment environment;
     if (!environment.Load(gameDir, error, sizeof(error), hour, weather) ||
         !environment.Upload(error, sizeof(error))) {
@@ -679,6 +710,7 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
                 environment.GetWaterTriangleCount(), freezeTime ? "frozen" : "one-minute-per-second");
     const bool gameplayEnabled = !freecam;
     LiveWorld world;
+    world.collisionContext = collisionContext;
     int updates = 0;
     auto reportWorld = [&]() {
         const auto& cpu = *world.active->cpu;
@@ -688,8 +720,17 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             cpu.Position.X, cpu.Position.Y, cpu.Position.Z);
         std::fflush(stdout);
     };
-    if (!(newGame ? world.Initialize(scriptHost) : world.Initialize({camera.x, camera.y, camera.z}, gameplayEnabled))) {
+    if (!(newGame ? world.Initialize(scriptHost) : world.Initialize({camera.x, camera.y, camera.z}, gameplayEnabled, true))) {
         return 1;
+    }
+    if (demoCurb) {
+        float low{}, high{};
+        if (!world.active->Collision().Ground(1540, -1736, 20, 5, low) ||
+            !world.active->Collision().Ground(1540, -1740.013672f, 20, 5, high)) {
+            std::printf("play-fail demo curb source COL ground missing\n");
+            return 1;
+        }
+        std::printf("play-col-curb low=%.9f high=%.9f rise=%.9f source=COL\n", low, high, high-low);
     }
     reportWorld();
     if (gameplayEnabled) {
@@ -855,6 +896,16 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
                 camera.pitch = view.Pitch;
             }
         }
+        if (newGame) {
+            const auto& state = gameplay.State();
+            auto& entities = scriptHost.Entities();
+            entities.Tick({state.PedRoot.X, state.PedRoot.Y, state.PedRoot.Z},
+                {camera.x, camera.y, camera.z}, state.Ready, state.InVehicle);
+            if (!entities.AdvanceTime(static_cast<std::uint32_t>(gameNs / 1'000'000), gameplayError)) {
+                std::printf("play-fail script entity clock: %s\n", gameplayError.c_str());
+                return 1;
+            }
+        }
         camera.Apply(width, height, std::max(1600.0f, environment.GetParams().farClip));
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         if (newGame) {
@@ -875,12 +926,18 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
         if (gameplayEnabled) {
             environment.BeginObjects();
             actorGpu.DrawActors(gameplay.Actors(), GpuScene::ActorPass::Opaque);
+            if (newGame) {
+                scriptGpu.DrawActors(scriptHost.Entities().Actors(), GpuScene::ActorPass::Opaque);
+            }
             environment.EndWorld();
         }
         environment.DrawWater();
         if (gameplayEnabled) {
             environment.BeginObjects();
             actorGpu.DrawActors(gameplay.Actors(), GpuScene::ActorPass::Alpha);
+            if (newGame) {
+                scriptGpu.DrawActors(scriptHost.Entities().Actors(), GpuScene::ActorPass::Alpha);
+            }
             environment.EndWorld();
         }
         RealtimeHudView hudView;
@@ -895,6 +952,13 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             hudState.playerX = position.X;
             hudState.playerY = position.Y;
             hudState.playerYaw = state.InVehicle ? state.CarHeading : state.PedHeading;
+        }
+        if (newGame) {
+            const auto& entities = scriptHost.Entities();
+            hudState.scriptBlips = entities.Blips();
+            const auto help = entities.HelpPresentation();
+            hudState.helpText = help.Text;
+            hudState.helpAlpha = help.Alpha;
         }
         hud.Draw(hudView, hudState, width, height);
         if (newGame) {
