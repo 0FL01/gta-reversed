@@ -279,6 +279,13 @@ bool RealtimeScriptHost::TickProperties(NativeScriptPosition camera, bool alive,
     m_Entities.Tick({player.PedRoot.X, player.PedRoot.Y, player.PedRoot.Z}, camera, alive, player.InVehicle, input);
     error.clear(); return true;
 }
+NativeScriptReferenceResult<NativeScriptPickupRef> RealtimeScriptHost::CreatePickup(const NativeScriptPickupRequest& request) {
+    if (!m_Initialized) return {Error("pickup service requires initialized host"), {}};
+    if (m_PendingLoad) return {Error("entity service cannot cross pending world request"), {}};
+    for (const auto& event : m_Events) if (event.Id == request.Id) return {Error("entity request ID already owned by player/world service"), {}};
+    const auto camera = m_Gameplay.Camera().Position;
+    return m_Entities.CreatePickup(request, {camera.X, camera.Y, camera.Z}, State().TimeMs);
+}
 NativeScriptReferenceResult<NativeScriptBlipRef> RealtimeScriptHost::CreateContactBlip(const NativeScriptContactBlipRequest& request) {
     if (!m_Initialized) return {Error("radar service requires initialized host"), {}};
     if (m_PendingLoad) return {Error("entity service cannot cross pending world request"), {}};

@@ -4,6 +4,7 @@
 #include "app/platform/linux/Realtime.cpp"
 #include "app/platform/linux/TexSample.h"
 #include "RealtimeWaterProbe.oracle.h"
+#include "RealtimeWaterScanProof.h"
 #include <EGL/eglext.h>
 #include <rw.h>
 #include <chrono>
@@ -1147,6 +1148,166 @@ static void CheckPerformance(RealtimeEnvironment& env, WorldShotScene& scene) {
     }
     std::puts("water-perf-ok same-context/production-world/1280x720/frozen-clock/8-interleaved-rounds/finish/GPU-timer");
 }
+
+static void CheckScan(RealtimeEnvironment& env, const char* output) {
+    size_t cases=0, cells=0, capped=0, changed=0, pointChecks=0;
+    // Old geometric scanner, retained only as an independent regression
+    // comparator. It is NOT the source oracle; the labelled retail lift is.
+    const auto legacy=[](const RealtimeWaterScanPoints& p) {
+        std::vector<RealtimeWaterBlock> result;
+        float low=p[0][1],high=low;
+        for (auto v:p) { low=std::min(low,v[1]); high=std::max(high,v[1]); }
+        for (int y=int(std::floor(low)); y<=int(std::floor(high)) && result.size()<70; ++y) {
+            float l=1.e10f,r=-1.e10f;
+            auto add=[&](double x) { l=std::min(l,float(x)); r=std::max(r,float(x)); };
+            for (size_t i=0;i<p.size();++i) {
+                auto a=p[i]; if (a[1]>=y && a[1]<=y+1) add(a[0]);
+                for (size_t j=i+1;j<p.size();++j) if (a[1]!=p[j][1]) for (int edge:{y,y+1}) {
+                    const double t=(double(edge)-a[1])/(double(p[j][1])-a[1]);
+                    if (t>=0 && t<=1) add(double(a[0])+t*(double(p[j][0])-a[0]));
+                }
+            }
+            if (l>r) continue;
+            for (int x=int(std::floor(l));x<=int(std::floor(r)) && result.size()<70;++x)
+                if (x<=0||x>=11||y<=0||y>=11) result.push_back({int16_t(x),int16_t(y)});
+        }
+        return result;
+    };
+    const auto check=[&](const RealtimeWaterScanPoints& points) {
+        auto all=water_scan_proof::Scan(points);
+        std::vector<RealtimeWaterBlock> expected;
+        for (auto c:all) if (c[0]<=0 || c[0]>=11 || c[1]<=0 || c[1]>=11) {
+            expected.push_back({int16_t(c[0]),int16_t(c[1])}); if (expected.size()==70) break;
+        }
+        std::array<RealtimeWaterBlock,70> actual{}; size_t n=0;
+        Require(env.ScanWaterBlocks(points,actual,n),"source-valid pure scanner input");
+        if (n!=expected.size() || !std::equal(expected.begin(),expected.end(),actual.begin())) {
+            std::fprintf(stderr,"scan differential case=%zu got=%zu expected=%zu points=",cases,n,expected.size());
+            for (auto p:points) std::fprintf(stderr,"{%a,%a},",p[0],p[1]);
+            std::fprintf(stderr,"\nactual="); for (size_t i=0;i<n;++i) std::fprintf(stderr,"(%d,%d)",actual[i].x,actual[i].y);
+            std::fprintf(stderr,"\nexpected="); for (auto c:expected) std::fprintf(stderr,"(%d,%d)",c.x,c.y);
+            std::fprintf(stderr,"\n"); Require(false,"ordered source scan differential");
+        }
+        changed+=legacy(points)!=expected; cells+=n; capped+=n==70; ++cases;
+    };
+    // Hand-evaluated branch witnesses, not expectations obtained from either
+    // implementation. Integer minY uses ceil(minY), so the first scanline is
+    // the camera point alone; a geometric cell-strip scanner adds (-1,0).
+    const RealtimeWaterScanPoints integerTip{{{-2,3},{2,3},{2,3},{-2,3},{0,0}}};
+    const std::vector<water_scan_proof::Cell> tipCells{{0,0},{-1,1},{0,1},
+        {-2,2},{-1,2},{0,2},{1,2},{-2,3},{-1,3},{0,3},{1,3},{2,3}};
+    Require(water_scan_proof::Scan(integerTip)==tipCells,"hand source first-row/negative-floor/final-inclusive witness");
+    check(integerTip);
+    const RealtimeWaterScanPoints largeBox{{{-10,10},{10,10},{10,-10},{-10,-10},{0,0}}};
+    std::array<RealtimeWaterBlock,70> prefix{}; size_t prefixCount=0;
+    Require(env.ScanWaterBlocks(largeBox,prefix,prefixCount) && prefixCount==70,"known first-70 source prefix");
+    for (size_t i=0;i<70;++i) Require(prefix[i]==RealtimeWaterBlock{int16_t(-10+int(i%21)),int16_t(-10+int(i/21))},
+        "hand row-major cap witness including final (-4,-7)");
+    check(largeBox);
+    // Source-valid top/down frusta: rectangular far planes with the camera
+    // inside, or duplicate projected far corners for exactly horizontal views.
+    for (float shift:{-12.f,-1.f,-0.f,0.f,1.f,11.f,12.f}) for (float edge:{0.f,.125f,.99999994f,1.f,1.00000012f}) {
+        const float x=shift+edge;
+        check({{{x,2},{x+4,2},{x+4,-2},{x,-2},{x+2,0}}});
+        check({{{x,1.25f},{x+4,1.25f},{x+4,1.25f},{x,1.25f},{x+2,1.125f}}});
+        check({{{x,12},{x+4,12},{x+4,12},{x,12},{x+2,-12}}});
+    }
+    // Actual GL cameras around every world edge, cardinal/diagonal yaw,
+    // vertical/horizontal/production pitch, both source and extended far.
+    for (float far:{800.f,1600.f}) for (float x:{-3000.f,-2980.f,-2500.f,0.f,2500.f,2980.f,3000.f})
+        for (float y:{-3000.f,-2980.f,-2500.f,0.f,2500.f,2980.f,3000.f})
+            for (int yaw=0;yaw<8;++yaw) for (float pitch:{-1.570796327f,-.27f,0.f,.27f,1.570796327f}) {
+                Camera camera; camera.x=x; camera.y=y; camera.z=20; camera.yaw=yaw*.785398163f; camera.pitch=pitch;
+                camera.Apply(1280,720,far);
+                RealtimeWaterScanPoints points;
+                Require(env.CaptureWaterScanPoints(x,y,points),"capture real source-valid camera");
+                GLfloat p[16],m[16]; glGetFloatv(GL_PROJECTION_MATRIX,p); glGetFloatv(GL_MODELVIEW_MATRIX,m);
+                const RealtimeWaterFrustum f{float(double(p[14])/(double(p[10])+1)),{1.f/p[0],1.f/p[5]},
+                    {m[0],m[4]},{m[1],m[5]},{-m[2],-m[6]},{x,y}};
+                Require(points==water_scan_proof::Points(f),"actual five GL-to-RW frustum points versus literal SSE/PC24 oracle");
+                pointChecks+=5;
+                check(points);
+                // Explicit source far (not reconstructed) remains separately
+                // testable. This NEVER changes the installed GL projection.
+                auto original=f; original.farClip=far;
+                Require(env.BuildWaterScanPoints(original,points) && points==water_scan_proof::Points(original),
+                    "explicit original RW camera tuple matches source arithmetic");
+                pointChecks+=5; check(points);
+            }
+    Require(changed>0 && capped>0,"source scanner exercises geometric mismatch and ordered cap");
+    RealtimeWaterState frozen{}; frozen.gameMs=1700;
+    Require(env.SetWaterState(frozen),"scan GPU frozen source clock");
+    size_t gpuViews=0,gpuChanged=0,gpuListChanges=0;
+    // Production camera witnesses, followed by valid wide-aspect cameras that
+    // exercise the source 70-cell cap. Resolution/far are fixed within each
+    // comparison; these are correctness fixtures, not performance variants.
+    for (int view=0;view<35;++view) {
+        Camera camera; int height=kHeight;
+        if (view==0) {
+            camera.x=1600-4.6f*std::cos(-1.43f)*std::cos(.27f);
+            camera.y=-1700-4.6f*std::sin(-1.43f)*std::cos(.27f);
+            camera.z=27.303447723f+1.15f+4.6f*std::sin(.27f); camera.yaw=-1.43f; camera.pitch=-.27f;
+        } else if (view==1) { camera.x=820; camera.y=-1880; camera.z=6; }
+        else if (view==2) { camera.x=-2990; camera.y=123.5f; camera.z=20; }
+        else {
+            camera.x=-3000; camera.y=(view-3)/8%2 ? -3000 : 0; camera.z=20;
+            camera.yaw=((view-3)%8)*.785398163f; camera.pitch=(view-3)/16 ? -.27f : 0;
+            height=90;
+        }
+        camera.Apply(kWidth,height,1600);
+        GLfloat p[16],m[16]; glGetFloatv(GL_PROJECTION_MATRIX,p); glGetFloatv(GL_MODELVIEW_MATRIX,m);
+        const float far=float(double(p[14])/(double(p[10])+1));
+        RealtimeWaterScanPoints oldPoints{},points{};
+        for (size_t i=0;i<4;++i) {
+            const float x=(i==0||i==3 ? -far : far)/p[0],y=(i<2 ? far : -far)/p[5];
+            oldPoints[i]={(camera.x+x*m[0]+y*m[1]-far*m[2])/500.f+6.f,
+                          (camera.y+x*m[4]+y*m[5]-far*m[6])/500.f+6.f};
+        }
+        oldPoints[4]={camera.x/500.f+6.f,camera.y/500.f+6.f};
+        Require(env.CaptureWaterScanPoints(camera.x,camera.y,points),"scan GPU current frustum");
+        check(points);
+        const auto beforeBlocks=legacy(oldPoints);
+        std::array<RealtimeWaterBlock,70> storage{}; size_t n=0;
+        Require(env.ScanOutsideWaterBlocks(camera.x,camera.y,storage,n),"scan GPU actual ordered capture");
+        const std::vector<RealtimeWaterBlock> afterBlocks(storage.begin(),storage.begin()+n);
+        std::vector<RealtimeWaterBlock> oracleBlocks;
+        for (auto c:water_scan_proof::Scan(points)) if (c[0]<=0||c[0]>=11||c[1]<=0||c[1]>=11) {
+            oracleBlocks.push_back({int16_t(c[0]),int16_t(c[1])}); if (oracleBlocks.size()==70) break;
+        }
+        Require(afterBlocks==oracleBlocks,"scan GPU source ordered oracle list");
+        const bool listChanged=beforeBlocks!=afterBlocks;
+        gpuListChanges+=listChanged;
+        if (view>=3 && !listChanged) continue;
+        const auto render=[&](std::span<const RealtimeWaterBlock> blocks) {
+            camera.Apply(kWidth,height,1600);
+            glDepthMask(GL_TRUE); glClearDepth(1); glClearColor(.2f,.3f,.4f,1);
+            glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+            env.DrawSky(camera.x,camera.y,camera.z);
+            RealtimeSeaBedGeometry bed;
+            Require(env.BuildSeaBed(blocks,camera.x,camera.y,0,bed),"scan GPU geometry");
+            env.DrawSeaBed(bed); env.DrawWater(camera.x,camera.y,false,blocks); glFinish();
+            return Pixels();
+        };
+        const auto before=render(beforeBlocks),after=render(afterBlocks);
+        std::vector<float> depth(kWidth*kHeight),oracleDepth(depth.size());
+        glReadPixels(0,0,kWidth,kHeight,GL_DEPTH_COMPONENT,GL_FLOAT,depth.data());
+        Require(after==render(oracleBlocks),"corrected scan GPU pixels exact source-list replay");
+        glReadPixels(0,0,kWidth,kHeight,GL_DEPTH_COMPONENT,GL_FLOAT,oracleDepth.data());
+        Require(depth==oracleDepth && after==render(afterBlocks),"corrected scan depth and same-clock pixels exact");
+        size_t pixelsChanged=0;
+        for (size_t i=0;i<after.size();i+=4) pixelsChanged+=!std::equal(after.begin()+i,after.begin()+i+3,before.begin()+i);
+        if (view<3 || (pixelsChanged && gpuChanged==0)) {
+            const auto tag="scan-"+std::to_string(view);
+            Capture(output,(tag+"-before").c_str(),before); Capture(output,(tag+"-after").c_str(),after);
+        }
+        gpuChanged+=pixelsChanged; ++gpuViews;
+        std::printf("water-scan-GPU view=%d viewport=%dx%d old-blocks=%zu source-blocks=%zu list-changed=%d changed-pixels=%zu fnv=%016llx/%016llx source-RGBA/depth/same-clock-exact\n",
+            view,kWidth,height,beforeBlocks.size(),afterBlocks.size(),int(listChanged),pixelsChanged,(unsigned long long)Hash(before),(unsigned long long)Hash(after));
+    }
+    std::printf("water-scan ordered-cases=%zu callbacks=%zu capped70=%zu differs-from-geometric=%zu exact-SSE-PC24-points=%zu retail-control-flow-exact\n",
+        cases,cells,capped,changed,pointChecks);
+    std::printf("water-scan-GPU views=%zu list-changes=%zu changed-pixels=%zu\n",gpuViews,gpuListChanges,gpuChanged);
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1196,6 +1357,7 @@ int main(int argc, char** argv) {
         GpuScene gpu;
         Require(gpu.Upload(scene), "shore world GPU upload");
         glDisable(GL_DITHER);
+        CheckScan(env,argv[2]);
         CheckFeedback(env, 0);
         CheckFeedback(env, 1700);
         CheckFeedback(env, 0, true);

@@ -80,6 +80,14 @@ struct NativeScriptForSalePropertyRequest {
     std::int32_t Price = 0;
     std::array<char, 8> Text{};
 };
+struct NativeScriptPickupRequest {
+    NativeScriptRequestId Id;
+    std::int32_t Model = 0, Type = 0;
+    NativeScriptPosition Position;
+    // Negative model operands index the immutable SCM used-object table.
+    // Positive IDs have an empty name. The host resolves names against IDE.
+    std::array<char, 24> UsedObjectName{};
+};
 struct NativeScriptContactBlipRequest {
     NativeScriptRequestId Id;
     NativeScriptPosition Position;
@@ -122,6 +130,9 @@ public:
     virtual NativeScriptServiceResult SetCharHeading(const NativeScriptHeadingRequest&) { return {}; }
     virtual NativeScriptReferenceResult<NativeScriptPickupRef> CreateLockedProperty(const NativeScriptLockedPropertyRequest&) { return {}; }
     virtual NativeScriptReferenceResult<NativeScriptPickupRef> CreateForSaleProperty(const NativeScriptForSalePropertyRequest&) { return {}; }
+    // Original ordinary creation can complete with -1 when the source pool
+    // has no free/reclaimable slot. This is not an allocated pickup reference.
+    virtual NativeScriptReferenceResult<NativeScriptPickupRef> CreatePickup(const NativeScriptPickupRequest&) { return {}; }
     virtual NativeScriptReferenceResult<NativeScriptBlipRef> CreateContactBlip(const NativeScriptContactBlipRequest&) { return {}; }
     virtual NativeScriptServiceResult SetBlipDisplay(const NativeScriptBlipDisplayRequest&) { return {}; }
     virtual NativeScriptServiceResult SetEntryExitFlag(const NativeScriptEntryExitFlagRequest&) { return {}; }
@@ -221,6 +232,7 @@ struct NativeScriptMetadata {
     std::uint32_t LargestMission = 0, MissionLocals = 0;
     std::uint32_t StreamedScripts = 0, LargestStreamed = 0, Build = 0;
     std::vector<std::uint32_t> MissionOffsets;
+    std::vector<std::array<char, 24>> UsedObjects;
 };
 
 class NativeScriptSession {

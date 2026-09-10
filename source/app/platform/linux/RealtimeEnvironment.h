@@ -46,6 +46,13 @@ struct RealtimeWaterBlock {
     bool operator==(const RealtimeWaterBlock&) const = default;
 };
 
+using RealtimeWaterScanPoints = std::array<std::array<float,2>,5>;
+
+struct RealtimeWaterFrustum {
+    float farClip = 0;
+    std::array<float,2> viewWindow{}, right{}, up{}, at{}, position{}; // XY of the source RW matrix
+};
+
 struct RealtimeSeaBedVertex {
     float x = 0, y = 0, z = -70, u = 0, v = 0;
     bool operator==(const RealtimeSeaBedVertex&) const = default;
@@ -136,6 +143,16 @@ public:
     // Read-only capture of the same presentation scanner used by both passes.
     static bool ScanOutsideWaterBlocks(float cameraX, float cameraY,
         std::array<RealtimeWaterBlock,70>& blocks, size_t& count);
+    // Pure ordered CWorldScan + outside-world BlockHit prefix. Input order is
+    // far TL,TR,BR,BL, camera origin, in block coordinates. No global extra
+    // rectangle is installed by the water caller. False on invalid inputs.
+    static bool ScanWaterBlocks(RealtimeWaterScanPoints points,
+        std::array<RealtimeWaterBlock,70>& blocks, size_t& count);
+    static bool CaptureWaterScanPoints(float cameraX, float cameraY, RealtimeWaterScanPoints& points);
+    // Exact float source camera inputs can be supplied without GL inversion.
+    // Capture above bridges the existing native projection; its far/VW values
+    // are reconstructed, not claimed to recover an unrecorded RW camera tuple.
+    static bool BuildWaterScanPoints(const RealtimeWaterFrustum& camera, RealtimeWaterScanPoints& points);
     void DrawSeaBed(const RealtimeSeaBedGeometry& geometry) const;
     // Convenience path derives the five source frustum points from the current
     // rigid GL view + symmetric perspective projection, scans edge/ocean blocks

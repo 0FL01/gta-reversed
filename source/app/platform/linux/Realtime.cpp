@@ -969,6 +969,12 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             propertyInput.CollectJustDown = collectJustDown;
             if (!scriptHost.TickProperties({camera.x, camera.y, camera.z}, state.Ready, propertyInput, gameplayError) ||
                 !entities.AdvanceTime(static_cast<std::uint32_t>(gameNs / 1'000'000), gameplayError)) {
+                const auto& requirement = entities.PickupRequirement();
+                if (requirement.Kind == NativeScriptPickupRequirementKind::PlayerTaskEligibility) {
+                    std::printf("play-pickup-terminal status=Unsupported frame=%u model=%d type=%d collection-completed=0 message=%s\n",
+                        requirement.FrameCounter, requirement.Model, requirement.Type, gameplayError.c_str());
+                    return 1;
+                }
                 std::printf("play-fail script entity clock: %s\n", gameplayError.c_str());
                 return 1;
             }

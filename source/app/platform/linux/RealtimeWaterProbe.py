@@ -68,6 +68,9 @@ def extract_oracle():
     flow = source[start:source.index('\n// 0x6EB690', start)]
     start = source.index('uint32 CWaterLevel::AddWaterLevelVertex(')
     vertex = source[start:source.index('\nstruct SortableVtx', start)]
+    general = (SOURCE.parents[2] / 'game_sa/General.cpp').read_text()
+    start = general.index('float CGeneral::GetATanOfXY(')
+    angle = general[start:general.index('\n// 0x53CDC0', start)]
     # Keep the original function text unmodified. These are isolated stand-ins
     # for its static refs and vector/math dependencies, not the native module.
     prefix = r'''
@@ -79,6 +82,10 @@ def extract_oracle():
 #include <ranges>
 #include <tuple>
 namespace water_oracle {
+using std::abs;
+// Retail GetATanOfXY stores atan's result to float before its quadrant op.
+inline float atan2(float y,float x) { return float(std::atan2(double(y),double(x))); }
+struct CGeneral { static float GetATanOfXY(float,float); };
 using int16 = int16_t;
 using int32 = int32_t;
 using uint32 = uint32_t;
@@ -143,9 +150,9 @@ struct CWaterLevel {
 '''
     digest = hashlib.sha256(function.encode()).hexdigest()
     (OUTPUT / 'RealtimeWaterProbe.oracle.h').write_text(
-        '// Extracted source SHA256 ' + digest + '\n' + prefix + function + flow + vertex + seabed_fixtures() + '\n}\n')
+        '// Extracted source SHA256 ' + digest + '\n' + prefix + function + flow + vertex + angle + seabed_fixtures() + '\n}\n')
     print('water-oracle-source-sha256=' + digest, flush=True)
-    for name, body in [('UpdateFlow', flow), ('AddWaterLevelVertex', vertex)]:
+    for name, body in [('UpdateFlow', flow), ('AddWaterLevelVertex', vertex), ('GetATanOfXY', angle)]:
         print('water-oracle-' + name + '-sha256=' + hashlib.sha256(body.encode()).hexdigest(), flush=True)
 
 
@@ -220,6 +227,7 @@ if __name__ == '__main__':
     mode.add_argument('--regress', action='store_true', help='rebuild/run existing world, vehicle material and HUD pixel probes')
     parser.add_argument('--game-dir', type=pathlib.Path, default=pathlib.Path('/game'))
     parser.add_argument('--perf-run', choices=('1', '2'), default='1', help='retain independent hardware A/B logs')
+    parser.add_argument('--run-dir', type=pathlib.Path, default=OUTPUT, help='separate own-app captures/logs for a host or container run')
     args = parser.parse_args()
     if args.build or args.regress:
         build(args.regress)
@@ -231,9 +239,11 @@ if __name__ == '__main__':
                 print(result.stdout, end='')
                 result.check_returncode()
     else:
-        result = subprocess.run([str(OUTPUT / 'RealtimeWaterProbe'), str(args.game_dir.resolve()), str(OUTPUT)] + (['--perf'] if args.perf else []),
+        run_dir = args.run_dir.resolve()
+        run_dir.mkdir(parents=True, exist_ok=True)
+        result = subprocess.run([str(OUTPUT / 'RealtimeWaterProbe'), str(args.game_dir.resolve()), str(run_dir)] + (['--perf'] if args.perf else []),
             cwd=WORKSPACE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=300)
-        (OUTPUT / ('RealtimeWaterProbe-perf-' + args.perf_run + '.log' if args.perf else 'RealtimeWaterProbe.log')).write_text(result.stdout)
+        (run_dir / ('RealtimeWaterProbe-perf-' + args.perf_run + '.log' if args.perf else 'RealtimeWaterProbe.log')).write_text(result.stdout)
         if args.perf and result.returncode == 0:
             isolated = {}
             for line in result.stdout.splitlines():

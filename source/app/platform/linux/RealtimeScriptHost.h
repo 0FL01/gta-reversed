@@ -98,6 +98,9 @@ public:
     // Parent supplies real collect-key edge/target/busy/global suppression and
     // unpaused frame counter. Balance/mission inputs are overwritten from owned
     // player/SCM state. Tick stages only; Entities().AdvanceTime publishes atomically.
+    // Also drives ordinary source32/6 scheduling. On AdvanceTime failure, a
+    // non-None Entities().PickupRequirement() is explicit Unsupported source
+    // task/event work, with the real pickup reference; never acknowledge collect.
     bool TickProperties(NativeScriptPosition camera, bool alive, NativeScriptPropertyInput input, std::string& error);
 
     NativeScriptServiceResult RequestCollision(const NativeScriptCollisionRequest&) override;
@@ -109,6 +112,7 @@ public:
     NativeScriptServiceResult SetCharHeading(const NativeScriptHeadingRequest&) override;
     NativeScriptReferenceResult<NativeScriptPickupRef> CreateLockedProperty(const NativeScriptLockedPropertyRequest&) override;
     NativeScriptReferenceResult<NativeScriptPickupRef> CreateForSaleProperty(const NativeScriptForSalePropertyRequest&) override;
+    NativeScriptReferenceResult<NativeScriptPickupRef> CreatePickup(const NativeScriptPickupRequest&) override;
     NativeScriptReferenceResult<NativeScriptBlipRef> CreateContactBlip(const NativeScriptContactBlipRequest&) override;
     NativeScriptServiceResult SetBlipDisplay(const NativeScriptBlipDisplayRequest&) override;
     NativeScriptServiceResult SetEntryExitFlag(const NativeScriptEntryExitFlagRequest&) override;

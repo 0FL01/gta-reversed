@@ -135,8 +135,8 @@ int main(int argc,char** argv) {
             if (frame==1) Require(host.RunPass(135).Status==NativeScriptStatus::BudgetYield,"actual mission135");
             if (frame==2) {
                 const auto end=host.RunPass(1000);
-                Require(end.Status==NativeScriptStatus::Unsupported && end.Opcode==0x0213 && end.IP==205545 && end.Executed==381 && host.Session().Threads()[1].Commands==516,"actual strict mission516 boundary");
-                std::printf("actual SCM main53 mission516 strict0213@205545; subsequent ticks isolate garage driver, no further SCM execution\n");
+                Require(end.Status==NativeScriptStatus::Unsupported && end.Opcode==0x0570 && end.IP==205876 && end.Executed==404 && host.Session().Threads()[1].Commands==539,"actual strict mission539 boundary");
+                std::printf("actual SCM main53 mission539 strict0570@205876; subsequent ticks isolate garage driver, no further SCM execution\n");
             }
             if (frame==3) {
                 auto incoming=Wait(worker); Require(incoming->Generation>active->Generation,"actual worker generation advances");
@@ -154,7 +154,7 @@ int main(int argc,char** argv) {
             else Require(result.Status==NativeScriptServiceStatus::Unsupported && runtime.Frame().Requirement==NativeGarageRequirement::TidyUp && runtime.Frame().Garage->Index==1,"first real maintenance dependency at counter12 index1");
             if (frame<=3 || frame==11 || frame==12) Report(host,runtime);
         }
-        Require(host.Session().Threads()[0].Commands==53 && host.Session().Threads()[1].Commands==516 && host.Garages().Revision()==13,"per-frame consumers preserve actual script boundary/journal");
+        Require(host.Session().Threads()[0].Commands==53 && host.Session().Threads()[1].Commands==539 && host.Garages().Revision()==13,"per-frame consumers preserve actual script boundary/journal");
         Require(!host.Garages().Frame().TidyClose && runtime.Frame().UnsupportedUpdates==1,"far maintenance is not skipped as harmless");
         std::printf("first-garage-barrier frame12 index1 type33 tidyClose=0 detail=%s\n",result.Message.c_str());
         const auto stopped=runtime.Frame().Revision;
@@ -176,7 +176,7 @@ int main(int argc,char** argv) {
         Require(result.Status==NativeScriptServiceStatus::Unsupported && outside.Frame().Barrier==NativeGaragesRuntimeBarrier::GarageCamera && !outside.Frame().Camera.Outside && outside.Frame().Camera.Previous,"garage exit camera transition also explicit");
         std::printf("TEST-POSITION native camera entry/exit requirements PASS; no completed door/interior/camera transition\n");
         worker.Stop(std::move(active),{});
-        std::printf("NativeGaragesRuntimeProbe PASS main53 mission516 strict0213@205545 idleCounters0..11 nextGarageCounter12/TidyUp/index1\n");
+        std::printf("NativeGaragesRuntimeProbe PASS main53 mission539 strict0570@205876 idleCounters0..11 nextGarageCounter12/TidyUp/index1\n");
     }
     StreamPager_Shutdown();
 }

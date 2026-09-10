@@ -179,8 +179,8 @@ int NativeGaragesProbe(const char* dir,std::uint64_t& commands,std::uint16_t& op
     const auto terminal=host.RunPass(1000);
     commands=host.Session().Threads()[1].Commands; opcode=terminal.Opcode; ip=terminal.IP;
     std::printf("garage ACTUAL continuation status=%d additional=%zu mission=%llu opcode=%04X ip=%u message=%s\n",int(terminal.Status),terminal.Executed,(unsigned long long)commands,opcode,ip,terminal.Message.c_str());
-    check(terminal.Status==NativeScriptStatus::Unsupported && commands==516 && opcode==0x0213 && ip==205545 && terminal.Executed==380,"ACTUAL381 new instructions consume owned effects, strict0213@205545 mission516");
-    check(garages.Revision()==13 && host.EntryExits().Revision()==30 && host.Entities().Revision()==96 && host.Events().size()==50,"actual13 garage writes,30 ENEX writes,32 pickups/radars with real owned effects");
+    check(terminal.Status==NativeScriptStatus::Unsupported && commands==539 && opcode==0x0570 && ip==205876 && terminal.Executed==403,"ACTUAL404 new instructions consume owned effects, strict0570@205876 mission539");
+    check(garages.Revision()==13 && host.EntryExits().Revision()==30 && host.Entities().Revision()==109 && host.Events().size()==50,"actual13 garage writes,30 ENEX writes,45 pickups/32 radars with real owned effects");
     const std::array<std::size_t,13> indices{13,34,42,38,39,48,37,5,14,25,28,17,49}; bool exactFlags=true;
     for (std::size_t i=0;i<50;++i) {
         const auto& g=garages.Entries()[i]; const auto& old=initialEntries[i];
@@ -189,7 +189,7 @@ int NativeGaragesProbe(const char* dir,std::uint64_t& commands,std::uint16_t& op
     check(exactFlags,"independent expected13 actual named writes change ONLY inactive bits, retain door state/fraction/original types");
     const auto& last=host.Session().Threads()[1].LastOutputWrite;
     std::printf("garage actual-last-write sequence=%llu ip=%u variable=%u value=%d\n",(unsigned long long)last.Sequence,last.IP,last.Variable,last.Value);
-    check(last.Sequence==439 && last.IP==205538 && last.Variable==3456,"actual last source numeric output before pickup0213");
+    check(last.Sequence==462 && last.IP==205866 && last.Variable==7000 && last.Global,"actual last source numeric output before sprite0570");
     const auto faultState=host.Session().Threads()[1]; const auto repeated=host.RunPass(1000);
     check(repeated.Executed==0 && repeated.Status==terminal.Status && repeated.IP==ip && repeated.Opcode==opcode && host.Session().Threads()[1]==faultState && static_cast<const NativeScriptThreadState&>(host.State())==mainBefore,"actual terminal remains unadvanced and main WAIT unchanged");
     const auto revision=garages.Revision(); const auto journal=host.Events().size();

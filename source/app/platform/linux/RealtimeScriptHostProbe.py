@@ -45,6 +45,7 @@ def build_probe(name):
         names.append('RealtimeScriptHostGpuProbe')
         names.append('NativeEntryExitsProbe')
         names.append('NativeGaragesProbe')
+        names.append('NativePickupsProbe')
     compile_commands = []
     for unit in names:
         obj = OUTPUT / (unit + '.o')
@@ -81,4 +82,4 @@ if __name__ == '__main__':
         (OUTPUT / (name + '.log')).write_text(result.stdout)
         print(result.stdout, end='')
         result.check_returncode()
-        assert 'host-probe failures=0 firstpass=53 mission-prefix=516 terminal=0213@205545' in result.stdout
+        assert 'host-probe failures=0 firstpass=53 mission-prefix=539 terminal=0570@205876' in result.stdout

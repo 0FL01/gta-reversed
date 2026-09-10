@@ -56,6 +56,10 @@ public:
     // call OS parsers, TexSample or librw. Release before context destruction.
     bool Upload(char* err, std::size_t errSize);
     void ReleaseGpu();
+    // Numeric IDs are the source eRadarSprite values. A non-null prepared
+    // image is owned CPU data; IsRadarSpriteUploaded is the readiness gate.
+    const WorldShotImage* PreparedRadarSprite(int sprite) const;
+    bool IsRadarSpriteUploaded(int sprite) const;
     // After world/water, before swap. Width/height are drawable PIXELS, not SDL
     // logical window size. Restores GL attributes, matrices, program and active
     // texture. Does not modify depth/stencil contents or framebuffer binding.
@@ -78,7 +82,7 @@ public:
 private:
     RadarMapAssets m_Radar;
     MenuHudFont m_Font;
-    WorldShotImage m_PropertyRadar{}, m_ForSaleRadar{};
-    std::array<unsigned int, 150> m_Textures{}; // tiles, centre/north/disc/font1/propertyR/G
+    WorldShotImage m_PropertyRadar{}, m_ForSaleRadar{}, m_Radar33{};
+    std::array<unsigned int, 151> m_Textures{}; // tiles, centre/north/disc/font1/propertyR/G/radar_race
     bool m_Loaded = false;
 };

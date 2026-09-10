@@ -1,4 +1,4 @@
-// Owned property slice. Startup parsers are exclusive; frame APIs use
+// Owned property/save-token slice. Startup parsers are exclusive; frame APIs use
 // only owned triangles/RGBA/GXT. No game_sa pool or original-address linkage.
 #pragma once
 #include "app/platform/linux/NativeScriptSession.h"
@@ -51,11 +51,23 @@ struct NativeScriptPickup {
     std::string Message;
     WorldShotScene Actor; // actual prepared DFF; absolute phase rebuilt from bind
     bool Active = false, HelpMessageDisplayed = false;
-    int Model = 1272, Type = 17; // eModelID / ePickupType; sale=1273/18
+    int Model = 1272, Type = 17; // eModelID / ePickupType; sale=1273/18, save=1277/3
     std::int32_t Price = 0; // CPickup::m_nAmmo bits; signed comparison in Update
     std::uint16_t CostValue = 0; // CObject::m_wCostValue = uint32(price)/5
     std::uint32_t MessageLines = 0;
     std::string Label;
+    // Ordinary pickup source scheduler state, not property visibility policy.
+    bool Visible = false, ObjectPresent = false;
+    std::uint32_t RegenerationTime = 0; // type3 has no timeout or regeneration
+};
+
+enum class NativeScriptPickupRequirementKind { None, PlayerTaskEligibility };
+struct NativeScriptPickupRequirement {
+    NativeScriptPickupRequirementKind Kind = NativeScriptPickupRequirementKind::None;
+    NativeScriptPickupRef Pickup;
+    NativeScriptPosition Position;
+    std::uint32_t FrameCounter = 0;
+    int Model = -1, Type = 0;
 };
 
 // Explicit input to CPickups::Update's sale slice. Money is a READ of the
@@ -66,6 +78,7 @@ struct NativeScriptPropertyInput {
     bool OnMission = false, CollectJustDown = false, Targeting = false;
     bool ControlsDisabled = false, Busy = false, Replay = false;
     bool Cutscene = false, Widescreen = false, HelpBlocked = false;
+    bool CutsceneLoaded = false, Coop = false; // ordinary GiveUsAPickUpObject / mission gate
     bool operator==(const NativeScriptPropertyInput&) const = default;
 };
 enum class NativeScriptPropertyInteractionStatus { None, OnMission, InsufficientFunds, ScriptPurchaseRequired };
@@ -117,6 +130,8 @@ public:
     bool LoadBeforeWorker(const char* gameDir, std::string& error);
     NativeScriptReferenceResult<NativeScriptPickupRef> CreateLockedProperty(const NativeScriptLockedPropertyRequest&);
     NativeScriptReferenceResult<NativeScriptPickupRef> CreateForSaleProperty(const NativeScriptForSalePropertyRequest&);
+    NativeScriptReferenceResult<NativeScriptPickupRef> CreatePickup(const NativeScriptPickupRequest&,
+        NativeScriptPosition camera, std::uint32_t gameMs);
     NativeScriptReferenceResult<NativeScriptBlipRef> CreateContactBlip(const NativeScriptContactBlipRequest&);
     NativeScriptServiceResult SetBlipDisplay(const NativeScriptBlipDisplayRequest&);
     const NativeScriptPickup* ResolvePickup(NativeScriptPickupRef ref) const;
@@ -135,6 +150,14 @@ public:
     const WorldShotScene& Actors() const { return m_Actors; } // camera-visible actual actors
     const WorldShotScene& PreparedModel() const { return m_Model; }
     const WorldShotScene& PreparedForSaleModel() const { return m_ForSaleModel; }
+    const WorldShotScene& PreparedSaveModel() const { return m_SaveModel; }
+    const NativeScriptPropertyGeometry& SaveGeometry() const { return m_SaveGeometry; }
+    // Latched before any collection side effect. Current host has no complete
+    // ped task/event authority for CanPlayerStartMission. No collected event,
+    // removal, inventory mutation or save-menu activation is implied.
+    const NativeScriptPickupRequirement& PickupRequirement() const { return m_PickupRequirement; }
+    // Upload ONCE before worker startup: locked, sale, then save images. Actors'
+    // triImg indices use this immutable combined table, never a late model load.
     const std::vector<WorldShotImage>& PreparedImages() const { return m_Images; }
     const NativeScriptPropertyGeometry& ForSaleGeometry() const { return m_ForSaleGeometry; }
     // Pool order candidates: parent projects near/far, then admits at most16.
@@ -162,6 +185,8 @@ private:
         NativeScriptPosition Position;
         std::array<char, 8> Text{};
         std::int32_t Argument = 0, Reference = -1;
+        std::int32_t Model = 0;
+        std::array<char, 24> ModelName{};
     };
     const Event* FindEvent(NativeScriptRequestId id) const;
     NativeScriptReferenceResult<NativeScriptPickupRef> CreateProperty(const NativeScriptForSalePropertyRequest&, bool forSale);
@@ -169,6 +194,9 @@ private:
     std::vector<NativeScriptRadarBlip> m_Blips;
     std::vector<Event> m_Events;
     WorldShotScene m_Model{}, m_ForSaleModel{}, m_Actors{};
+    WorldShotScene m_SaveModel{};
+    NativeScriptPropertyGeometry m_SaveGeometry;
+    NativeScriptPickupRequirement m_PickupRequirement;
     NativeScriptPropertyGeometry m_PropertyGeometry, m_ForSaleGeometry;
     WorldShotImage m_Radar{}, m_ForSaleRadar{};
     std::vector<WorldShotImage> m_Images;

@@ -149,6 +149,87 @@ void RealtimeScriptHostGpuPrepare(const char* dir) {
     char error[512]{};
     CheckGpu(s_ProbeHud->Load(dir, error, sizeof(error)), error);
 }
+void RealtimeScriptPickupGpuProbe(RealtimeScriptHost& host, NativeScriptPickupRef ref) {
+    const auto getDisplay = reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(eglGetProcAddress("eglGetPlatformDisplayEXT"));
+    CheckGpu(getDisplay,"pickup surfaceless EGL entry");
+    const auto display=getDisplay(EGL_PLATFORM_SURFACELESS_MESA,EGL_DEFAULT_DISPLAY,nullptr);
+    CheckGpu(display!=EGL_NO_DISPLAY && eglInitialize(display,nullptr,nullptr) && eglBindAPI(EGL_OPENGL_API),"pickup EGL init");
+    const EGLint attributes[]{EGL_SURFACE_TYPE,EGL_PBUFFER_BIT,EGL_RENDERABLE_TYPE,EGL_OPENGL_BIT,
+        EGL_RED_SIZE,8,EGL_GREEN_SIZE,8,EGL_BLUE_SIZE,8,EGL_DEPTH_SIZE,24,EGL_NONE};
+    EGLConfig config{}; EGLint count{};
+    CheckGpu(eglChooseConfig(display,attributes,&config,1,&count) && count,"pickup EGL config");
+    constexpr int width=640,height=448;
+    const EGLint dimensions[]{EGL_WIDTH,width,EGL_HEIGHT,height,EGL_NONE};
+    const auto surface=eglCreatePbufferSurface(display,config,dimensions);
+    const auto context=eglCreateContext(display,config,EGL_NO_CONTEXT,nullptr);
+    CheckGpu(surface!=EGL_NO_SURFACE && context!=EGL_NO_CONTEXT && eglMakeCurrent(display,surface,surface,context),"pickup EGL context");
+    {
+        auto& entities=host.Entities(); const auto* pickup=entities.ResolvePickup(ref);
+        CheckGpu(pickup && pickup->Type==3 && pickup->Model==1277,"GPU consumes actual SCM-created save reference");
+        const auto p=pickup->Position;
+        Camera camera; camera.x=p.X+3; camera.y=p.Y-4; camera.z=p.Z+2;
+        camera.yaw=std::atan2(4.0f,-3.0f); camera.pitch=std::atan2(-2.0f,5.0f);
+        NativeScriptPropertyInput input; input.FrameCounter=4; std::string error;
+        CheckGpu(host.TickProperties({camera.x,camera.y,camera.z},true,input,error) && entities.AdvanceTime(512,error),error.c_str());
+        const auto& bind=entities.PreparedSaveModel(); const auto& geometry=entities.SaveGeometry();
+        const auto offset=int(entities.PreparedModel().images.size()+entities.PreparedForSaleModel().images.size());
+        const auto remap=[&](WorldShotScene scene) {
+            for(auto& mesh:scene.meshes) for(auto& image:mesh.triImg) if(image>=0) image+=offset;
+            return scene;
+        };
+        const auto actor=remap(pickup->Actor);
+        bool published=true;
+        for (const auto& mesh:actor.meshes) published &= std::ranges::any_of(entities.Actors().meshes,[&](const auto& m) { return m.pos==mesh.pos && m.triImg==mesh.triImg; });
+        CheckGpu(published,"same source-phase save geometry/image indices present in production aggregate");
+        GpuScene gpu; WorldShotScene images; images.images=entities.PreparedImages();
+        CheckGpu(gpu.UploadTextures(images),"complete immutable startup image publication");
+        const auto draw=[&](const WorldShotScene& scene) {
+            glEnable(GL_DEPTH_TEST); glDepthMask(GL_TRUE); glClearColor(.1f,.12f,.15f,1);
+            glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT); camera.Apply(width,height,1000); gpu.DrawActors(scene);
+            std::vector<std::uint8_t> pixels(width*height*4); glReadPixels(0,0,width,height,GL_RGBA,GL_UNSIGNED_BYTE,pixels.data());
+            CheckGpu(glGetError()==GL_NO_ERROR,"pickup production GPU readback"); return pixels;
+        };
+        const auto difference=[](const auto& a,const auto& b) { std::size_t n=0; for(std::size_t i=0;i<a.size();i+=4) n+=!std::equal(a.begin()+i,a.begin()+i+3,b.begin()+i); return n; };
+        const auto clear=draw({}), rendered=draw(actor);
+        const auto coverage=difference(clear,rendered);
+        CheckGpu(coverage>100,"actual pickupsave triangles reach production GPU pixels");
+        auto flat=actor; for(auto& mesh:flat.meshes) std::fill(mesh.triImg.begin(),mesh.triImg.end(),-1);
+        const auto textureEffect=difference(rendered,draw(flat)); CheckGpu(textureEffect>30,"actual icons4 save texels affect pixels");
+        auto white=actor; for(auto& mesh:white.meshes) for(auto& material:mesh.surfaces) material.color={1,1,1,1};
+        const auto materialEffect=difference(rendered,draw(white));
+        CheckGpu(materialEffect>30,"actual save material colors affect production pixels");
+        const auto locked=NativeScriptPropertyActor(entities.PreparedModel(),p,entities.PropertyGeometry().Scale,512);
+        const auto lockedDelta=difference(rendered,draw(locked)); CheckGpu(lockedDelta>100,"save token is visibly different from locked-property alias");
+        const auto scaleEffect=difference(rendered,draw(remap(NativeScriptPropertyActor(bind,p,1,512))));
+        CheckGpu(scaleEffect>100,"actual save COL normalization affects GPU coverage");
+        // Independent scalar oracle: source largest COL extent, 60% fraction,
+        // stored float angle and basis. No call to the product pose helper.
+        const double extent=std::max({geometry.ColMax[0]-geometry.ColMin[0],geometry.ColMax[1]-geometry.ColMin[1],geometry.ColMax[2]-geometry.ColMin[2]});
+        const float scale=float(1.0+double(.6f)*(double(float(std::max(1.0,double(1.2f)/extent)))-1.0));
+        const double angle=1.565000057220459;
+        const float c=float(std::cos(angle)),s=float(std::sin(angle));
+        bool pose=true,normal=true,materials=true;
+        for(std::size_t m=0;m<bind.meshes.size();++m) {
+            const auto& b=bind.meshes[m]; const auto& a=pickup->Actor.meshes[m];
+            for(std::size_t i=0;i<b.pos.size();i+=3) {
+                pose &= std::abs(a.pos[i]-(p.X+scale*c*b.pos[i]-scale*s*b.pos[i+1]))<.0003f &&
+                    std::abs(a.pos[i+1]-(p.Y+scale*s*b.pos[i]+scale*c*b.pos[i+1]))<.0003f &&
+                    std::abs(a.pos[i+2]-(p.Z+scale*b.pos[i+2]))<.0001f;
+                normal &= std::abs(a.nrm[i]-(c*b.nrm[i]-s*b.nrm[i+1]))<.0001f &&
+                    std::abs(a.nrm[i+1]-(s*b.nrm[i]+c*b.nrm[i+1]))<.0001f;
+            }
+            for(std::size_t i=0;i<b.surfaces.size();++i) materials &= a.surfaces[i].color==b.surfaces[i].color;
+        }
+        CheckGpu(pose && normal && materials && scale==geometry.Scale,"independent source pose/normals/materials/COL fraction for every actual save vertex");
+        CheckGpu(entities.AdvanceTime(1024,error),error.c_str());
+        const auto rotated=remap(pickup->Actor); const auto rotationEffect=difference(rendered,draw(rotated));
+        CheckGpu(rotationEffect>100,"save source time rotation updates actual GPU pixels");
+        std::printf("save GPU PASS model=1277 type=3 tris=%d images=%zu coverage=%zu textureEffect=%zu materialEffect=%zu lockedDelta=%zu scale=%.9f scaleEffect=%zu rotationEffect=%zu collection=UNSUPPORTED-task-authority\n",
+            bind.stats.triangles,bind.images.size(),coverage,textureEffect,materialEffect,lockedDelta,scale,scaleEffect,rotationEffect);
+    }
+    CheckGpu(eglMakeCurrent(display,EGL_NO_SURFACE,EGL_NO_SURFACE,EGL_NO_CONTEXT),"pickup release context");
+    eglDestroyContext(display,context); eglDestroySurface(display,surface); eglTerminate(display);
+}
 void RealtimeScriptHostGpuProbe(NativeScriptEntities& entities, RealtimeScriptHost& host) {
     const auto getDisplay = reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(eglGetProcAddress("eglGetPlatformDisplayEXT"));
     CheckGpu(getDisplay, "surfaceless EGL entry point");

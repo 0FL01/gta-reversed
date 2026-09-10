@@ -93,6 +93,7 @@ constexpr Signature Signatures[] = {
     {0x018B, {O::Integer, O::Integer}, 2},
     {0x09B4, {O::Float, O::Float, O::Float, O::Integer, O::Integer}, 5},
     {0x02B9, {O::String}, 1},
+    {0x0213, {O::Integer, O::Integer, O::Float, O::Float, O::Float, O::Output}, 6},
 };
 
 const Signature* FindSignature(uint16 opcode) {
@@ -160,6 +161,10 @@ bool NativeScriptSession::LoadMainBytes(std::span<const uint8> prefix, uint64 fi
         case 1:
             if (length < 12 || uint64(Word(prefix, pos + 8)) * 24 + 12 != length)
                 return reject("invalid SCM used-object table");
+            if (Word(prefix, pos + 8) >= 395) return reject("SCM used-object table exceeds source capacity");
+            metadata.UsedObjects.resize(Word(prefix, pos + 8));
+            for (std::size_t j = 0; j < metadata.UsedObjects.size(); ++j)
+                std::copy_n(prefix.begin() + pos + 12 + j * 24, 24, metadata.UsedObjects[j].begin());
             break;
         case 2: {
             if (length < 24) return reject("truncated mission metadata");
@@ -476,12 +481,22 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
     }
 
     int32 reference = -1;
-    if (d.Opcode == 0x04E4 || d.Opcode == 0x03CB || d.Opcode == 0x0053 || d.Opcode == 0x07AF || d.Opcode == 0x01F5 || d.Opcode == 0x0373 || d.Opcode == 0x0173 || d.Opcode == 0x0517 || d.Opcode == 0x0518 || d.Opcode == 0x0570 || d.Opcode == 0x018B || d.Opcode == 0x09B4 || d.Opcode == 0x02B9) {
+    if (d.Opcode == 0x04E4 || d.Opcode == 0x03CB || d.Opcode == 0x0053 || d.Opcode == 0x07AF || d.Opcode == 0x01F5 || d.Opcode == 0x0373 || d.Opcode == 0x0173 || d.Opcode == 0x0517 || d.Opcode == 0x0518 || d.Opcode == 0x0570 || d.Opcode == 0x018B || d.Opcode == 0x09B4 || d.Opcode == 0x02B9 || d.Opcode == 0x0213) {
         const NativeScriptRequestId id{m_SessionId, m_CommandSequence + 1, state.IP};
         NativeScriptServiceResult result;
         // All operands/output bounds have been checked before ANY host call.
         struct Guard { bool& Flag; Guard(bool& flag): Flag(flag) { Flag = true; } ~Guard() { Flag = false; } } guard{m_InService};
         try {
+            if (d.Opcode == 0x0213) {
+                NativeScriptPickupRequest request{id, a, b, {d.Float(2), d.Float(3), d.Float(4)}};
+                if (a < 0) {
+                    const auto index = uint64(-int64(a));
+                    if (index >= m_Metadata.UsedObjects.size()) return invalid("pickup used-object index out of bounds");
+                    request.UsedObjectName = m_Metadata.UsedObjects[index];
+                }
+                auto created = services.CreatePickup(request);
+                result = std::move(created.Result); reference = created.Reference.Value;
+            }
             if (d.Opcode == 0x09B4) result = services.SetEntryExitFlag({id, d.Float(0), d.Float(1), d.Float(2), d.Int(3), d.Int(4)});
             if (d.Opcode == 0x02B9) result = services.DeactivateGarage({id, d.Text});
             if (d.Opcode == 0x0517) {
@@ -639,7 +654,7 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         break;
     case 0x0053: write(4, uint32(a)); break;
     case 0x0517: case 0x0570: write(4, uint32(reference)); break;
-    case 0x0518: write(5, uint32(reference)); break;
+    case 0x0518: case 0x0213: write(5, uint32(reference)); break;
     case 0x07AF: case 0x01F5: write(1, uint32(reference)); break;
     case 0x0746: {
         auto& categories = m_State.Relationships[b];

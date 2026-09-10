@@ -89,7 +89,7 @@ struct Dictionary {
     ~Dictionary() { Value->destroy(); }
 };
 WorldShotScene ReadStaticModel(const std::string& model, const std::string& txd, const NativeScriptStaticModelOptions& options = {});
-WorldShotScene ReadModel(NativeScriptPropertyGeometry& property, int modelId) {
+WorldShotScene ReadModel(NativeScriptPropertyGeometry& property, int modelId, std::string_view expectedName = {}) {
     auto ide = ReadFile("data/maps/generic/dynamic.ide");
     ide.push_back(0);
     std::string model, txd;
@@ -104,6 +104,7 @@ WorldShotScene ReadModel(NativeScriptPropertyGeometry& property, int modelId) {
     const auto stem = [](const std::string& s) { return !s.empty() && s.size() <= 19 && std::all_of(s.begin(), s.end(), [](char c) {
         return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'; }); };
     Require(stem(model) && stem(txd), "missing/invalid property IDE binding");
+    Require(expectedName.empty() || model == expectedName, "source pickup model-name/IDE binding mismatch");
     // Verified generic dynamic-model library; resolve its chunk by BOTH source
     // name and IDE ID. No collision-context ownership or global COL loader.
     const auto col = ReadEntry("dynamic.col");
@@ -270,11 +271,15 @@ bool NativeScriptEntities::LoadBeforeWorker(const char* gameDir, std::string& er
     if (m_Loaded) { error = "property assets already initialized"; return false; }
     try {
         RwScope scope; OS_SetFilePathOffset(gameDir);
-        NativeScriptPropertyGeometry property, saleGeometry;
+        NativeScriptPropertyGeometry property, saleGeometry, saveGeometry;
         auto model = ReadModel(property, 1272); Bounds(model);
         auto saleModel = ReadModel(saleGeometry, 1273); Bounds(saleModel);
+        // ModelIndices.cpp MI_PICKUP_SAVEGAME binding, dynamic.ide + dynamic.col.
+        // Bounded source model category, not SCM coordinates/IP/string scanning.
+        auto saveModel = ReadModel(saveGeometry, 1277, "pickupsave"); Bounds(saveModel);
         auto images = model.images;
         images.insert(images.end(), saleModel.images.begin(), saleModel.images.end());
+        images.insert(images.end(), saveModel.images.begin(), saveModel.images.end());
         WorldShotImage radar{}; Require(NativeScriptEntities_LoadRadar(gameDir, radar, error), error);
         WorldShotImage saleRadar{}; Require(NativeScriptEntities_LoadRadar(gameDir, saleRadar, error, 31), error);
         GxtTable table; char err[256]{}; Require(GxtText_Load(gameDir, "english", table, err, sizeof(err)), err);
@@ -302,6 +307,7 @@ bool NativeScriptEntities::LoadBeforeWorker(const char* gameDir, std::string& er
         for (auto& denial : denials) denial = PropertyText(std::move(denial), 0);
         m_Model = std::move(model); m_Radar = std::move(radar); m_Messages = std::move(messages);
         m_ForSaleModel = std::move(saleModel); m_ForSaleGeometry = std::move(saleGeometry);
+        m_SaveModel = std::move(saveModel); m_SaveGeometry = std::move(saveGeometry);
         m_ForSaleRadar = std::move(saleRadar); m_Images = std::move(images);
         m_SaleMessages = std::move(saleMessages); m_LabelMessages = std::move(labelMessages);
         m_Denials = std::move(denials); std::copy_n(helpFont.prop, m_HelpWidths.size(), m_HelpWidths.begin());
@@ -327,6 +333,57 @@ NativeScriptReferenceResult<NativeScriptPickupRef> NativeScriptEntities::CreateL
 }
 NativeScriptReferenceResult<NativeScriptPickupRef> NativeScriptEntities::CreateForSaleProperty(const NativeScriptForSalePropertyRequest& r) {
     return CreateProperty(r, true);
+}
+NativeScriptReferenceResult<NativeScriptPickupRef> NativeScriptEntities::CreatePickup(const NativeScriptPickupRequest& r,
+    NativeScriptPosition camera, std::uint32_t gameMs) {
+    if (const auto* old = FindEvent(r.Id)) {
+        if (old->Opcode != 0x0213 || old->Position != r.Position || old->Argument != r.Type || old->Model != r.Model ||
+            old->ModelName != r.UsedObjectName || (old->Reference != -1 && !ResolvePickup({old->Reference}))) return {Error("mismatched/stale ordinary pickup replay"), {}};
+        return {Ready(), {old->Reference}};
+    }
+    if (!m_Loaded) return {Unsupported("ordinary model must be prepared before worker startup"), {}};
+    auto name = r.UsedObjectName;
+    for (auto& c : name) if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+    const std::string_view model(name.data(), strnlen(name.data(), name.size()));
+    if (r.Model >= 0 && std::ranges::any_of(name, [](char c) { return c != 0; })) return {Error("positive pickup model has a used-object name"), {}};
+    if ((r.Model < 0 ? model != "pickupsave" : r.Model != 1277) || std::uint8_t(r.Type) != 3)
+        return {Unsupported("ordinary pickup model/type consumer is not prepared"), {}};
+    if (!Finite(r.Position) || !Finite(camera)) return {Error("nonfinite ordinary pickup position/camera"), {}};
+    if (r.Position.Z <= -100) return {Unsupported("ordinary pickup ground sentinel requires owned world ground service"), {}};
+    for (const auto v : {r.Position.X, r.Position.Y, r.Position.Z}) if (v * 8 < -32768 || v * 8 > 32767)
+        return {Error("ordinary pickup position compression overflow"), {}};
+    const auto free = std::find_if(m_Pickups.begin(), m_Pickups.end(), [](const auto& p) {
+        return !p.Active && (p.Reference.Value == -1 || (uint32(p.Reference.Value) >> 16) < 0xfffe);
+    });
+    if (free == m_Pickups.end()) {
+        // Original GenerateNewOne returns -1 when all620 slots are occupied
+        // and none is money/type4/type5. These are the only populated types in
+        // this slice. Journal that result too: retry cannot allocate later.
+        if (m_Pickups.size() == 620 && std::ranges::all_of(m_Pickups, [](const auto& p) {
+            return p.Active && (p.Type == 3 || p.Type == 17 || p.Type == 18);
+        })) {
+            m_Events.push_back({r.Id, 0x0213, r.Position, {}, r.Type, -1, r.Model, r.UsedObjectName});
+            ++m_Revision; return {Ready(), {-1}};
+        }
+        return {Error("native pickup capacity/generation bound prevents source allocation"), {}};
+    }
+    NativeScriptPickup p;
+    p.Reference = {NextRef(free->Reference.Value, std::size_t(free - m_Pickups.begin()))};
+    p.AuthoredPosition = r.Position;
+    p.Position = {float(int32(r.Position.X * 8)) / 8, float(int32(r.Position.Y * 8)) / 8, float(int32(r.Position.Z * 8)) / 8};
+    p.Model = 1277; p.Type = 3; p.Active = true; p.RegenerationTime = gameMs;
+    const auto dx = camera.X - p.Position.X, dy = camera.Y - p.Position.Y;
+    p.Visible = dx*dx + dy*dy < 10000;
+    p.ObjectPresent = p.Visible && !(m_Frame && m_Frame->Property && m_Frame->Property->CutsceneLoaded);
+    p.Actor = m_SaveModel;
+    for (auto& mesh : p.Actor.meshes) for (std::size_t i = 0; i < mesh.pos.size(); i += 3) {
+        const auto x = mesh.pos[i], nx = mesh.nrm[i];
+        mesh.pos[i] = mesh.pos[i+1] + p.Position.X; mesh.pos[i+1] = -x + p.Position.Y; mesh.pos[i+2] += p.Position.Z;
+        mesh.nrm[i] = mesh.nrm[i+1]; mesh.nrm[i+1] = -nx;
+    }
+    Bounds(p.Actor);
+    m_Events.push_back({r.Id, 0x0213, r.Position, {}, r.Type, p.Reference.Value, r.Model, r.UsedObjectName});
+    *free = std::move(p); ++m_Revision; return {Ready(), free->Reference};
 }
 NativeScriptReferenceResult<NativeScriptPickupRef> NativeScriptEntities::CreateProperty(const NativeScriptForSalePropertyRequest& r, bool forSale) {
     const std::uint16_t opcode = forSale ? 0x0518 : 0x0517;
@@ -399,6 +456,7 @@ bool NativeScriptEntities::RemovePickup(NativeScriptPickupRef ref) {
     if (!ResolvePickup(ref)) return false;
     auto& p = m_Pickups[uint32(ref.Value) & 0xffff]; p.Active = false; p.Actor = {}; m_Actors = {}; m_Labels.clear();
     if (m_Interaction.Pickup.Value == ref.Value) m_Interaction = {};
+    if (m_PickupRequirement.Pickup.Value == ref.Value) m_PickupRequirement = {};
     ++m_Revision; return true;
 }
 bool NativeScriptEntities::RemoveBlip(NativeScriptBlipRef ref) {
@@ -422,6 +480,9 @@ NativeScriptPropertyInteractionStatus NativeScriptPropertyCollect(std::int32_t p
 }
 bool NativeScriptEntities::AdvanceTime(std::uint32_t now, std::string& error) try {
     if (m_HasTime && now - m_GameMs > 0x7fffffff) { error = "property game time moved backwards or exceeded half-range"; return false; }
+    if (m_PickupRequirement.Kind != NativeScriptPickupRequirementKind::None) {
+        error = "ordinary pickup requires live CanPlayerStartMission task/event eligibility before collection"; return false;
+    }
     if (m_HasTime && now == m_GameMs && m_Frame == m_PublishedFrame && m_PresentationRevision == m_Revision) {
         error.clear(); return true;
     }
@@ -450,19 +511,50 @@ bool NativeScriptEntities::AdvanceTime(std::uint32_t now, std::string& error) tr
     std::vector<NativeScriptPropertyLabel> labels;
     std::vector<std::size_t> latches;
     std::vector<std::pair<std::size_t, WorldShotScene>> poses;
+    struct Visibility { std::size_t Slot; bool Visible, Present; };
+    std::vector<Visibility> visibility;
     WorldShotScene actors{}; actors.images = m_Images;
     for (std::size_t i = 0; i < m_Pickups.size(); ++i) {
         const auto& p = m_Pickups[i]; if (!p.Active) continue;
         const bool sale = p.Type == 18;
-        auto actor = NativeScriptPropertyActor(sale ? m_ForSaleModel : m_Model, p.Position,
-            sale ? m_ForSaleGeometry.Scale : m_PropertyGeometry.Scale, now);
+        const bool ordinary = p.Type == 3;
+        auto actor = NativeScriptPropertyActor(ordinary ? m_SaveModel : sale ? m_ForSaleModel : m_Model, p.Position,
+            ordinary ? m_SaveGeometry.Scale : sale ? m_ForSaleGeometry.Scale : m_PropertyGeometry.Scale, now);
         if (m_Frame) {
             const auto& f = *m_Frame;
             const auto dx = f.Ped.X - p.Position.X, dy = f.Ped.Y - p.Position.Y;
             const auto cx = f.Camera.X - p.Position.X, cy = f.Camera.Y - p.Position.Y;
-            const bool visible = cx*cx + cy*cy < 10000 && !(sale && f.Property && (f.Property->Cutscene || f.Property->Widescreen));
+            bool visible = cx*cx + cy*cy < 10000 && !(sale && f.Property && (f.Property->Cutscene || f.Property->Widescreen));
+            if (ordinary) {
+                if (!f.Property) { error = "ordinary pickup update requires source frame/global inputs"; return false; }
+                const auto& input = *f.Property;
+                auto sourceVisible = p.Visible, present = p.ObjectPresent;
+                if (newCollectFrame) {
+                    if (i >= 620 * (input.FrameCounter % 32) / 32 && i < 620 * (input.FrameCounter % 32 + 1) / 32) {
+                        sourceVisible = cx*cx + cy*cy < 10000;
+                        if (!sourceVisible) present = false;
+                        else if (!present && !input.CutsceneLoaded) present = true;
+                    }
+                    if (sourceVisible && !input.Busy && i >= 620 * (input.FrameCounter % 6) / 6 && i < 620 * (input.FrameCounter % 6 + 1) / 6) {
+                        if (!present && !input.CutsceneLoaded) present = true;
+                        if (present && !input.Cutscene && !input.Widescreen && !input.Coop && f.Alive && !f.InVehicle &&
+                            dx*dx + dy*dy < 1.8f && std::abs(f.Ped.Z - p.Position.Z) < 2.0f) {
+                            // Pickup.cpp:629 calls CanPlayerStartMission. Its task
+                            // slots/event group are not inferable from on-foot or
+                            // SCM mission-thread booleans. Stop BEFORE shake/remove/
+                            // collected-ring writes; never invent permission.
+                            m_PickupRequirement = {NativeScriptPickupRequirementKind::PlayerTaskEligibility,
+                                p.Reference, p.Position, input.FrameCounter, p.Model, p.Type};
+                            error = "ordinary pickup requires live CanPlayerStartMission task/event eligibility before collection";
+                            return false;
+                        }
+                    }
+                }
+                visibility.push_back({i, sourceVisible, present});
+                visible = present && !input.Cutscene && !input.Widescreen && !input.Coop;
+            }
             if (f.Alive && !f.InVehicle && dx*dx + dy*dy < 1.8f && std::abs(f.Ped.Z - p.Position.Z) < 2.0f) {
-                if (!sale && !p.HelpMessageDisplayed) {
+                if (!sale && !ordinary && !p.HelpMessageDisplayed) {
                     help.Show(p.Message, p.MessageLines);
                     helpMessage = p.Message; latches.push_back(i); ++helpChanges;
                 } else if (sale && visible && newCollectFrame && !f.Property->Busy &&
@@ -486,6 +578,7 @@ bool NativeScriptEntities::AdvanceTime(std::uint32_t now, std::string& error) tr
                 const auto first = actors.meshes.size();
                 actors.meshes.insert(actors.meshes.end(), actor.meshes.begin(), actor.meshes.end());
                 if (sale) for (std::size_t m = first; m < actors.meshes.size(); ++m) for (auto& image : actors.meshes[m].triImg) if (image >= 0) image += int(m_Model.images.size());
+                if (ordinary) for (std::size_t m = first; m < actors.meshes.size(); ++m) for (auto& image : actors.meshes[m].triImg) if (image >= 0) image += int(m_Model.images.size() + m_ForSaleModel.images.size());
                 actors.stats.triangles += actor.stats.triangles; actors.stats.atomics += actor.stats.atomics;
                 actors.stats.vertices += actor.stats.vertices;
                 // DoPickUpEffects: parent admits at most16 AFTER near/far
@@ -506,6 +599,7 @@ bool NativeScriptEntities::AdvanceTime(std::uint32_t now, std::string& error) tr
     // All allocation/validation precedes no-throw publication. Tick inputs,
     // once-only latches, help clock and current-phase visible meshes agree.
     for (auto& [slot, actor] : poses) m_Pickups[slot].Actor = std::move(actor);
+    for (const auto& v : visibility) { m_Pickups[v.Slot].Visible = v.Visible; m_Pickups[v.Slot].ObjectPresent = v.Present; }
     for (const auto slot : latches) m_Pickups[slot].HelpMessageDisplayed = true;
     m_Help = std::move(help); m_HelpMessage = std::move(helpMessage); m_HelpRevision += helpChanges;
     m_CollectBuffer = buffer; m_CollectFrame = collectFrame; m_Interaction = interaction; m_Labels = std::move(labels);

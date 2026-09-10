@@ -41,7 +41,7 @@ void Array(Bytes& b, bool global, std::uint16_t base, bool globalIndex, std::uin
 }
 
 // Entirely generated metadata/code, never cut/pasted asset bytes.
-Bytes Fixture(const Bytes& code, const std::vector<Bytes>& missions = {}) {
+Bytes Fixture(const Bytes& code, const std::vector<Bytes>& missions = {}, const std::vector<std::array<char,24>>& used = {}) {
     Bytes b;
     auto chunk = [&](std::uint8_t index, const Bytes& payload) {
         const auto next = std::uint32_t(b.size() + payload.size() + 8);
@@ -49,9 +49,11 @@ Bytes Fixture(const Bytes& code, const std::vector<Bytes>& missions = {}) {
         b.insert(b.end(), payload.begin(), payload.end());
     };
     chunk(115, Bytes(16)); // globals: offsets 8..23
-    chunk(0, Bytes(4)); // zero used objects
+    Bytes objects; Put(objects,std::uint32_t(used.size()),4);
+    for (const auto& name:used) objects.insert(objects.end(),name.begin(),name.end());
+    chunk(0, objects);
     Bytes info(16);
-    const auto codeStart = FixtureCode + std::uint32_t(missions.size()) * 4;
+    const auto codeStart = FixtureCode + std::uint32_t(missions.size()) * 4 + std::uint32_t(used.size()) * 24;
     const auto mainSize = codeStart + std::uint32_t(code.size());
     Patch(info, 0, mainSize);
     Patch(info, 8, std::uint32_t(missions.size()));
@@ -99,6 +101,15 @@ struct MockServices final : NativeScriptServices {
     NativeScriptGarageRequest Garage;
     ServiceStatus GarageMode = ServiceStatus::Unsupported;
     unsigned GarageCalls = 0;
+    NativeScriptPickupRequest Pickup;
+    ServiceStatus PickupMode = ServiceStatus::Unsupported;
+    unsigned PickupCalls = 0;
+    std::int32_t PickupReference = 0x00010020;
+    NativeScriptReferenceResult<NativeScriptPickupRef> CreatePickup(const NativeScriptPickupRequest& r) override {
+        Pickup = r; ++PickupCalls;
+        if (Throw) throw std::runtime_error("TEST-ONLY pickup service exception");
+        return {{PickupMode,"TEST-ONLY pickup service"}, {PickupReference}};
+    }
     NativeScriptServiceResult DeactivateGarage(const NativeScriptGarageRequest& r) override {
         Garage=r; ++GarageCalls;
         if (Throw) throw std::runtime_error("TEST-ONLY garage service exception");
@@ -1056,6 +1067,45 @@ void GarageBarriers() {
     for (std::size_t n=2;n<code.size();++n) RejectCode(Bytes(code.begin(),code.begin()+n));
     auto bad=code; bad[2]=6; RejectCode(bad);
 }
+void PickupBarriers() {
+    Bytes code; Op(code,0x0213); I16(code,1277); I32(code,259); F(code,1.25f); F(code,-2.5f); F(code,10); Var(code,8);
+    NativeScriptSession session; MockServices services;
+    LoadFixture(session,services,code); const auto before=session.State();
+    services.PickupMode=ServiceStatus::Pending;
+    Check(session.Step(services).Status==Status::Pending && session.State()==before,"0213 TEST service Pending atomic");
+    const auto id=services.Pickup.Id;
+    Check(services.Pickup.Model==1277 && services.Pickup.Type==259 && services.Pickup.Position==NativeScriptPosition{1.25f,-2.5f,10} &&
+        services.Pickup.UsedObjectName==std::array<char,24>{},"0213 exact I,I,F,F,F,out contract, raw integer type preserved");
+    Check(session.Step(services).Status==Status::Pending && services.Pickup.Id==id && session.State()==before,"0213 Pending identity stable");
+    services.PickupMode=ServiceStatus::Ready;
+    Check(session.Step(services).Status==Status::Advanced && session.State().Condition==before.Condition &&
+        session.State().LastOutputWrite.Variable==8 && session.State().LastOutputWrite.Value==0x10020,"0213 TEST Ready writes sixth operand once, no condition mutation");
+    LoadFixture(session,services,code); services.PickupReference=-1;
+    Check(session.Step(services).Status==Status::Advanced && session.State().LastOutputWrite.Value==-1,"0213 genuine full-pool sentinel is output, not fake allocation or lookup error");
+    for (const auto status:{ServiceStatus::Error,ServiceStatus::Unsupported}) {
+        LoadFixture(session,services,code); const auto old=session.State(); services.PickupMode=status;
+        Check(session.Step(services).Status==(status==ServiceStatus::Error ? Status::Error : Status::Unsupported) && session.State()==old,"0213 failed service leaves VM atomic");
+        const auto calls=services.PickupCalls;
+        Check(session.Step(services).Executed==0 && services.PickupCalls==calls,"0213 terminal cannot repeat service");
+    }
+    LoadFixture(session,services,code); services.Throw=true; const auto old=session.State();
+    Check(session.Step(services).Status==Status::Error && session.State()==old,"0213 service exception atomic");
+    for (std::size_t n=2;n<code.size();++n) RejectCode(Bytes(code.begin(),code.begin()+n));
+    auto bad=code; bad[2]=6; RejectCode(bad);
+    Bytes negative; Op(negative,0x0213); I32(negative,std::numeric_limits<std::int32_t>::min()); I8(negative,3); F(negative,0); F(negative,0); F(negative,0); Var(negative,8);
+    LoadFixture(session,services,negative); services.Throw=false; const auto calls=services.PickupCalls;
+    Check(session.Step(services).Status==Status::Error && services.PickupCalls==calls,"0213 INT_MIN used-object index fails before host without signed overflow");
+    Patch(negative,3,std::uint32_t(-1));
+    std::vector<std::array<char,24>> used(2); used[1]={'t','e','s','t','_','m','o','d','e','l',0};
+    const auto payload=Fixture(negative,{},used); std::string error;
+    Check(session.LoadMainBytes(payload,payload.size(),error),"generated used-object table accepted");
+    for (int i=0;i<6;++i) Check(session.Step(services).Status==Status::Advanced,"generated used-object header traversal");
+    services.PickupMode=ServiceStatus::Ready;
+    Check(session.Step(services).Status==Status::Advanced && services.Pickup.Model==-1 && services.Pickup.UsedObjectName==used[1],
+        "0213 negative model indexes immutable24-byte table exactly, no name heuristics");
+    const auto oversized=Fixture(code,{},std::vector<std::array<char,24>>(395)); const auto state=session.State();
+    Check(!session.LoadMainBytes(oversized,oversized.size(),error) && session.State()==state,"used-object source395 capacity rejected before replacing live session");
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1070,5 +1120,6 @@ int main(int argc, char** argv) {
     EntityBarriers();
     EntryExitBarriers();
     GarageBarriers();
+    PickupBarriers();
     std::printf("native-script-probe PASS checks=%zu services=TEST-ONLY no-worldboot-claim\n", s_Checks);
 }

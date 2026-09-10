@@ -13,7 +13,7 @@
 void RealtimeScriptHostGpuPrepare(const char* dir);
 void RealtimeScriptHostGpuProbe(NativeScriptEntities& entities, RealtimeScriptHost& host);
 void NativeEntryExitsProbe(RealtimeScriptHost& host);
-int NativeGaragesProbe(const char* dir, std::uint64_t& commands, std::uint16_t& opcode, std::uint32_t& ip);
+int NativePickupsProbe(const char* dir, std::uint64_t& commands, std::uint16_t& opcode, std::uint32_t& ip);
 
 namespace {
 int s_Failures = 0;
@@ -40,8 +40,8 @@ int main(int argc, char** argv) {
     Require(StreamPager_Init(dir, info, err, sizeof(err), {.includeStreamed=true, .radius=300, .maxInstances=1200}), err);
     // Separate fresh host: run the actual continuation before legacy probes
     // deliberately exercise pool releases, camera/world replacements and mocks.
-    std::uint64_t garageCommands{}; std::uint16_t garageOpcode{}; std::uint32_t garageIP{};
-    s_Failures += NativeGaragesProbe(dir, garageCommands, garageOpcode, garageIP);
+    std::uint64_t pickupCommands{}; std::uint16_t pickupOpcode{}; std::uint32_t pickupIP{};
+    s_Failures += NativePickupsProbe(dir, pickupCommands, pickupOpcode, pickupIP);
     {
         RealtimeGameplay game;
         RealtimeScriptHost host(game);
@@ -179,7 +179,7 @@ int main(int argc, char** argv) {
             host.Session().Threads()[1].Commands == 135 && host.Session().Threads()[1].LastOutputWrite.Sequence == 127 &&
             host.Session().Threads()[1].LastOutputWrite.IP == 201106 && host.Session().Threads()[1].LastOutputWrite.Variable == 6496 &&
             host.Session().Threads()[1].IP == 201129,
-            "legacy property/ENEX regression host pauses by quota135; separate clean host proves garage continuation");
+            "legacy property/ENEX regression host pauses by quota135; separate clean host proves pickup continuation");
         auto& entities = host.Entities();
         NativeEntryExitsProbe(host);
         Check(entities.Revision() == 12, "exactly four actual pickup allocations, four blips and four display writes");
@@ -466,7 +466,7 @@ int main(int argc, char** argv) {
         Check(game.State().Ticks == 1 && !game.State().CarPresent && game.Actors().stats.triangles == 2,
             "persistent entity/pose keeps ticking without startup preview vehicle");
         std::printf("host-probe failures=%d firstpass=53 mission-prefix=%llu terminal=%04X@%u mission0-complete=0\n", s_Failures,
-            static_cast<unsigned long long>(garageCommands), garageOpcode, garageIP);
+            static_cast<unsigned long long>(pickupCommands), pickupOpcode, pickupIP);
     }
     StreamPager_Shutdown();
     return s_Failures ? 1 : 0;

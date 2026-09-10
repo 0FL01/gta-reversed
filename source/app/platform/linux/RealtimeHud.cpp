@@ -8,11 +8,118 @@
 #include <cstdio>
 #include <cstring>
 #include <numbers>
+#include <vector>
+
+using int32 = std::int32_t;
+using int64 = std::int64_t;
+using uint32 = std::uint32_t;
+using uint64 = std::uint64_t;
+#ifndef __stdcall
+#define __stdcall
+#endif
+#include "oswrapper/oswrapper.h"
+#include <rw.h>
 
 namespace {
 constexpr float kPi = std::numbers::pi_v<float>;
-constexpr int kCentre = 144, kNorth = 145, kDisc = 146, kFont = 147, kProperty = 148, kForSale = 149;
+constexpr int kCentre = 144, kNorth = 145, kDisc = 146, kFont = 147, kProperty = 148, kForSale = 149, kRadar33 = 150;
 struct Point { float x, y; };
+
+static void SetError(char* err, std::size_t errSize, const char* message) {
+    if (err && errSize) std::snprintf(err, errSize, "%s", message);
+}
+
+struct HudFile {
+    void* Handle{};
+    ~HudFile() { if (Handle) OS_FileClose(Handle); }
+};
+
+struct HudDictionary {
+    rw::TexDictionary* Previous = rw::TexDictionary::getCurrent();
+    rw::TexDictionary* Value{};
+    ~HudDictionary() {
+        rw::TexDictionary::setCurrent(Previous);
+        if (Value) Value->destroy();
+    }
+};
+
+static bool LoadRadar33(const char* gameDir, WorldShotImage& image, char* err, std::size_t errSize) {
+    if (!gameDir || !gameDir[0] || rw::Engine::state != rw::Engine::Started) {
+        SetError(err, errSize, "radar_race preload needs a game dir and started parser");
+        return false;
+    }
+    OS_SetFilePathOffset(gameDir);
+    HudFile file;
+    if (OS_FileOpen(FILE_DATA_AREA_DEFAULT, &file.Handle, "models/hud.txd", FILE_ACCESS_READ) != 0 || !file.Handle) {
+        SetError(err, errSize, "cannot read models/hud.txd for radar_race");
+        return false;
+    }
+    const auto size = OS_FileSize(file.Handle);
+    if (size <= 0) {
+        SetError(err, errSize, "models/hud.txd is empty");
+        return false;
+    }
+    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
+    if (OS_FileRead(file.Handle, bytes.data(), size) != 0) {
+        SetError(err, errSize, "cannot read models/hud.txd for radar_race");
+        return false;
+    }
+    rw::StreamMemory stream;
+    stream.open(bytes.data(), static_cast<uint32>(bytes.size()));
+    HudDictionary dictionary;
+    if (rw::findChunk(&stream, rw::ID_TEXDICTIONARY, nullptr, nullptr)) dictionary.Value = rw::TexDictionary::streamRead(&stream);
+    stream.close();
+    auto* texture = dictionary.Value ? dictionary.Value->find("radar_race") : nullptr;
+    WorldShotImage decoded{};
+    if (!texture || !TexSample_Decode(texture, decoded) || decoded.w != 16 || decoded.h != 16 || decoded.rgba.size() != 16 * 16 * 4) {
+        SetError(err, errSize, "hud.txd: radar_race 16x16 decode failed");
+        return false;
+    }
+    std::snprintf(decoded.name, sizeof(decoded.name), "%s", texture->name);
+    decoded.filter = texture->filterAddressing;
+    image = std::move(decoded);
+    return true;
+}
+
+static GLenum TextureFilter(uint32 filter) {
+    switch (filter & 0xff) {
+    case rw::Texture::NEAREST:
+    case rw::Texture::MIPNEAREST:
+    case rw::Texture::LINEARMIPNEAREST: return GL_NEAREST;
+    case rw::Texture::LINEAR:
+    case rw::Texture::MIPLINEAR:
+    case rw::Texture::LINEARMIPLINEAR: return GL_LINEAR;
+    default: assert(false && "unsupported source texture filter"); return GL_LINEAR;
+    }
+}
+
+static GLenum TextureAddress(uint32 address) {
+    switch (address) {
+    case rw::Texture::WRAP: return GL_REPEAT;
+    case rw::Texture::MIRROR: return GL_MIRRORED_REPEAT;
+    case rw::Texture::CLAMP: return GL_CLAMP_TO_EDGE;
+    case rw::Texture::BORDER: return GL_CLAMP_TO_BORDER;
+    default: assert(false && "unsupported source texture addressing"); return GL_CLAMP_TO_EDGE;
+    }
+}
+
+static int RadarTextureIndex(int sprite) {
+    switch (sprite) {
+    case 31: return kForSale;
+    case 32: return kProperty;
+    case 33: return kRadar33;
+    default: return -1;
+    }
+}
+
+static bool RadarVisible(const NativeScriptRadarBlip& blip, float distance,
+    bool playerOnMission, unsigned radarZoom, bool exterior) {
+    if (blip.Sprite == 31 || blip.Sprite == 32) {
+        return NativeScriptRadarVisible(blip, distance, playerOnMission, radarZoom, exterior);
+    }
+    return blip.Sprite == 33 && blip.Active && exterior && !(blip.Contact && playerOnMission) &&
+        (blip.Display == 2 || blip.Display == 3) && (!blip.ShortRange || (!radarZoom && distance <= 1.0f));
+}
 
 // CRadar::CachedRotateClockwise, with GTA heading = native yaw - pi/2.
 static Point WorldToRadar(Point world, const RealtimeHudView& view, const RealtimeHudState& state) {
@@ -223,6 +330,7 @@ bool RealtimeHud::Load(const char* gameDir, char* err, std::size_t errSize) {
             && NativeScriptEntities_LoadRadar(gameDir, m_ForSaleRadar, error, 31);
         if (!m_Loaded && err && errSize) std::snprintf(err, errSize, "%s", error.c_str());
     }
+    if (m_Loaded) m_Loaded = LoadRadar33(gameDir, m_Radar33, err, errSize);
     return m_Loaded;
 }
 
@@ -246,13 +354,14 @@ bool RealtimeHud::Upload(char* err, std::size_t errSize) {
     for (int i = 0; i < int(m_Textures.size()); ++i) {
         const TexImage* image = i < 144 ? &m_Radar.tiles[i] : i == kCentre ? &m_Radar.centre
             : i == kNorth ? &m_Radar.north : i == kDisc ? &m_Radar.disc : i == kProperty ? &m_PropertyRadar
-            : i == kForSale ? &m_ForSaleRadar : nullptr;
+            : i == kForSale ? &m_ForSaleRadar : i == kRadar33 ? &m_Radar33 : nullptr;
         const auto& font = m_Font;
         glBindTexture(GL_TEXTURE_2D, m_Textures[i]);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        const auto filter = i == kRadar33 ? TextureFilter(image->filter) : GL_LINEAR;
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, i == kRadar33 ? TextureAddress((image->filter >> 8) & 15) : GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, i == kRadar33 ? TextureAddress((image->filter >> 12) & 15) : GL_CLAMP_TO_EDGE);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, image ? image->w : font.w,
             image ? image->h : font.h, 0, GL_RGBA, GL_UNSIGNED_BYTE,
             image ? image->rgba.data() : font.rgba.data());
@@ -273,6 +382,21 @@ bool RealtimeHud::Upload(char* err, std::size_t errSize) {
 void RealtimeHud::ReleaseGpu() {
     if (m_Textures[0]) glDeleteTextures(m_Textures.size(), m_Textures.data());
     m_Textures.fill(0);
+}
+
+const WorldShotImage* RealtimeHud::PreparedRadarSprite(int sprite) const {
+    if (!m_Loaded) return nullptr;
+    switch (sprite) {
+    case 31: return &m_ForSaleRadar;
+    case 32: return &m_PropertyRadar;
+    case 33: return &m_Radar33;
+    default: return nullptr;
+    }
+}
+
+bool RealtimeHud::IsRadarSpriteUploaded(int sprite) const {
+    const auto index = RadarTextureIndex(sprite);
+    return PreparedRadarSprite(sprite) && index >= 0 && m_Textures[index] != 0;
 }
 
 RealtimeHudPriceView RealtimeHud::CapturePriceView(float nearClip, float farClip, float fov) {
@@ -379,9 +503,11 @@ void RealtimeHud::Draw(const RealtimeHudView& view, const RealtimeHudState& stat
         for (const auto& blip : state.scriptBlips) {
             auto p = WorldToRadar({blip.Position.X, blip.Position.Y}, view, state);
             const auto distance = std::sqrt(p.x*p.x + p.y*p.y);
-            if (!NativeScriptRadarVisible(blip, distance, state.playerOnMission, state.radarZoom, state.exterior)) continue;
-            assert(blip.Sprite == 31 || blip.Sprite == 32);
-            glBindTexture(GL_TEXTURE_2D, m_Textures[blip.Sprite == 31 ? kForSale : kProperty]);
+            if (!RadarVisible(blip, distance, state.playerOnMission, state.radarZoom, state.exterior)) continue;
+            const auto texture = RadarTextureIndex(blip.Sprite);
+            assert(texture >= 0);
+            glBindTexture(GL_TEXTURE_2D, m_Textures[texture]);
+            glColor4ub(255, 255, 255, 255);
             if (distance > 1) { p.x /= distance; p.y /= distance; }
             const auto screen = RadarToScreen(p);
             Quad(screen.x - 8, screen.y - 8, screen.x + 8, screen.y + 8);

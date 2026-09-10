@@ -389,9 +389,7 @@ void RealtimeEnvironment::DrawSeaBed(const RealtimeSeaBedGeometry& geometry) con
     glPopAttrib(); glActiveTexture(active); glUseProgram(program);
 }
 
-bool RealtimeEnvironment::ScanOutsideWaterBlocks(float cameraX, float cameraY,
-    std::array<RealtimeWaterBlock,70>& blocks, size_t& count) {
-    count = 0;
+bool RealtimeEnvironment::CaptureWaterScanPoints(float cameraX, float cameraY, RealtimeWaterScanPoints& points) {
     // CCamera::GetFrustumPoints -> ScanThroughBlocks: far-plane corners then
     // camera origin. GL's camera looks along -Z instead of RW's +Z.
     GLfloat p[16], m[16];
@@ -399,42 +397,157 @@ bool RealtimeEnvironment::ScanOutsideWaterBlocks(float cameraX, float cameraY,
     if (p[0] <= 0 || p[5] <= 0 || p[11] != -1 || p[15] != 0 || p[8] != 0 || p[9] != 0) return false;
     const float far = float(double(p[14]) / (double(p[10]) + 1));
     if (!std::isfinite(far) || far <= 0 || !std::isfinite(cameraX) || !std::isfinite(cameraY)) return false;
-    std::array<std::array<float,2>,5> points{};
+    // Native bridge retains the installed projection distance (including its
+    // float readback), not timecyc farClip. Retail 721395 loads RW farPlane;
+    // viewWindow is a separate float, multiplied by far at 7213AD..7213F8.
+    return BuildWaterScanPoints({far,{1.f/p[0],1.f/p[5]},
+        {m[0],m[4]},{m[1],m[5]},{-m[2],-m[6]},{cameraX,cameraY}},points);
+}
+
+bool RealtimeEnvironment::BuildWaterScanPoints(const RealtimeWaterFrustum& camera, RealtimeWaterScanPoints& points) {
+    if (!std::isfinite(camera.farClip) || camera.farClip<=0 || camera.viewWindow[0]<=0 || camera.viewWindow[1]<=0) return false;
+    for (const auto v : {camera.viewWindow,camera.right,camera.up,camera.at,camera.position})
+        for (float f : v) if (!std::isfinite(f)) return false;
+    RealtimeWaterScanPoints out{};
     for (size_t i = 0; i < 4; ++i) {
-        const float x = (i == 0 || i == 3 ? -far : far) / p[0];
-        const float y = (i < 2 ? far : -far) / p[5];
-        points[i] = {(cameraX + x*m[0] + y*m[1] - far*m[2]) / 500.f + 6.f,
-                     (cameraY + x*m[4] + y*m[5] - far*m[6]) / 500.f + 6.f};
+        const float x = (i == 0 || i == 3 ? -camera.viewWindow[0] : camera.viewWindow[0])*camera.farClip;
+        const float y = (i < 2 ? camera.viewWindow[1] : -camera.viewWindow[1])*camera.farClip;
+        // RW's two SSE transforms 8418A0/841C70 have identical arithmetic:
+        // (z*at + y*up) + (x*right + position), MULPS/ADDPS per operation.
+        // Inverse rigid GL view supplies right/up/-at as its first three rows.
+        for (size_t axis=0;axis<2;++axis) {
+            // Force the source rounding points even on an FMA-capable build.
+            const volatile float zAt=camera.farClip*camera.at[axis],yUp=y*camera.up[axis],xRight=x*camera.right[axis];
+            const volatile float vertical=zAt+yUp,horizontal=xRight+camera.position[axis];
+            const float world=vertical+horizontal;
+            out[i][axis]=world/500.f+6.f; // PC24 DIV then ADD, retail 721419..721491
+        }
     }
-    points[4] = {cameraX / 500.f + 6.f, cameraY / 500.f + 6.f};
-    for (const auto& point : points) for (float v : point)
+    out[4] = {camera.position[0]/500.f+6.f,camera.position[1]/500.f+6.f};
+    for (const auto& point : out) for (float v : point)
         if (!std::isfinite(v) || v < -32767 || v > 32766) return false;
-    // ScanWorld forms the convex hull, visits floor(minY)..floor(maxY), then
-    // floor(left)..floor(right), both inclusive (retail 75F5C7/75F830). Obtain
-    // each row's hull extrema directly from all point pairs, avoiding the
-    // global mutable scan buffers. Interior pairs cannot enlarge the hull.
-    float minY = points[0][1], maxY = minY;
-    for (const auto& point : points) { minY = std::min(minY,point[1]); maxY = std::max(maxY,point[1]); }
-    for (int y = int(std::floor(minY)); y <= int(std::floor(maxY)) && count < blocks.size(); ++y) {
-        float left = 1.e10f, right = -1.e10f;
-        const auto add = [&](double x) { left = std::min(left,float(x)); right = std::max(right,float(x)); };
-        for (size_t i = 0; i < points.size(); ++i) {
-            const auto a = points[i];
-            if (a[1] >= y && a[1] <= y+1) add(a[0]);
-            for (size_t j = i+1; j < points.size(); ++j) {
-                const auto b = points[j];
-                if (a[1] == b[1]) continue;
-                for (int edge : {y,y+1}) {
-                    const double t = (double(edge)-a[1]) / (double(b[1])-a[1]);
-                    if (t >= 0 && t <= 1) add(double(a[0]) + t*(double(b[0])-a[0]));
-                }
+    points=out;
+    return true;
+}
+
+bool RealtimeEnvironment::ScanOutsideWaterBlocks(float cameraX, float cameraY,
+    std::array<RealtimeWaterBlock,70>& blocks, size_t& count) {
+    count = 0;
+    RealtimeWaterScanPoints points;
+    return CaptureWaterScanPoints(cameraX,cameraY,points) && ScanWaterBlocks(points,blocks,count);
+}
+
+bool RealtimeEnvironment::ScanWaterBlocks(RealtimeWaterScanPoints points,
+    std::array<RealtimeWaterBlock,70>& blocks, size_t& count) {
+    for (const auto& p : points) for (float v : p)
+        if (!std::isfinite(v) || v < -32767 || v > 32766) return false;
+    count = 0;
+    // Empty-extra-list water domain: retail D0D270 starts in zero-filled BSS.
+    // Its only increment is in SetExtraRectangleToScan (75FD80), which has no
+    // direct call or absolute address reference in the owned retail .text.
+    // Other references are ScanWorld's removal/reset. ScanThroughBlocks never
+    // installs an extra rectangle. This is not a pending-extra general scanner.
+    // Retail 75F1B8: stable exact duplicate removal, including signed zero.
+    size_t n = points.size();
+    for (size_t i=0;i+1<n;++i) for (size_t j=i+1;j<n;++j) if (points[i]==points[j]) {
+        std::move(points.begin()+j+1,points.begin()+n,points.begin()+j); --n; --j;
+    }
+    // A non-collapsed perspective frustum projects to an area in XY. Reject
+    // precision-collapsed input rather than enter the original undefined hull.
+    if (n<3) return false;
+    const auto angle=[](float x,float y) {
+        // CGeneral::GetATanOfXY (retail 54CBD0). Ratio and atan result each
+        // store to float before the quadrant addition/subtraction. Do not
+        // substitute atan2(y,x): rounded angle ties decide hull membership.
+        const float ax=std::abs(x), ay=std::abs(y);
+        const bool steep=ax<ay;
+        const float ratio=steep ? ax/ay : ay/ax;
+        const float a=float(std::atan(double(ratio)));
+        constexpr double pi=3.1415927410125732421875, half=1.57079637050628662109375;
+        constexpr double threeHalf=4.7123889923095703125, tau=6.283185482025146484375;
+        if (steep) return float(y>0 ? (x>0 ? half-a : half+a) : (x>0 ? threeHalf+a : threeHalf-a));
+        return float(y>0 ? (x>0 ? double(a) : pi-a) : (x>0 ? tau-a : pi+a));
+    };
+    std::array<std::array<float,2>,5> hull{};
+    std::array<bool,5> used{};
+    size_t at=0, length=1;
+    for (size_t i=1;i<n;++i) if (points[i][1]<points[at][1]) at=i;
+    hull[0]=points[at]; used[at]=true;
+    float direction=0;
+    while (true) {
+        float best=99999.8984375f; size_t chosen=0;
+        for (size_t i=0;i<n;++i) if (i!=at) {
+            float turn=float(angle(points[i][0]-points[at][0],points[i][1]-points[at][1])-direction);
+            constexpr double tau=6.283185482025146484375;
+            while (turn<=0) turn=float(double(turn)+tau);
+            while (turn>=tau) turn=float(double(turn)-tau);
+            if (turn<best) { best=turn; chosen=i; } // STRICT: first equal-angle candidate wins
+        }
+        if (used[chosen]) break; // source stops on ANY visited point
+        hull[length++]=points[chosen]; used[chosen]=true; at=chosen;
+        direction=float(direction+best);
+    }
+    if (length<3) return true; // source emits nothing for a collapsed hull
+    const auto floor=[](float v) { return int(std::floor(double(v))); };
+    size_t start=0;
+    float ymax=hull[0][1];
+    for (size_t i=1;i<length;++i) {
+        if (hull[i][1]<hull[start][1]) start=i;
+        else if (hull[i][1]>=ymax) ymax=hull[i][1];
+    }
+    int row=floor(hull[start][1]); const int last=floor(ymax);
+    struct Edge { size_t next; float step{}, x{}; int bound; bool right; };
+    Edge left{start,0,0,9999,false},right{start,0,0,-9999,true};
+    const auto advance=[&](size_t i,bool forward) { return forward ? (i+1)%length : (i+length-1)%length; };
+    const auto extend=[](Edge& e,int x) { e.bound=e.right ? std::max(e.bound,x) : std::min(e.bound,x); };
+    const auto setLine=[&](Edge& e,size_t from) {
+        const auto a=hull[from],b=hull[e.next];
+        // RW device-open 82B138 and camera-begin 82D777 call 89F404/89F432:
+        // clear CW precision bits 0x300 -> 24-bit x87 arithmetic. Each FPU
+        // operation rounds, not just FSTP. Double operands do not mean PC53.
+        e.step=float(b[0]-a[0])/float(b[1]-a[1]);
+        const float fraction=float(std::ceil(a[1])-a[1]);
+        const volatile float product=fraction*e.step;
+        e.x=product+a[0];
+    };
+    const auto outward=[](const Edge& e) { return e.right ? e.step>=0 : e.step<0; };
+    for (Edge* e : {&left,&right}) {
+        size_t from=start;
+        for (size_t i=0;i<length;++i) {
+            from=e->next; e->next=advance(from,e->right);
+            extend(*e,floor(hull[from][0]));
+            if (floor(hull[from][1])!=floor(hull[e->next][1])) break;
+        }
+        if (row!=last) { setLine(*e,from); if (outward(*e)) extend(*e,floor(e->x)); }
+    }
+    // Retail 75F830 callback order is Y ascending, X ascending, inclusive.
+    // BlockHit 721310 stores the first 70 edge/outside cells in signed shorts.
+    for (;;) {
+        for (int x=left.bound;x<=right.bound;++x) if (x<=0 || x>=11 || row<=0 || row>=11) {
+            blocks[count++]={int16_t(x),int16_t(row)};
+            if (count==blocks.size()) return true;
+        }
+        if (row==last) return true;
+        ++row;
+        for (Edge* e : {&left,&right}) {
+            e->x=float(e->x+e->step); // original accumulated float store, not direct edge evaluation
+            if (row!=floor(hull[e->next][1])) {
+                e->bound=floor(outward(*e) ? e->x : float(e->x-e->step));
+            } else if (row==last) {
+                if (!outward(*e)) e->bound=floor(float(e->x-e->step));
+                else do { // final row follows the top plateau by floored X, NOT Y
+                    e->bound=floor(hull[e->next][0]); e->next=advance(e->next,e->right);
+                } while (e->right ? e->bound<floor(hull[e->next][0]) : e->bound>floor(hull[e->next][0]));
+            } else {
+                e->bound=floor(outward(*e) ? hull[e->next][0] : float(e->x-e->step));
+                size_t from;
+                do { from=e->next; e->next=advance(from,e->right); extend(*e,floor(hull[from][0])); }
+                while (row==floor(hull[e->next][1]));
+                setLine(*e,from);
+                if (outward(*e)) extend(*e,floor(e->x));
             }
         }
-        if (left > right) continue;
-        for (int x = int(std::floor(left)); x <= int(std::floor(right)) && count < blocks.size(); ++x)
-            if (x <= 0 || x >= 11 || y <= 0 || y >= 11) blocks[count++] = {int16_t(x),int16_t(y)};
     }
-    return true;
 }
 
 bool RealtimeEnvironment::DrawSeaBed(float cameraX, float cameraY, int area) const {

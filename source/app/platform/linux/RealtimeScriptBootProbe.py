@@ -34,8 +34,8 @@ if __name__ == '__main__':
             assert f'worldRevision=3 sourceCOL=1 overrides=14 disabled=13 garageReady=1 updates=50 flagsCleared=13 garageRevision={revision} cameraUnchanged=1 sourceBody=1 physics=1 ticks={frame - 1} ' in capture, capture
         assert 'boot-runtime PASS exit=1 swaps=3 fullboot=0' in result.stdout
         terminals = re.findall(r'^play-.*terminal .*$', result.stdout, re.MULTILINE)
-        assert len(terminals) == 1 and terminals[0].startswith('play-script-terminal status=Unsupported thread=1 generation=1 ip=205545 opcode=0213 executed=4 '), terminals
+        assert len(terminals) == 1 and terminals[0].startswith('play-script-terminal status=Unsupported thread=1 generation=1 ip=205876 opcode=0570 executed=27 '), terminals
         assert 'play-ok' not in result.stdout and 'play-fail' not in result.stdout and 'FAIL' not in result.stdout
-        print('boot-probe PASS actual-captures=3 mission-quanta=0/256/512+4 mission-prefix=516 terminal=0213@205545 '
+        print('boot-probe PASS actual-captures=3 mission-quanta=0/256/512+27 mission-prefix=539 terminal=0570@205876 '
             'worldRevision=3 sourceCOL-overrides=14/13-disabled garage-ready=50-each-frame camera-unchanged=1 '
             'actual-source-body=1 real-physics=1 clothes-not-reached=1 runtime-exit=1 fullboot=0')
