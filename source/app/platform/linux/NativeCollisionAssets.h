@@ -100,6 +100,20 @@ struct NativeCollisionModel {
     // Shadow mesh is rendering data, never substituted for collision faces.
     std::vector<uint8_t> SourceChunk;
 };
+// Narrow read-only lookup from the existing immutable COL catalog. No new
+// parser or authority: Ready requires supported non-empty geometry, Empty
+// preserves the authored empty flag, KnownAbsent means no chunk for the
+// lowercased name, Unsupported preserves the parser failure with the
+// retained model and error. TimeShared mirrors Snapshot's FirstTime
+// partner preference. Before any successful Load every query is
+// Unsupported, never KnownAbsent; empty/invalid input stays Unsupported.
+enum class NativeCollisionModelStatus { Ready, Empty, KnownAbsent, Unsupported };
+struct NativeCollisionModelLookup {
+    NativeCollisionModelStatus Status = NativeCollisionModelStatus::Unsupported;
+    std::shared_ptr<const NativeCollisionModel> Model;
+    bool TimeShared{};
+    std::string Error;
+};
 struct NativeCollisionInstance {
     // Identity/quaternion remain source provenance; Position is effective.
     // Basis below is the authoritative world rotation for every COL consumer.
@@ -133,8 +147,14 @@ public:
     // Pure, bounded parser for source-format verification. Atomic on failure.
     static bool Parse(std::span<const uint8_t> chunk, const std::string& library,
                       NativeCollisionModel& out, std::string& error);
+    // Pure, bounded, no IO. Lowercases the query; never invents geometry.
+    NativeCollisionModelLookup LookupModel(const std::string& name) const;
 private:
-    std::map<std::string, std::shared_ptr<const NativeCollisionModel>> m_Models;
+    using ModelMap = std::map<std::string, std::shared_ptr<const NativeCollisionModel>>;
+    // Shared read-only resolution: exact Snapshot keyLower + TimePartners
+    // preference. No counting, errors, identity validation, files or caches.
+    std::pair<ModelMap::const_iterator, bool> ResolveModel(const std::string& lowerKey) const;
+    ModelMap m_Models;
     std::map<std::string, std::string> m_TimePartners;
     NativeCollisionAssetStats m_Stats;
 };

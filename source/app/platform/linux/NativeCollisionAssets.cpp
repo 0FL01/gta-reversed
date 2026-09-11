@@ -297,6 +297,64 @@ std::shared_ptr<const NativeCollisionContext> NativeCollisionContext::LoadBefore
     return context;
 }
 
+std::pair<NativeCollisionAssets::ModelMap::const_iterator, bool>
+NativeCollisionAssets::ResolveModel(const std::string& lowerKey) const {
+    auto found = m_Models.find(lowerKey);
+    bool shared = false;
+    const auto partner = m_TimePartners.find(lowerKey);
+    if (partner != m_TimePartners.end()) {
+        found = m_Models.find(partner->second);
+        shared = found != m_Models.end() && partner->second != lowerKey;
+    }
+    return {found, shared};
+}
+
+NativeCollisionModelLookup NativeCollisionAssets::LookupModel(const std::string& name) const {
+    // Read-only lookup from the existing immutable catalog: no files,
+    // mutable caches or query side effects. The owner retains every
+    // shared const pointer; callers may outlive the catalog or its reload.
+    NativeCollisionModelLookup out;
+    // Before any successful Load the catalog is empty (Load rejects empty),
+    // so every query — including empty/invalid — is Unsupported, never
+    // KnownAbsent.
+    if (m_Models.empty()) {
+        out.Status = NativeCollisionModelStatus::Unsupported;
+        out.Error = "collision assets not loaded";
+        return out;
+    }
+    if (name.empty() || name.find('\0') != std::string::npos) {
+        out.Status = NativeCollisionModelStatus::Unsupported;
+        out.Error = "invalid collision model name";
+        return out;
+    }
+    const std::string key = Lower(name);
+    // Exact Snapshot keyLower + TimePartners preference, including partner
+    // priority for missing/time-shared names.
+    const auto [found, shared] = ResolveModel(key);
+    if (found == m_Models.end()) {
+        out.Status = NativeCollisionModelStatus::KnownAbsent;
+        out.TimeShared = false;
+        out.Error.clear();
+        return out;
+    }
+    out.Model = found->second;
+    out.TimeShared = shared;
+    const auto& model = *found->second;
+    if (!model.Unsupported.empty()) {
+        out.Status = NativeCollisionModelStatus::Unsupported;
+        out.Error = model.Unsupported;
+        return out;
+    }
+    if (model.Empty) {
+        out.Status = NativeCollisionModelStatus::Empty;
+        out.Error.clear();
+        return out;
+    }
+    out.Status = NativeCollisionModelStatus::Ready;
+    out.Error.clear();
+    return out;
+}
+
 bool NativeCollisionAssets::Snapshot(const NativeCollisionPopulation& population, float x, float y, float radius,
                                      NativeCollisionSnapshot& out, std::string& error, int interior,
                                      std::shared_ptr<const NativePlacementOverrides> overrides) const try {
@@ -309,11 +367,13 @@ bool NativeCollisionAssets::Snapshot(const NativeCollisionPopulation& population
         if (p.Interior!=interior) { ++next.InteriorExcluded; continue; }
         const auto* replacement = next.Overrides ? next.Overrides->Find(p) : nullptr;
         if (replacement && !replacement->CollisionEnabled) continue;
-        const auto key=Lower(p.Model); auto found=m_Models.find(key); bool shared=false;
+        const auto key=Lower(p.Model);
         const auto id=population.Models.find(p.ModelId);
         Require(id!=population.Models.end() && Lower(id->second.Name)==key,"IPL/IDE collision identity mismatch: "+key);
-        const auto partner=m_TimePartners.find(key);
-        if (partner!=m_TimePartners.end()) { found=m_Models.find(partner->second); shared=found!=m_Models.end() && partner->second!=key; }
+        // Same read-only catalog resolution as LookupModel: exact keyLower +
+        // TimePartners preference. Counting, errors and identity validation
+        // below are unchanged.
+        const auto [found, shared] = ResolveModel(key);
         if (found==m_Models.end()) { ++next.MissingModels; ++next.KnownAbsence[key]; continue; }
         const auto& model=*found->second;
         // An unsupported parser result has no trustworthy extent. Referencing

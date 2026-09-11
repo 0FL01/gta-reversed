@@ -1,8 +1,12 @@
 // Read-only asset diagnosis, NOT a runtime translation unit. Reuse the exact
 // private COL parser until it can be extracted into an owned-data API. Build
-// with -ffunction-sections -fdata-sections -Wl,--gc-sections and Collide.cpp;
-// the unused legacy OS/global loader is discarded. No librw or OS path mutation.
+// with -ffunction-sections -fdata-sections -Wl,--gc-sections plus
+// NativeCollisionAssets.cpp, StreamPager.cpp and Collide.cpp (same native
+// flags/objects as NativeCollisionWorldProbe); the unused legacy OS/global
+// loader is discarded. No librw or OS path mutation.
 #include "ColLoad.cpp"
+#include "app/platform/linux/NativeCollisionAssets.h"
+#include "app/platform/linux/StreamPager.h"
 
 #include <algorithm>
 #include <array>
@@ -207,6 +211,200 @@ void PrintHit(float x,float y,float top,const Hit& hit,const char* mode) {
 }
 } // namespace
 
+namespace {
+// Narrow P1-A03 lookup gates over the existing immutable COL catalog. No new
+// parser or authority: every expectation mirrors Snapshot's keyLower +
+// TimePartners preference. Actual names come from the legacy COL map above;
+// synthetic names (empty, uppercase, guaranteed-missing) prove Lower and
+// KnownAbsent without inventing geometry. Categories absent from the real
+// catalog are reported SKIP, never faked.
+static std::string LookupLower(std::string s) { ToLowerInPlace(s); return s; }
+static const char* LookupStatusName(NativeCollisionModelStatus s) {
+    switch (s) {
+    case NativeCollisionModelStatus::Ready: return "Ready";
+    case NativeCollisionModelStatus::Empty: return "Empty";
+    case NativeCollisionModelStatus::KnownAbsent: return "KnownAbsent";
+    case NativeCollisionModelStatus::Unsupported: return "Unsupported";
+    }
+    return "?";
+}
+static void LookupGates(const std::string& game, const std::map<std::string, AssetModel>& legacy) {
+    // PreLoad: before any successful Load every query is Unsupported, never
+    // KnownAbsent — including empty/invalid input.
+    {
+        NativeCollisionAssets fresh;
+        for (const std::string name : {std::string("roads18_lan"), std::string(""), std::string("__missing__")}) {
+            const auto got = fresh.LookupModel(name);
+            Require(got.Status == NativeCollisionModelStatus::Unsupported && !got.Model &&
+                        !got.Error.empty() && !got.TimeShared,
+                    "preLoad lookup must be Unsupported: " + name);
+        }
+        const auto empty = fresh.LookupModel("");
+        Require(empty.Status == NativeCollisionModelStatus::Unsupported && !empty.Model,
+                "preLoad empty must be Unsupported, not KnownAbsent");
+        std::puts("LOOKUP preLoad Unsupported pass (loaded/empty/missing all Unsupported, no files)");
+    }
+    E2ELoadInfo info; char message[512]{}; std::string error;
+    Require(StreamPager_Init(game.c_str(), info, message, sizeof(message), {true, 900.0f, 4096}), message);
+    NativeCollisionPopulation population;
+    Require(StreamPager_CollisionPopulation(population, error), error);
+    NativeCollisionAssets assets;
+    Require(assets.Load(game.c_str(), population, error), error);
+    const auto& stats = assets.Stats();
+    std::printf("LOOKUP catalog models=%zu empty=%zu unsupported=%zu\n", stats.Models, stats.Empty, stats.Unsupported);
+    // Empty/invalid input after a valid Load stays Unsupported, not KnownAbsent.
+    {
+        const auto empty = assets.LookupModel("");
+        Require(empty.Status == NativeCollisionModelStatus::Unsupported && !empty.Model && !empty.Error.empty() &&
+                    !empty.TimeShared,
+                "empty lookup must be Unsupported, not KnownAbsent");
+        std::puts("LOOKUP empty/invalid Unsupported pass");
+        const auto nul = assets.LookupModel(std::string("bad\0name", 8));
+        Require(nul.Status == NativeCollisionModelStatus::Unsupported && !nul.Model && !nul.Error.empty(),
+                "embedded NUL name must not become known absence");
+    }
+    // Synthetic missing name is KnownAbsent with no model and no error.
+    constexpr const char* kMissing = "__definitely_missing_col_model_xyz_123__";
+    {
+        const auto got = assets.LookupModel(kMissing);
+        Require(got.Status == NativeCollisionModelStatus::KnownAbsent && !got.Model && got.Error.empty() &&
+                    !got.TimeShared,
+                "synthetic missing must be KnownAbsent");
+        std::string upper(kMissing); for (auto& c : upper) if (c >= 'a' && c <= 'z') c += 'A' - 'a';
+        const auto again = assets.LookupModel(upper);
+        Require(again.Status == NativeCollisionModelStatus::KnownAbsent && !again.Model,
+                "synthetic missing case variation must stay KnownAbsent");
+        std::puts("LOOKUP synthetic missing KnownAbsent pass");
+    }
+    // Include all IDE names: the legacy diagnosis intentionally drops empty
+    // COL, so its filtered map alone cannot exercise Empty/time partners.
+    std::set<std::string> queryNames;
+    for (const auto& [name, ignored] : legacy) { (void)ignored; queryNames.insert(name); }
+    for (const auto& [id, model] : population.Models) { (void)id; queryNames.insert(model.Name); }
+    std::string readyName, emptyName, sharedName, unsupportedName, sharedPartner;
+    std::shared_ptr<const NativeCollisionModel> readyModel;
+    for (const auto& name : queryNames) {
+        const auto got = assets.LookupModel(name);
+        const std::string key = LookupLower(name);
+        if (got.Status == NativeCollisionModelStatus::Ready && readyName.empty()) {
+            Require(got.Model && got.Model->Unsupported.empty() && !got.Model->Empty && got.Error.empty(),
+                    "Ready must retain a supported non-empty model: " + name);
+            if (!got.TimeShared) Require(got.Model->Name == key, "non-shared Ready must preserve identity: " + name);
+            else Require(got.Model->Name != key, "shared Ready must resolve to the partner: " + name);
+            readyName = name; readyModel = got.Model;
+        }
+        if (got.Status == NativeCollisionModelStatus::Empty && emptyName.empty()) {
+            Require(got.Model && got.Model->Empty && got.Model->Unsupported.empty() && got.Error.empty(),
+                    "Empty must retain the authored empty model: " + name);
+            emptyName = name;
+        }
+        if (got.TimeShared && got.Model && sharedName.empty()) {
+            sharedName = name; sharedPartner = got.Model->Name;
+            Require(got.Model->Name != key,
+                    "TimeShared must resolve to a retained partner model: " + name);
+        }
+        if (got.Status == NativeCollisionModelStatus::Unsupported && got.Model && unsupportedName.empty()) {
+            Require(!got.Model->Unsupported.empty() && !got.Error.empty() &&
+                        got.Error.find(got.Model->Unsupported) != std::string::npos,
+                    "Unsupported must retain the model and its error: " + name);
+            unsupportedName = name;
+        }
+    }
+    // Well-known actual bindings stay Ready (case-insensitive) where present.
+    for (const char* known : {"roads18_lan", "lae2_roads89"}) {
+        const auto got = assets.LookupModel(known);
+        if (got.Status == NativeCollisionModelStatus::Ready) {
+            Require(got.Model && got.Error.empty(), std::string("known Ready: ") + known);
+            std::string upper(known); for (auto& c : upper) if (c >= 'a' && c <= 'z') c += 'A' - 'a';
+            const auto varied = assets.LookupModel(upper);
+            Require(varied.Status == got.Status && varied.Model == got.Model &&
+                        varied.TimeShared == got.TimeShared,
+                    std::string("lookup must lowercase: ") + known);
+            std::printf("LOOKUP actual Ready pass model=%s timeShared=%d library=%s\n", known, int(got.TimeShared),
+                        got.Model->Library.c_str());
+            if (readyName.empty()) { readyName = known; readyModel = got.Model; }
+        } else {
+            std::printf("LOOKUP actual Ready SKIP known=%s status=%s\n", known, LookupStatusName(got.Status));
+        }
+    }
+    Require(!readyName.empty() && readyModel, "no actual Ready model in the loaded catalog");
+    std::printf("LOOKUP sweep Ready pass model=%s\n", readyName.c_str());
+    Require(!emptyName.empty(), "owned corpus Empty lookup was not exercised");
+    std::printf("LOOKUP actual Empty pass model=%s\n", emptyName.c_str());
+    if (!sharedName.empty()) {
+        std::printf("LOOKUP actual TimePartner pass query=%s partner=%s\n", sharedName.c_str(), sharedPartner.c_str());
+        // Partner preference: both sides resolve to the same retained model.
+        const auto viaQuery = assets.LookupModel(sharedName);
+        const auto viaPartner = assets.LookupModel(sharedPartner);
+        Require(viaQuery.Model && viaPartner.Model && viaQuery.Model == viaPartner.Model,
+                "time partners must share one retained model");
+        Require(viaQuery.TimeShared && !viaPartner.TimeShared, "partner TimeShared flags");
+        Require(viaQuery.Status == viaPartner.Status, "partner status must follow the preferred model");
+    } else {
+        std::puts("LOOKUP actual TimePartner not exercised by this query set");
+    }
+    if (!unsupportedName.empty()) std::printf("LOOKUP actual Unsupported pass model=%s\n", unsupportedName.c_str());
+    else std::puts("LOOKUP actual Unsupported model not exercised by this query set");
+    // Synthetic V1 point proves the Empty/Ready parser boundary Lookup relies
+    // on, without inventing catalog geometry.
+    {
+        std::vector<uint8_t> v1(112, 0);
+        auto u32 = [&](size_t p, uint32_t n) { for (size_t j = 0; j < 4; ++j) v1[p + j] = uint8_t(n >> (j * 8)); };
+        auto scalar = [&](size_t p, float f) { uint32_t n; std::memcpy(&n, &f, 4); u32(p, n); };
+        std::copy_n("COLL", 4, v1.begin()); std::copy_n("zero-sphere", 11, v1.begin() + 8); u32(4, 104);
+        scalar(32, 1); scalar(48, -1); scalar(52, -1); scalar(56, -1); scalar(60, 1); scalar(64, 1); scalar(68, 1);
+        u32(72, 1); v1[92] = 42;
+        NativeCollisionModel parsed; std::string parseError;
+        Require(NativeCollisionAssets::Parse(v1, "V1-fixture", parsed, parseError), parseError);
+        Require(!parsed.Empty && parsed.Spheres.size() == 1 && parsed.Spheres[0].Radius == 0,
+                "synthetic V1 zero-radius point must stay non-empty Ready geometry");
+        std::puts("LOOKUP synthetic V1 zero-radius Ready-boundary pass");
+    }
+    // Owner-retained pointers survive owner lifetime and load replacement.
+    {
+        std::shared_ptr<const NativeCollisionModel> retained;
+        std::string retainedName;
+        {
+            NativeCollisionAssets temporary;
+            Require(temporary.Load(game.c_str(), population, error), error);
+            const auto got = temporary.LookupModel(readyName);
+            Require(got.Status == NativeCollisionModelStatus::Ready && got.Model, "retained fixture must be Ready");
+            retained = got.Model; retainedName = retained->Name;
+        }
+        Require(retained && retained->Name == retainedName && !retained->Empty &&
+                    retained->Unsupported.empty(),
+                "retained pointer must survive owner lifetime");
+        NativeCollisionAssets replacement;
+        Require(replacement.Load(game.c_str(), population, error), error);
+        const auto first = replacement.LookupModel(readyName).Model;
+        Require(first && first->Name == retainedName, "replacement catalog must resolve the same name");
+        Require(replacement.Load(game.c_str(), population, error), error);
+        const auto second = replacement.LookupModel(readyName).Model;
+        Require(second && second->Name == retainedName, "reload must resolve the same name");
+        Require(first && first->Name == retainedName, "pre-reload pointer must survive load replacement");
+        std::puts("LOOKUP retained-pointer lifetime/replacement pass");
+    }
+    // Invalid Load preserves the prior successful state (atomic Load).
+    {
+        NativeCollisionAssets preserved;
+        Require(preserved.Load(game.c_str(), population, error), error);
+        const auto before = preserved.LookupModel(readyName);
+        Require(before.Status == NativeCollisionModelStatus::Ready && before.Model, "preserve fixture must be Ready");
+        const std::string beforeName = before.Model->Name;
+        std::string badError;
+        Require(!preserved.Load("/nonexistent_dir_xyz_123", population, badError) && !badError.empty(),
+                "invalid Load must fail");
+        const auto after = preserved.LookupModel(readyName);
+        Require(after.Status == before.Status && after.Model && after.Model->Name == beforeName &&
+                    after.TimeShared == before.TimeShared,
+                "invalid Load must preserve prior catalog state");
+        std::puts("LOOKUP invalid-Load preserves-prior-state pass");
+    }
+    StreamPager_Shutdown();
+    std::puts("LOOKUP narrow catalog lookup PASS (no new parser/authority, no files on query)");
+}
+} // namespace
+
 int main(int argc,char** argv) try {
     Require(argc==2,"usage: NativeCollisionAssetsProbe GAME_DIR");
     const std::string game=argv[1];
@@ -306,6 +504,7 @@ int main(int argc,char** argv) try {
         PrintHit(x,-1736,20,hit,"curb-x");
         Require(hit.Instance,"curb COL ground missed");
     }
+    LookupGates(game, models);
     std::puts("native-collision-assets diagnosis PASS (ray/asset binding only; no controller sweep claim)");
     return 0;
 } catch (const std::exception& error) {

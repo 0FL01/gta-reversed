@@ -135,10 +135,10 @@ def build():
         if args[i] in ('-MT', '-MF', '-o', '-c'): i += 2
         elif args[i] == '-MD': i += 1
         else: flags.append(args[i]); i += 1
-    flags += ['-UNDEBUG', '-ffunction-sections', '-fdata-sections']
+    flags += ['-UNDEBUG', '-ffunction-sections', '-fdata-sections', '-ffp-contract=off', '-fno-fast-math']
     objects = []
     with (OUT / 'NativeLodCatalog-build.log').open('w') as log:
-        for unit in ('NativeLodCatalog', 'NativeLodCatalogProbe', 'NativeWorldEntityInfo', 'StreamPager', 'TexSample'):
+        for unit in ('NativeLodCatalog', 'NativeLodCatalogProbe', 'NativeCollisionAssets', 'NativeWorldEntityInfo', 'StreamPager', 'TexSample'):
             obj = OUT / ('NativeLodCatalog-' + unit + '.o'); objects.append(str(obj))
             subprocess.run(flags + ['-Wall', '-Wextra', '-c', str(SOURCE / (unit + '.cpp')), '-o', str(obj)],
                            cwd=ROOT / 'build', stdout=log, stderr=subprocess.STDOUT, check=True)
@@ -197,6 +197,47 @@ def main():
         expected = [p['source'], p['local'], p['ident'], p['name'], p['flags'], p['lod'], transform_hash(p['transform']),
                     p['status'], p['parent_source'], parents[i], counts[i], p['kind'], trigger(1), trigger(2)]
         assert a == list(map(str, expected)), (i, a, expected)
+    # P1-A03 naturally closed single-child chain, independently located in the
+    # raw decode (no C++ identities trusted): LAn record0/3991 -> record24/4043.
+    child_idx = [i for i, p in enumerate(placements) if p['ident'] == 3991]
+    parent_idx = [i for i, p in enumerate(placements) if p['ident'] == 4043]
+    assert len(child_idx) == 1 and len(parent_idx) == 1, 'frozen chain models not unique'
+    child_idx, parent_idx = child_idx[0], parent_idx[0]
+    child, parent = placements[child_idx], placements[parent_idx]
+    assert child['name'] == 'gsfreeway7_lan' and parent['name'] == 'lodgsfreeway7_lan'
+    assert sources[child['source']][0].lower() == 'data\\maps\\la\\lan.ipl'.lower()
+    assert sources[parent['source']][0].lower() == 'data\\maps\\la\\lan.ipl'.lower()
+    assert child['source'] == parent['source'] and not sources[child['source']][2]
+    assert sources[child['source']][1] == 'lan'
+    assert child['local'] == 0 and parent['local'] == 24
+    assert child['lod'] == 24 and parent['lod'] == -1
+    assert child['flags'] == 0 and parent['flags'] == 0
+    assert parents[child_idx] == parent_idx and counts[parent_idx] == 1 and counts.get(child_idx, 0) == 0
+    assert parents[parent_idx] == -1
+    assert child['kind'] != 2 and parent['kind'] != 2, 'frozen chain must not be time'
+    assert child['draw'] == 180.0 and parent['draw'] == 450.0, (child['draw'], parent['draw'])
+    for label, pose in (('child', child), ('parent', parent)):
+        x, y, z, qx, qy, qz, qw = struct.unpack('<7f', pose['transform'])
+        assert math.isclose(x, 1608.195313, abs_tol=0.002) and math.isclose(y, -1721.804688, abs_tol=0.002) and \
+            math.isclose(z, 26.0, abs_tol=0.002), (label, x, y, z)
+        assert (qx, qy, qz, qw) == (0.0, 0.0, 0.0, 1.0), (label, qx, qy, qz, qw)
+    chain = [r for r in output if r[0] == 'CHAIN']
+    assert len(chain) == 1, ('missing CHAIN line', [r[0] for r in output if r[0] in ('CHAIN', 'DECISION', 'RELATION', 'NEGATIVE', 'RUNTIME')])
+    assert chain[0][1:5] == [str(child_idx), str(parent_idx), '3991', '4043'], ('CHAIN nodes', chain[0])
+    assert chain[0][5:7] == ['180', '450'] or chain[0][5:7] == ['180.0', '450.0'], ('CHAIN draw', chain[0])
+    assert chain[0][7] == '122' and chain[0][10] == '3991' and chain[0][11] == '3', ('CHAIN COL', chain[0])
+    assert math.isclose(float(chain[0][8]), -2.908159, abs_tol=0.002), ('CHAIN minZ', chain[0])
+    assert 'lan_2.col' in chain[0][9].lower() and 'gta3.img' in chain[0][9].lower(), ('CHAIN library', chain[0])
+    for tag in ('DECISION', 'RELATION', 'NEGATIVE', 'RUNTIME', 'MASK', 'THRESHOLD', 'FORGED', 'UNDERWATER', 'SYNTH'):
+        rows = [r for r in output if r[0] == tag]
+        assert len(rows) == 1 and rows[0][1] == 'pass', (tag, rows)
+    # Threshold is genuinely discriminating on the frozen draws (no hardcode):
+    # mult1 accepts the child, mult2 crosses 300 and must reject.
+    assert child['draw'] * 1.0 <= 300 < child['draw'] * 2.0, 'frozen threshold crossing'
+    assert parent['draw'] * 1.0 > 300 and parent['draw'] * 2.0 > 300, 'parent stays big'
+    synth = [r for r in output if r[0] == 'SYNTH'][0]
+    assert synth[1] == 'pass' and 'dummy' in synth[2] and 'building' in synth[2], ('SYNTH', synth)
+    assert output and output[-1][0] == 'SUMMARY', 'SUMMARY must stay last'
     # Same exact child+parent identities assessed at two distance multipliers in
     # actual LS startup and distant-city populations. This is graph preparation,
     # not a renderer visibility oracle: parent rendering is an independent barrier.

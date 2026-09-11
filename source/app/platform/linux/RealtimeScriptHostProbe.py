@@ -32,7 +32,10 @@ def build_probe(name):
             i += 1
     line = next(c for c in commands if ' -o mad-sa-linux ' in c)
     link = shlex.split(next(part for part in line.split('&&') if ' -o mad-sa-linux ' in part))
-    link = [a for a in link if not any(a.endswith('/' + n + '.cpp.o') for n in ('MainLinux', 'Realtime'))]
+    # The asset diagnosis includes ColLoad.cpp to reuse its private reference
+    # parser; omit that one product object to avoid duplicate definitions.
+    excluded = ('MainLinux', 'Realtime', 'ColLoad') if name == 'NativeCollisionAssetsProbe' else ('MainLinux', 'Realtime')
+    link = [a for a in link if not any(a.endswith('/' + n + '.cpp.o') for n in excluded)]
     # Build production objects, not the product link: children can verify their
     # new TUs before the parent's CMake integration. No build-file edits here.
     subprocess.run(['ninja', '-C', str(build)] + [a for a in link if a.endswith('.cpp.o')], check=True)

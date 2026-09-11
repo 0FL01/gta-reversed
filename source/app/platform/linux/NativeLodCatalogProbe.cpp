@@ -4,10 +4,12 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -170,6 +172,86 @@ static NativeCollisionPopulation FixturePopulation(const std::string& root) {
     population.Instances.push_back(binary);
     return population;
 }
+// Narrow P1-A03 evaluator extension: a 2-record text LOD edge (child Lod 1
+// -> parent sentinel) with no binary rows, so each model stays unique and the
+// building-mask gate is reachable with empty COL (no COL parser duplication).
+// Draws 100 pass the big scope at multiplier 1 (child 100<=300, parent has a
+// child); dummy is proven via object.dat assignment, not invented authority.
+static void WriteEvaluatorBaseline(const std::string& subroot, bool dummyChild) {
+    const fs::path base(subroot);
+    fs::create_directories(base / "data");
+    fs::create_directories(base / "MODELS");
+    WriteBytes(base / "data" / "default.dat", "IDE data\\evaluator.ide\nIMG MODELS\\EVALUATOR.IMG\nIPL data\\evaluator.ipl\nEXIT\n");
+    WriteBytes(base / "data" / "gta.dat", "EXIT\n");
+    WriteBytes(base / "data" / "evaluator.ide", "objs\n1000 eval_child eval 100 0\n1001 eval_parent eval 100 0\nend\n");
+    WriteBytes(base / "data" / "object.dat",
+        dummyChild ? "eval_child 0 0 0 0 0 0 0 0 0 0 0 0\n* stop\n" : "* stop\n");
+    WriteBytes(base / "data" / "evaluator.ipl",
+        "inst\n1000 eval_child 0 10 20 30 0 0 0 1 1\n1001 eval_parent 0 11 21 31 0 0 0 1 -1\nend\n");
+    WriteBytes(base / "MODELS" / "GTA3.IMG", FixtureImg(true));
+    WriteBytes(base / "MODELS" / "GTA_INT.IMG", FixtureImg(true));
+    WriteBytes(base / "MODELS" / "EVALUATOR.IMG", FixtureImg(true));
+}
+static NativeCollisionPopulation EvaluatorPopulation() {
+    NativeCollisionPopulation population;
+    population.IncludesStreamed = true;
+    population.Models[1000] = {"eval_child", false};
+    population.Models[1001] = {"eval_parent", false};
+    for (int i = 0; i < 2; ++i) {
+        NativeCollisionPlacement p;
+        p.Model = i ? "eval_parent" : "eval_child"; p.Ipl = "data\\evaluator.ipl";
+        p.ModelId = 1000 + i; p.Record = static_cast<uint32_t>(i);
+        p.Position = {10.0f + float(i), 20.0f + float(i), 30.0f + float(i)};
+        p.Quaternion = {0.0f, 0.0f, 0.0f, 1.0f};
+        p.Flags = 0; p.Interior = 0; p.Lod = i ? -1 : 1;
+        population.Instances.push_back(p);
+    }
+    return population;
+}
+static void SyntheticLinkLodsGates(const std::string& root) {
+    // Building ends pass the mask gate (later COL failure proves it); a dummy
+    // child is rejected at the mask gate with out unchanged. Empty COL keeps
+    // this free of COL-parser duplication; ordering (mask before COL) matters.
+    for (bool dummyChild : {false, true}) {
+        const std::string sub = root + (dummyChild ? "/eval-dummy" : "/eval-building");
+        WriteEvaluatorBaseline(sub, dummyChild);
+        const auto population = EvaluatorPopulation();
+        std::string error;
+        const auto graph = NativeLodCatalog::LoadBeforeWorker(sub.c_str(), population, error);
+        Require(bool(graph) && error.empty(), "synthetic evaluator load: " + error);
+        Require(graph->DiskValidated() && graph->Nodes().size() == 2, "synthetic evaluator census 2");
+        const NativeLodNode* childPtr = nullptr;
+        for (const auto& n : graph->Nodes()) if (n.Identity.ModelId == 1000) childPtr = &n;
+        Require(childPtr && childPtr->Link == NativeLodLinkStatus::Bound && childPtr->Parent, "synthetic evaluator edge");
+        const auto childMeta = graph->Metadata(*childPtr);
+        const auto& parentNode = graph->Nodes()[*childPtr->Parent];
+        const auto parentMeta = graph->Metadata(parentNode);
+        if (!dummyChild) {
+            Require(childMeta.InitialBuildingMask() == NativeWorldKnownBool::True &&
+                        parentMeta.InitialBuildingMask() == NativeWorldKnownBool::True,
+                    "synthetic building mask");
+        } else {
+            Require(childMeta.InitialBuildingMask() == NativeWorldKnownBool::False, "synthetic dummy mask");
+        }
+        NativeCollisionAssets emptyCollisions;
+        NativeLodChainDecision sentinel, trial = sentinel;
+        const bool ok = graph->EvaluateLinkLodsChain(childPtr->Identity, emptyCollisions, {false, 1.0f}, trial, error);
+        Require(!ok && !error.empty() && trial == sentinel, "synthetic evaluator must fail unchanged");
+        if (!dummyChild) {
+            Require(error.find("COL") != std::string::npos && error.find("building mask") == std::string::npos,
+                    "building ends must pass mask, fail at COL (" + error + ")");
+        } else {
+            Require(error.find("building mask") != std::string::npos, "dummy child must fail at mask (" + error + ")");
+        }
+        for (const auto& n : graph->Nodes()) {
+            Require(n.RuntimeModelIsLod == NativeWorldKnownBool::Unknown &&
+                        n.RuntimeBigBuilding == NativeWorldKnownBool::Unknown &&
+                        n.RuntimeUsesCollision == NativeWorldKnownBool::Unknown,
+                    "synthetic evaluator mutated runtime");
+        }
+    }
+    std::cout << "SYNTH\tpass\tbuilding-pass-col-fail,dummy-unsupported-unchanged\n";
+}
 static void SyntheticDiskFixture(const std::string& root) {
     Require(!root.empty() && root.rfind("/game", 0) != 0 && root.rfind("/tmp", 0) != 0,
             "fixture must live under the wrapper tempdir, never /game or tmp");
@@ -225,6 +307,7 @@ static void SyntheticDiskFixture(const std::string& root) {
     expectFail("record budget", "cumulative");
     WriteDiskBaseline(root);
     unchanged();
+    SyntheticLinkLodsGates(root);
     std::cout << "DISKFIXTURE\tpass\tbaseline,other-section,advisory-size,advertised-range,actual-inst-range,actual-cargen-range,inst-budget,cumulative\n";
 }
 }
@@ -309,6 +392,10 @@ int main(int argc, char** argv) try {
     StreamPager_Shutdown();
     const auto graph = NativeLodCatalog::LoadBeforeWorker(argv[1], population, error);
     Require(bool(graph), error); Require(graph->DiskValidated(), "raw disk validation missing");
+    // Sibling-lane COL for the frozen single-child chain. Loaded before the
+    // post-publication seal; LookupModel afterwards is pure/no-IO.
+    NativeCollisionAssets collisions;
+    Require(collisions.Load(argv[1], population, error), error);
     // Caller lifetime/order and failed-export proof: graph owns everything.
     auto corrupt = population; corrupt.Instances[0].Lod = INT32_MAX;
     Require(!NativeLodCatalog::LoadBeforeWorker(argv[1], corrupt, error) && error.find("mismatch") != std::string::npos,
@@ -373,6 +460,226 @@ int main(int argc, char** argv) try {
     Require(distinctIds.size() == 12839, "integrated placed static model IDs 12839");
     Require(classes[1] == 34759 && classes[2] == 68 && classes[3] == 16108 && classes[0] == 0,
             "integrated class census 34759/68/16108/0");
+    // P1-A03 naturally closed single-child chain (actual disk data, not a
+    // fixture): DATA\MAPS\LA\LAn.IPL record0/model3991 GSFreeway7_LAn ->
+    // record24/model4043 LODGSFreeway7_LAn. Prepared CPU authority only.
+    {
+        auto lower = [](std::string s) {
+            for (auto& c : s) if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+            return s;
+        };
+        auto near = [](float a, float b, float eps = 0.002f) { return std::abs(a - b) < eps; };
+        const NativeLodNode* childPtr = nullptr;
+        const NativeLodNode* parentPtr = nullptr;
+        size_t childCount3991{}, parentCount4043{};
+        for (const auto& n : graph->Nodes()) {
+            if (n.Identity.ModelId == 3991) { ++childCount3991; childPtr = &n; }
+            if (n.Identity.ModelId == 4043) { ++parentCount4043; parentPtr = &n; }
+        }
+        Require(childCount3991 == 1 && childPtr, "frozen child model 3991 not unique");
+        Require(parentCount4043 == 1 && parentPtr, "frozen parent model 4043 not unique");
+        Require(lower(childPtr->Identity.Model) == "gsfreeway7_lan", "frozen child name");
+        Require(lower(parentPtr->Identity.Model) == "lodgsfreeway7_lan", "frozen parent name");
+        Require(lower(childPtr->Identity.Ipl) == "data\\maps\\la\\lan.ipl", "frozen child IPL");
+        Require(lower(parentPtr->Identity.Ipl) == "data\\maps\\la\\lan.ipl", "frozen parent IPL");
+        Require(childPtr->Identity.Record == 0 && parentPtr->Identity.Record == 24, "frozen record order");
+        Require(!childPtr->Identity.Binary && !parentPtr->Identity.Binary, "frozen text encounter");
+        Require(childPtr->Source == parentPtr->Source, "frozen same text source");
+        Require(graph->Sources()[childPtr->Source].Name == "lan" && !graph->Sources()[childPtr->Source].Binary,
+                "frozen source lan");
+        Require(childPtr->LocalIndex == 0 && parentPtr->LocalIndex == 24, "frozen local order");
+        const size_t childIdx = static_cast<size_t>(childPtr - graph->Nodes().data());
+        const size_t parentIdx = static_cast<size_t>(parentPtr - graph->Nodes().data());
+        Require(childIdx < parentIdx, "frozen source-order encounter");
+        Require(childPtr->Placement.Lod == static_cast<int32_t>(parentPtr->LocalIndex), "frozen Lod index");
+        Require(parentPtr->Placement.Lod == -1, "frozen parent sentinel");
+        Require(childPtr->Placement.Flags == 0 && parentPtr->Placement.Flags == 0, "frozen flags 0");
+        for (size_t i = 0; i < 3; ++i) {
+            const float expected[3] = {1608.195313f, -1721.804688f, 26.0f};
+            Require(near(childPtr->Placement.Position[i], expected[i]), "frozen child position");
+            Require(near(parentPtr->Placement.Position[i], expected[i]), "frozen parent position");
+        }
+        const float identQ[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        for (size_t i = 0; i < 4; ++i) {
+            Require(childPtr->Placement.Quaternion[i] == identQ[i], "frozen child identity quat");
+            Require(parentPtr->Placement.Quaternion[i] == identQ[i], "frozen parent identity quat");
+        }
+        Require(childPtr->Link == NativeLodLinkStatus::Bound, "frozen child bound");
+        Require(childPtr->Parent && *childPtr->Parent == parentIdx, "frozen child parent edge");
+        Require(childPtr->Children.empty(), "frozen child zero children");
+        Require(parentPtr->Link == NativeLodLinkStatus::None && !parentPtr->Parent, "frozen parent no parent");
+        Require(parentPtr->Children.size() == 1 && parentPtr->Children.front() == childIdx, "frozen parent one child");
+        const auto childMeta = graph->Metadata(*childPtr);
+        const auto parentMeta = graph->Metadata(*parentPtr);
+        Require(childMeta.Status == NativeWorldInfoStatus::Ready && childMeta.Model && parentMeta.Status == NativeWorldInfoStatus::Ready &&
+                    parentMeta.Model, "frozen metadata ready");
+        Require(childMeta.Model->Kind != NativeWorldModelKind::TimeAtomic &&
+                    parentMeta.Model->Kind != NativeWorldModelKind::TimeAtomic, "frozen not time");
+        Require(childMeta.Model->DrawDistance && parentMeta.Model->DrawDistance, "frozen draw present");
+        Require(*childMeta.Model->DrawDistance == 180.0f, "frozen child draw 180");
+        Require(*parentMeta.Model->DrawDistance == 450.0f, "frozen parent draw 450");
+        // Both ends must be initial buildings (accepted classes). Dummy starts
+        // uses-collision false, so it cannot carry the accepted decision.
+        Require(childMeta.InitialBuildingMask() == NativeWorldKnownBool::True &&
+                    parentMeta.InitialBuildingMask() == NativeWorldKnownBool::True,
+                "frozen initial building mask");
+        std::cout << "MASK\tpass\tchild-class-" << int(childMeta.Model->InitialClass)
+                  << "\tparent-class-" << int(parentMeta.Model->InitialClass) << '\n';
+        // Sibling-lane COL scope: Ready+provenance child, KnownAbsent parent.
+        const auto childCol = collisions.LookupModel(childPtr->Identity.Model);
+        const auto parentCol = collisions.LookupModel(parentPtr->Identity.Model);
+        Require(childCol.Status == NativeCollisionModelStatus::Ready && childCol.Model && !childCol.TimeShared,
+                "frozen child COL ready: " + childCol.Error);
+        Require(childCol.Model->ValidatedHeaderId && childCol.Model->HeaderId == 3991, "frozen child COL provenance 3991");
+        Require(childCol.Model->Version == 3, "frozen child COL3");
+        Require(childCol.Model->Faces.size() == 122, "frozen child COL 122 faces");
+        Require(near(childCol.Model->Min[2], -2.908159f), "frozen child COL minZ");
+        Require(lower(childCol.Model->Library).find("lan_2.col") != std::string::npos &&
+                    lower(childCol.Model->Library).find("gta3.img") != std::string::npos,
+                "frozen child COL gta3.img:lan_2.col");
+        Require(parentCol.Status == NativeCollisionModelStatus::KnownAbsent && !parentCol.Model && !parentCol.TimeShared,
+                "frozen parent COL known-absent");
+        std::cout << "CHAIN\t" << childIdx << '\t' << parentIdx << '\t' << childPtr->Identity.ModelId << '\t'
+                  << parentPtr->Identity.ModelId << '\t' << *childMeta.Model->DrawDistance << '\t'
+                  << *parentMeta.Model->DrawDistance << '\t' << childCol.Model->Faces.size() << '\t'
+                  << childCol.Model->Min[2] << '\t' << childCol.Model->Library << '\t' << childCol.Model->HeaderId
+                  << '\t' << childCol.Model->Version << '\n';
+        // Whole LinkLods decision at explicit CacheLoading=false/LodMultiplier=1.
+        NativeLodChainDecision decision;
+        Require(graph->EvaluateLinkLodsChain(childPtr->Identity, collisions, {false, 1.0f}, decision, error), error);
+        Require(decision.Child == childPtr->Identity && decision.Parent == parentPtr->Identity, "decision identities");
+        Require(decision.ChildNode == childIdx && decision.ParentNode == parentIdx, "decision nodes");
+        Require(decision.ChildModelId == 3991 && decision.ParentModelId == 4043, "decision models");
+        Require(decision.ParentChildren == 1 && decision.ChildChildren == 0, "decision counts");
+        Require(decision.Link == NativeLodLinkStatus::Bound && decision.EdgeKept, "decision edge kept");
+        Require(decision.CollisionTransferred && decision.EffectiveCol &&
+                    decision.EffectiveCol.get() == childCol.Model.get() &&
+                    decision.EffectiveColFaces == 122 && decision.EffectiveColLibrary == childCol.Model->Library,
+                "decision effective COL shared");
+        Require(decision.ChildBigBuilding == NativeWorldKnownBool::False &&
+                    decision.ChildUsesCollision == NativeWorldKnownBool::True &&
+                    decision.ChildIsLod == NativeWorldKnownBool::True, "decision child not-big/uses-COL/bIsLod");
+        Require(decision.ParentBigBuilding == NativeWorldKnownBool::True &&
+                    decision.ParentUsesCollision == NativeWorldKnownBool::False &&
+                    decision.ParentIsLod == NativeWorldKnownBool::False, "decision parent big/no-COL/not-bIsLod");
+        Require(decision.ChildDrawDistance == 180.0f && decision.ParentDrawDistance == 450.0f &&
+                    decision.DrawUnchanged, "decision draw unchanged");
+        Require(!decision.Underwater && !decision.UnderwaterPropagated, "decision underwater false");
+        Require(!decision.LinkReason.empty() && !decision.TransferReason.empty() && !decision.RelationReason.empty(),
+                "decision reasons");
+        std::cout << "DECISION\tpass\tedge-kept,parent-children-1,draw-unchanged,underwater-false,"
+                     "child-notbig-usescol-bisLod,parent-big-nocol-notbisLod\n";
+        // Threshold crossing is genuinely discriminating: 180*1<=300 accepts,
+        // 180*2=360>300 makes the child big and must reject with out unchanged.
+        {
+            NativeLodChainDecision rejected = decision;
+            Require(!graph->EvaluateLinkLodsChain(childPtr->Identity, collisions, {false, 2.0f}, rejected, error) &&
+                        !error.empty() && rejected == decision,
+                    "multiplier2 threshold must reject unchanged (" + error + ")");
+        }
+        std::cout << "THRESHOLD\tpass\tmult1-accept,mult2-childBig-reject-unchanged\n";
+        // Relation-level renderer decision on external visibility only.
+        NativeLodRelationDecision relation;
+        Require(graph->EvaluateLodRelation(decision, true, 255, true, relation, error), error);
+        Require(relation.ChildSubmitted && relation.ParentMarked && relation.ParentSuppressed && !relation.ParentSubmitted,
+                "relation opaque child marks/suppresses parent");
+        Require(graph->EvaluateLodRelation(decision, true, 254, true, relation, error), error);
+        Require(relation.ChildSubmitted && !relation.ParentMarked && !relation.ParentSuppressed && relation.ParentSubmitted,
+                "relation translucent child still submitted without marking (alpha255 boundary)");
+        Require(graph->EvaluateLodRelation(decision, false, 255, true, relation, error), error);
+        Require(!relation.ChildSubmitted && !relation.ParentMarked && !relation.ParentSuppressed && relation.ParentSubmitted,
+                "relation invisible child parent fallback");
+        Require(graph->EvaluateLodRelation(decision, true, 0, true, relation, error), error);
+        Require(relation.ChildSubmitted && !relation.ParentMarked && relation.ParentSubmitted,
+                "relation alpha0 still submitted without marking");
+        std::cout << "RELATION\tpass\topaque-mark-suppress,translucent-submit-nomark-fallback,alpha255-boundary,invisible-fallback\n";
+        // Forged/tampered chains must be rejected with out unchanged: the
+        // relation lane only accepts the proven post-LinkLods states.
+        {
+            const NativeLodRelationDecision sentinel;
+            for (int tamper = 0; tamper < 4; ++tamper) {
+                auto forged = decision;
+                if (tamper == 0) forged.ChildBigBuilding = NativeWorldKnownBool::True;
+                else if (tamper == 1) forged.ParentBigBuilding = NativeWorldKnownBool::False;
+                else if (tamper == 2) forged.ChildUsesCollision = NativeWorldKnownBool::False;
+                else forged.ParentIsLod = NativeWorldKnownBool::True;
+                NativeLodRelationDecision trial = sentinel;
+                trial.ChildSubmitted = true;
+                trial.Reason = "sentinel";
+                const auto before = trial;
+                Require(!graph->EvaluateLodRelation(forged, true, 255, true, trial, error) && !error.empty() &&
+                            trial == before,
+                        "forged relation must reject unchanged");
+            }
+        }
+        std::cout << "FORGED\tpass\ttampered-childBig-parentBig-uses-isLod-reject-unchanged\n";
+        // Source underwater formula (FileLoader 1056 + 1070-1085) must be
+        // genuinely discriminating, not only the real 26-above case. Strict
+        // (Min.z + Pos.z) < 0.0f with authored OR; on-zero without authored
+        // stays false. Shared helper, no COL-parser duplication.
+        {
+            Require(!NativeLodSourceChildUnderwater(false, -2.908159f, 26.0f), "underwater real above");
+            Require(NativeLodSourceChildUnderwater(true, -2.908159f, 26.0f), "underwater authored OR above");
+            Require(NativeLodSourceChildUnderwater(false, -5.0f, 2.0f), "underwater below zero");
+            Require(!NativeLodSourceChildUnderwater(false, -2.0f, 2.0f), "underwater on zero strict");
+            Require(NativeLodSourceChildUnderwater(true, -2.0f, 2.0f), "underwater authored OR on zero");
+            // Accepted mask classes: Building and AnimatedBuilding pass, dummy
+            // and unknown do not. Real ends above already proved True/True.
+            NativeWorldModelInfo buildingModel, animatedModel, dummyModel, unknownModel;
+            buildingModel.InitialClass = NativeWorldInitialClass::Building;
+            animatedModel.InitialClass = NativeWorldInitialClass::AnimatedBuilding;
+            dummyModel.InitialClass = NativeWorldInitialClass::DummyObject;
+            unknownModel.InitialClass = NativeWorldInitialClass::Unknown;
+            NativeWorldPlacementInfo placement;
+            const auto mask = [&](const NativeWorldModelInfo& m) {
+                return NativeWorldEntityMetadata{NativeWorldInfoStatus::Ready, &m, &placement}.InitialBuildingMask();
+            };
+            Require(mask(buildingModel) == NativeWorldKnownBool::True, "mask building");
+            Require(mask(animatedModel) == NativeWorldKnownBool::True, "mask animated");
+            Require(mask(dummyModel) == NativeWorldKnownBool::False, "mask dummy");
+            Require(mask(unknownModel) == NativeWorldKnownBool::Unknown, "mask unknown");
+            // Real decision underwater matches the source formula on Known bits.
+            Require(childMeta.Placement->AuthoredUnderwater != NativeWorldKnownBool::Unknown &&
+                        parentMeta.Placement->AuthoredUnderwater != NativeWorldKnownBool::Unknown,
+                    "underwater authored known");
+            Require(decision.Underwater ==
+                        ((parentMeta.Placement->AuthoredUnderwater == NativeWorldKnownBool::True) ||
+                            NativeLodSourceChildUnderwater(
+                                childMeta.Placement->AuthoredUnderwater == NativeWorldKnownBool::True,
+                                childCol.Model->Min[2], childPtr->Placement.Position[2])),
+                    "decision underwater matches source formula");
+        }
+        std::cout << "UNDERWATER\tpass\tbelow-true,on-false,on-true-authored,above-false,above-true-authored,mask-classes\n";
+        // Rejections leave out unchanged, no mutation.
+        {
+            const auto sentinel = decision;
+            NativeLodChainDecision trial = sentinel;
+            auto wrong = childPtr->Identity;
+            wrong.Model += "_wrong";
+            Require(!graph->EvaluateLinkLodsChain(wrong, collisions, {false, 1.0f}, trial, error) && !error.empty() &&
+                        trial == sentinel, "wrong identity must fail unchanged");
+            trial = sentinel;
+            Require(!graph->EvaluateLinkLodsChain(childPtr->Identity, collisions, {true, 1.0f}, trial, error) &&
+                        !error.empty() && trial == sentinel, "cache closure must fail unchanged");
+            for (float bad : {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(),
+                              -std::numeric_limits<float>::infinity(), 0.0f, -1.0f}) {
+                trial = sentinel;
+                Require(!graph->EvaluateLinkLodsChain(childPtr->Identity, collisions, {false, bad}, trial, error) &&
+                            !error.empty() && trial == sentinel, "nonfinite/nonpositive multiplier must fail unchanged");
+            }
+            NativeCollisionAssets emptyCollisions;
+            trial = sentinel;
+            Require(!graph->EvaluateLinkLodsChain(childPtr->Identity, emptyCollisions, {false, 1.0f}, trial, error) &&
+                        !error.empty() && trial == sentinel, "unsupported COL closure must fail unchanged");
+        }
+        std::cout << "NEGATIVE\tpass\twrong-identity,cache,nonfinite,unsupported,unchanged\n";
+        for (const auto& n : graph->Nodes()) {
+            Require(n.RuntimeModelIsLod == NativeWorldKnownBool::Unknown &&
+                        n.RuntimeBigBuilding == NativeWorldKnownBool::Unknown &&
+                        n.RuntimeUsesCollision == NativeWorldKnownBool::Unknown, "evaluator mutated runtime state");
+        }
+        std::cout << "RUNTIME\tpass\tall-unknown-after-decision\n";
+    }
     std::cout << "SUMMARY\t" << graph->Nodes().size() << '\t' << edges << '\t' << unknown << '\t' << time
               << "\towned-after-pager-shutdown-and-population-destruction\tno-render-claim\n";
     return 0;

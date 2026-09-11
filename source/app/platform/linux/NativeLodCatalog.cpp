@@ -399,3 +399,283 @@ NativeWorldKnownBool NativeLodCatalog::InitialBigBuildingCondition(const NativeL
     if (!metadata.Model || !metadata.Model->DrawDistance) return NativeWorldKnownBool::Unknown;
     return *metadata.Model->DrawDistance * lodMultiplier > 300.0f ? NativeWorldKnownBool::True : NativeWorldKnownBool::False;
 }
+
+bool NativeLodCatalog::EvaluateLinkLodsChain(const NativePlacementIdentity& childIdentity,
+                                             const NativeCollisionAssets& collisions,
+                                             const NativeLinkLodsInputs& inputs,
+                                             NativeLodChainDecision& out, std::string& error) const try {
+    // Pure bounded evaluator: never mutates m_Nodes/m_Sources/m_Metadata.
+    // On any rejection out is left unchanged; only a complete decision is published.
+    if (!m_DiskValidated) { error = "Error: catalog lacks disk validation"; return false; }
+    if (inputs.CacheLoading) { error = "Error: cache loading closure not evaluated"; return false; }
+    if (!std::isfinite(inputs.LodMultiplier) || !(inputs.LodMultiplier > 0.0f)) {
+        error = "Error: nonfinite/nonpositive LodMultiplier";
+        return false;
+    }
+    const NativeLodNode* childPtr = Find(childIdentity);
+    if (!childPtr) { error = "Error: unknown child identity"; return false; }
+    const size_t childIdx = static_cast<size_t>(childPtr - m_Nodes.data());
+    if (childIdx >= m_Nodes.size()) { error = "Error: child index outside catalog"; return false; }
+    const NativeLodNode& child = m_Nodes[childIdx];
+    if (!(child.Identity == childIdentity)) { error = "Error: child identity mismatch"; return false; }
+    if (child.Link != NativeLodLinkStatus::Bound || !child.Parent) {
+        error = "Error: child link not bound";
+        return false;
+    }
+    const size_t parentIdx = *child.Parent;
+    if (parentIdx >= m_Nodes.size()) { error = "Error: parent index outside catalog"; return false; }
+    const NativeLodNode& parent = m_Nodes[parentIdx];
+    // No hardcoded model IDs: every gate below is structural/closure-derived.
+    auto lower = [](std::string s) {
+        for (auto& c : s) if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+        return s;
+    };
+    if (child.Source >= m_Sources.size() || parent.Source >= m_Sources.size()) {
+        error = "Error: source index outside catalog";
+        return false;
+    }
+    // Text encounter order: single text source, child record before parent
+    // record, catalog source order preserved (FileLoader LoadScene local array
+    // -> LinkLods first-bind, then source-order mutable pass 1956-2024).
+    if (child.Identity.Binary || parent.Identity.Binary) {
+        error = "Error: non-text encounter order";
+        return false;
+    }
+    if (m_Sources[child.Source].Binary || m_Sources[parent.Source].Binary) {
+        error = "Error: non-text encounter order";
+        return false;
+    }
+    if (child.Source != parent.Source) { error = "Error: cross-source chain"; return false; }
+    if (!(child.LocalIndex < parent.LocalIndex)) { error = "Error: text encounter order"; return false; }
+    if (!(childIdx < parentIdx)) { error = "Error: text encounter order"; return false; }
+    if (child.Placement.Lod != static_cast<int32_t>(parent.LocalIndex)) {
+        error = "Error: Lod index mismatch";
+        return false;
+    }
+    if (parent.Placement.Lod != -1 || parent.Link != NativeLodLinkStatus::None || parent.Parent) {
+        error = "Error: parent sibling closure";
+        return false;
+    }
+    if (!child.CandidateParent || *child.CandidateParent != parentIdx) {
+        error = "Error: sibling closure";
+        return false;
+    }
+    // Sibling closure: parent exactly one child (this child), child leaf.
+    if (!child.Children.empty()) { error = "Error: child sibling closure"; return false; }
+    if (parent.Children.size() != 1) {
+        error = parent.Children.size() > 1 ? "Error: multichild closure" : "Error: sibling closure";
+        return false;
+    }
+    if (parent.Children.front() != childIdx) { error = "Error: sibling closure"; return false; }
+    // Complete unique-model/name closure: each model appears exactly once in
+    // the full 50935 population; shared models are rejected, not aliased.
+    if (child.Identity.ModelId == parent.Identity.ModelId) {
+        error = "Error: shared model closure";
+        return false;
+    }
+    if (lower(child.Identity.Model) == lower(parent.Identity.Model)) {
+        error = "Error: shared model closure";
+        return false;
+    }
+    size_t childIdCount{}, parentIdCount{}, childNameCount{}, parentNameCount{};
+    for (const auto& n : m_Nodes) {
+        if (n.Identity.ModelId == child.Identity.ModelId) ++childIdCount;
+        if (n.Identity.ModelId == parent.Identity.ModelId) ++parentIdCount;
+        if (lower(n.Identity.Model) == lower(child.Identity.Model)) ++childNameCount;
+        if (lower(n.Identity.Model) == lower(parent.Identity.Model)) ++parentNameCount;
+        if (childIdCount > 1 && parentIdCount > 1 && childNameCount > 1 && parentNameCount > 1) break;
+    }
+    if (childIdCount != 1 || parentIdCount != 1 || childNameCount != 1 || parentNameCount != 1) {
+        error = "Error: shared model closure";
+        return false;
+    }
+    const auto childMeta = m_Metadata.Query(child.Placement);
+    const auto parentMeta = m_Metadata.Query(parent.Placement);
+    if (childMeta.Status != NativeWorldInfoStatus::Ready || !childMeta.Model || !childMeta.Placement ||
+        parentMeta.Status != NativeWorldInfoStatus::Ready || !parentMeta.Model || !parentMeta.Placement) {
+        error = "Error: incomplete source metadata closure";
+        return false;
+    }
+    // Time counterpart residency is unresolved: reject time chains.
+    if (childMeta.Model->Kind == NativeWorldModelKind::TimeAtomic ||
+        parentMeta.Model->Kind == NativeWorldModelKind::TimeAtomic) {
+        error = "Error: time closure";
+        return false;
+    }
+    if (!childMeta.Model->DrawDistance || !parentMeta.Model->DrawDistance) {
+        error = "Error: authored draw distance missing";
+        return false;
+    }
+    // Both ends must be initial buildings (Building/AnimatedBuilding).
+    // Dummy starts uses-collision false (Building.cpp 14-18 sets true for
+    // CBuilding; CEntity 108-126 leaves flags zero and CDummy/CDummyObject
+    // never enable it), so a dummy chain cannot carry the accepted
+    // not-big/uses-COL decision below.
+    if (childMeta.InitialBuildingMask() != NativeWorldKnownBool::True ||
+        parentMeta.InitialBuildingMask() != NativeWorldKnownBool::True) {
+        error = "Error: unsupported initial building mask closure";
+        return false;
+    }
+    const float childDraw = *childMeta.Model->DrawDistance, parentDraw = *parentMeta.Model->DrawDistance;
+    if (!std::isfinite(childDraw) || !std::isfinite(parentDraw) || !(childDraw > 0.0f) || !(parentDraw > 0.0f)) {
+        error = "Error: invalid authored draw distance";
+        return false;
+    }
+    // Sibling-lane COL scope: Ready+provenance child, KnownAbsent parent,
+    // TimeShared rejected. No IO here; LookupModel is pure/bounded.
+    const auto childCol = collisions.LookupModel(child.Identity.Model);
+    const auto parentCol = collisions.LookupModel(parent.Identity.Model);
+    if (childCol.TimeShared || parentCol.TimeShared) { error = "Error: time-shared COL closure"; return false; }
+    if (childCol.Status != NativeCollisionModelStatus::Ready || !childCol.Model) {
+        error = "Error: unsupported child COL closure";
+        return false;
+    }
+    if (!childCol.Model->ValidatedHeaderId || !childCol.Error.empty() ||
+        !childCol.Model->Unsupported.empty() || childCol.Model->Empty) {
+        error = "Error: unsupported child COL closure";
+        return false;
+    }
+    if (childCol.Model->HeaderId != static_cast<uint16_t>(child.Identity.ModelId)) {
+        error = "Error: child COL provenance closure";
+        return false;
+    }
+    if (parentCol.Status != NativeCollisionModelStatus::KnownAbsent || parentCol.Model) {
+        error = "Error: parent COL not known-absent";
+        return false;
+    }
+    // FileLoader 1991-1994 (0x5B5285): big when it already has LOD children
+    // or camera multiplier * draw > 300. SetupBigBuilding (Entity 863-871)
+    // disables uses-collision, persists the entity and sets the SEPARATE
+    // owns bit (BaseModelInfo.h), never bIsLod.
+    const bool childBig = !child.Children.empty() ||
+        (inputs.LodMultiplier * childDraw > 300.0f);
+    const bool parentBig = !parent.Children.empty() ||
+        (inputs.LodMultiplier * parentDraw > 300.0f);
+    // Narrow accepted scope: the child stays a normal entity (not big) so it
+    // precedes the big parent in the source-order mutable pass. A threshold
+    // crossing (e.g. 180*2>300 at multiplier 2) rejects without hardcoding
+    // multiplier 1.
+    if (childBig || !parentBig) { error = "Error: big-building scope closure"; return false; }
+    // FileLoader 1997-2013: single-child LOD aliases the child COL via
+    // DeleteCollisionModel + SetColModel(childCOL,false), which clears bIsLod
+    // (BaseModelInfo 143-160). The child keeps bIsLod=true. Pointers differ
+    // here because the parent is KnownAbsent (null) and the child is Ready.
+    // Underwater is LoadObjectInstance 1056 (authored OR) then 1070-1085:
+    // child adds the COL-bottom check, parent (KnownAbsent, no COL) keeps the
+    // authored bit only. Authored bits must be Known, never flag-decoded.
+    if (childMeta.Placement->AuthoredUnderwater == NativeWorldKnownBool::Unknown ||
+        parentMeta.Placement->AuthoredUnderwater == NativeWorldKnownBool::Unknown) {
+        error = "Error: unknown authored underwater closure";
+        return false;
+    }
+    const bool childUnder = NativeLodSourceChildUnderwater(
+        childMeta.Placement->AuthoredUnderwater == NativeWorldKnownBool::True,
+        childCol.Model->Min[2], child.Placement.Position[2]);
+    const bool parentUnder = parentMeta.Placement->AuthoredUnderwater == NativeWorldKnownBool::True;
+    NativeLodChainDecision local;
+    local.Child = child.Identity;
+    local.Parent = parent.Identity;
+    local.ChildNode = childIdx;
+    local.ParentNode = parentIdx;
+    local.ChildModelId = child.Identity.ModelId;
+    local.ParentModelId = parent.Identity.ModelId;
+    local.ChildModel = child.Identity.Model;
+    local.ParentModel = parent.Identity.Model;
+    local.ParentChildren = parent.Children.size();
+    local.ChildChildren = child.Children.size();
+    local.Link = child.Link;
+    local.EdgeKept = true;
+    local.CollisionTransferred = true;
+    local.EffectiveCol = childCol.Model;
+    local.EffectiveColLibrary = childCol.Model->Library;
+    local.EffectiveColFaces = static_cast<uint32_t>(childCol.Model->Faces.size());
+    local.ChildBigBuilding = childBig ? NativeWorldKnownBool::True : NativeWorldKnownBool::False;
+    local.ChildUsesCollision = childBig ? NativeWorldKnownBool::False : NativeWorldKnownBool::True;
+    local.ChildIsLod = NativeWorldKnownBool::True;
+    local.ParentBigBuilding = parentBig ? NativeWorldKnownBool::True : NativeWorldKnownBool::False;
+    local.ParentUsesCollision = parentBig ? NativeWorldKnownBool::False : NativeWorldKnownBool::True;
+    local.ParentIsLod = NativeWorldKnownBool::False;
+    local.ChildDrawDistance = childDraw;
+    local.ParentDrawDistance = parentDraw;
+    local.DrawUnchanged = true;
+    local.Underwater = parentUnder || childUnder;
+    local.UnderwaterPropagated = childUnder;
+    local.LinkReason =
+        "CFileLoader::LinkLods first-bind SetLod/AddLodChildren then source-order mutable pass 1956-2024 "
+        "(0x5B51E0/0x5B5285); text encounter child before parent";
+    local.TransferReason =
+        "FileLoader 2000-2006 single-child lodMI->DeleteCollisionModel/SetColModel(childCOL,false) clears "
+        "bIsLod (BaseModelInfo 143-160); SetOwnsColModel alters SEPARATE bDoWeOwnTheColModel (BaseModelInfo.h); "
+        "SetupBigBuilding disables uses-collision (Entity 863-871)";
+    local.RelationReason =
+        "Renderer single-child: opaque visible child marks/suppresses parent (509-521,695-722), otherwise "
+        "visible parent fallback (640-655,1048/1065); no near/far/frustum/residency/GPU claim";
+    out = std::move(local);
+    error.clear();
+    return true;
+} catch (const std::exception& e) { error = e.what(); return false; }
+
+bool NativeLodCatalog::EvaluateLodRelation(const NativeLodChainDecision& chain, bool childVisible,
+                                           uint8_t childAlpha, bool parentVisible,
+                                           NativeLodRelationDecision& out, std::string& error) const try {
+    if (!m_DiskValidated) { error = "Error: catalog lacks disk validation"; return false; }
+    // The chain must be a decision this catalog could have produced: exact
+    // single-child edge, no hardcoded model IDs.
+    const NativeLodNode* childPtr = Find(chain.Child);
+    const NativeLodNode* parentPtr = Find(chain.Parent);
+    if (!childPtr || !parentPtr) { error = "Error: unknown relation chain"; return false; }
+    const size_t childIdx = static_cast<size_t>(childPtr - m_Nodes.data());
+    const size_t parentIdx = static_cast<size_t>(parentPtr - m_Nodes.data());
+    if (childIdx != chain.ChildNode || parentIdx != chain.ParentNode || chain.Link != NativeLodLinkStatus::Bound ||
+        !chain.EdgeKept || chain.ParentChildren != 1 || chain.ChildChildren != 0 || !chain.CollisionTransferred) {
+        error = "Error: relation chain mismatch";
+        return false;
+    }
+    const NativeLodNode& child = m_Nodes[childIdx];
+    const NativeLodNode& parent = m_Nodes[parentIdx];
+    if (!child.Parent || *child.Parent != parentIdx || parent.Children.size() != 1 ||
+        parent.Children.front() != childIdx || !child.Children.empty()) {
+        error = "Error: relation chain mismatch";
+        return false;
+    }
+    // Accepted post-LinkLods states only: tampered/forged decisions (e.g. a
+    // childBig=true chain, which would upset normal-before-big order) are
+    // rejected with out unchanged.
+    if (chain.ChildBigBuilding != NativeWorldKnownBool::False ||
+        chain.ParentBigBuilding != NativeWorldKnownBool::True ||
+        chain.ChildUsesCollision != NativeWorldKnownBool::True ||
+        chain.ParentUsesCollision != NativeWorldKnownBool::False ||
+        chain.ChildIsLod != NativeWorldKnownBool::True ||
+        chain.ParentIsLod != NativeWorldKnownBool::False) {
+        error = "Error: relation chain state mismatch";
+        return false;
+    }
+    // Renderer.cpp 509-521 (SetupMapEntityVisibility): an on-screen,
+    // non-occluded child with alpha==255 marks the LOD parent via
+    // AddLodChildrenRendered; with <=1 LOD children the child is still
+    // submitted VISIBLE even when translucent (alpha<255 branch sets
+    // m_bDistanceFade but returns VISIBLE without marking). 695-722
+    // (SetupBigBuildingVisibility): a marked single-child parent is diverted
+    // to the LodRenderList/STREAMME lane (suppressed, not submitted); an
+    // unmarked parent falls back to its own SetupMapEntityVisibility
+    // (640-655) and the big-building scan (1048/1065).
+    NativeLodRelationDecision local;
+    local.ChildSubmitted = childVisible;
+    local.ParentMarked = childVisible && childAlpha == 255;
+    local.ParentSuppressed = local.ParentMarked;
+    local.ParentSubmitted = !local.ParentMarked && parentVisible;
+    if (local.ParentMarked) {
+        local.Reason =
+            "Renderer 509-521 opaque visible child AddLodChildrenRendered + single-child VISIBLE; "
+            "695-722 marked parent suppressed to LodRenderList/STREAMME";
+    } else if (childVisible) {
+        local.Reason =
+            "Renderer 509-521 visible translucent child (alpha<255) still VISIBLE without marking; "
+            "640-655/1048-1065 visible parent fallback";
+    } else {
+        local.Reason = "Renderer child not visible, no marking; 640-655/1048-1065 visible parent fallback";
+    }
+    out = std::move(local);
+    error.clear();
+    return true;
+} catch (const std::exception& e) { error = e.what(); return false; }
