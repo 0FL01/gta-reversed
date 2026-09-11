@@ -15,6 +15,7 @@
 #include <set>
 #include <algorithm>
 #include <utility>
+#include <optional>
 #include <cassert>
 
 #include "app/platform/linux/TexSample.h"
@@ -1074,6 +1075,27 @@ int s_modelsPeak = 0;
 int s_trisPeak = 0;
 int s_texResident = 0;
 
+// Single optional owned LOD supplement (P1-A04). No hardcoded model IDs:
+// the bridge supplies the catalog-validated child/parent pair. Parent is
+// LOD-filtered out of s_insts; its authored placement/model/TXD/order comes
+// from s_collisionPopulation + s_ide, never an invented transform. Disabled
+// by default; Shutdown/Init reset to disabled.
+struct LodSupplementConfig {
+    NativePlacementIdentity child;
+    NativePlacementIdentity parent;
+    int childPopIdx = -1;
+    int parentPopIdx = -1;
+    int childRow = -1; // index into s_insts for the selectable child
+    std::string childKey; // lowercased model
+    std::string parentKey; // lowercased model
+    std::string parentTxd; // IDE TXD name (original case, chain lowercases)
+    int parentModelId = -1;
+    int parentOrder = 0; // global order = parentPopIdx + 1
+    float parentPos[3] = {};
+    float parentQuat[4] = {0.0f, 0.0f, 0.0f, 1.0f}; // already bound (conjugated when streamed)
+};
+std::optional<LodSupplementConfig> s_supplement;
+
 bool FindInImgs(const std::string& wantLower, std::vector<uint8>& out,
                 std::string* sourceArchive = nullptr,
                 NativeAssetIdentity::ArchiveMember* sourceIdentity = nullptr) {
@@ -1114,6 +1136,132 @@ static TxdLookupChain BuildTxdLookupChain(const std::string& child) {
     return chain;
 }
 
+// Shared placed-mesh emission for the normal window and the LOD supplement
+// parent: same source IDs/UV/material/lineage path, one-to-one rendered
+// identity. Caller owns cap/selection/validity, counting and ordering.
+static void EmitPlacedMesh(const CachedModel& cached, const float* worldPos, const float* right,
+                           const float* fwd, const float* up, int sourceModelId,
+                           uint32_t sourcePlacementId, const NativePlacementIdentity& renderedIdentity,
+                           int colorIndex, WorldShotScene& scene, std::map<std::string, int>& globalImg,
+                           std::map<NativeAssetIdentity::Texture, int>& streamedGlobalImg, bool& haveBox,
+                           std::vector<NativePlacementIdentity>* rendered) {
+    WorldShotMesh mesh;
+    MeshColor(colorIndex, mesh.color);
+    mesh.tris = cached.tris;
+    mesh.sourceModelId = sourceModelId;
+    mesh.sourceModelName = cached.sourceModelName;
+    mesh.sourceTxdName = cached.sourceTxdName;
+    mesh.sourceArchiveName = cached.sourceArchiveName;
+    mesh.sourcePlacementId = sourcePlacementId;
+    size_t count = cached.pos.size();
+    mesh.pos.resize(count);
+    mesh.nrm.resize(count);
+    mesh.uv.resize(cached.uv.size());
+    mesh.triImg.resize(cached.triImg.size());
+    mesh.triCol.resize(cached.triCol.size());
+    if (s_options.includeStreamed) {
+        mesh.dayColors = cached.dayColors;
+        mesh.nightColors = cached.nightColors;
+        mesh.surfaces = cached.surfaces;
+    }
+    for (size_t ti = 0; ti < cached.triImg.size(); ++ti) {
+        int local = cached.triImg[ti];
+        if (local >= 0 && local < static_cast<int>(cached.images.size())) {
+            const WorldShotImage& src = cached.images[local];
+            if (s_options.includeStreamed) {
+                if (!src.hasSourceIdentity) {
+                    mesh.triImg[ti] = -2;
+                } else if (auto git = streamedGlobalImg.find(src.sourceIdentity);
+                           git != streamedGlobalImg.end()) {
+                    mesh.triImg[ti] = git->second;
+                } else {
+                    int gi = static_cast<int>(scene.images.size());
+                    scene.images.push_back(src);
+                    streamedGlobalImg[src.sourceIdentity] = gi;
+                    mesh.triImg[ti] = gi;
+                }
+            } else {
+                auto git = globalImg.find(src.name);
+                if (git != globalImg.end()) {
+                    mesh.triImg[ti] = git->second;
+                } else {
+                    int gi = static_cast<int>(scene.images.size());
+                    scene.images.push_back(src);
+                    globalImg[src.name] = gi;
+                    mesh.triImg[ti] = gi;
+                }
+            }
+        } else {
+            mesh.triImg[ti] = local;
+        }
+        mesh.triCol[ti * 3] = cached.triCol[ti * 3];
+        mesh.triCol[ti * 3 + 1] = cached.triCol[ti * 3 + 1];
+        mesh.triCol[ti * 3 + 2] = cached.triCol[ti * 3 + 2];
+    }
+    for (size_t i = 0; i < count; i += 3) {
+        float lx = cached.pos[i];
+        float ly = cached.pos[i + 1];
+        float lz = cached.pos[i + 2];
+        float wx = worldPos[0] + right[0] * lx + fwd[0] * ly + up[0] * lz;
+        float wy = worldPos[1] + right[1] * lx + fwd[1] * ly + up[1] * lz;
+        float wz = worldPos[2] + right[2] * lx + fwd[2] * ly + up[2] * lz;
+        mesh.pos[i] = wx;
+        mesh.pos[i + 1] = wy;
+        mesh.pos[i + 2] = wz;
+        float nx = cached.nrm[i];
+        float ny = cached.nrm[i + 1];
+        float nz = cached.nrm[i + 2];
+        float rx = right[0] * nx + fwd[0] * ny + up[0] * nz;
+        float ry = right[1] * nx + fwd[1] * ny + up[1] * nz;
+        float rz = right[2] * nx + fwd[2] * ny + up[2] * nz;
+        float len = std::sqrt(rx * rx + ry * ry + rz * rz);
+        if (len > 1e-9f) {
+            rx /= len;
+            ry /= len;
+            rz /= len;
+        }
+        mesh.nrm[i] = rx;
+        mesh.nrm[i + 1] = ry;
+        mesh.nrm[i + 2] = rz;
+        {
+            size_t vi2 = (i / 3) * 2;
+            if (vi2 + 1 < cached.uv.size()) {
+                mesh.uv[vi2] = cached.uv[vi2];
+                mesh.uv[vi2 + 1] = cached.uv[vi2 + 1];
+            }
+        }
+        if (!haveBox) {
+            scene.bboxMin[0] = scene.bboxMax[0] = wx;
+            scene.bboxMin[1] = scene.bboxMax[1] = wy;
+            scene.bboxMin[2] = scene.bboxMax[2] = wz;
+            haveBox = true;
+        } else {
+            if (wx < scene.bboxMin[0]) {
+                scene.bboxMin[0] = wx;
+            }
+            if (wy < scene.bboxMin[1]) {
+                scene.bboxMin[1] = wy;
+            }
+            if (wz < scene.bboxMin[2]) {
+                scene.bboxMin[2] = wz;
+            }
+            if (wx > scene.bboxMax[0]) {
+                scene.bboxMax[0] = wx;
+            }
+            if (wy > scene.bboxMax[1]) {
+                scene.bboxMax[1] = wy;
+            }
+            if (wz > scene.bboxMax[2]) {
+                scene.bboxMax[2] = wz;
+            }
+        }
+    }
+    scene.meshes.push_back(std::move(mesh));
+    if (rendered) {
+        rendered->push_back(renderedIdentity);
+    }
+}
+
 } // namespace
 
 bool StreamPager_Init(const char* gameDir, E2ELoadInfo& info, char* err, std::size_t errSize,
@@ -1121,6 +1269,7 @@ bool StreamPager_Init(const char* gameDir, E2ELoadInfo& info, char* err, std::si
     assert(std::isfinite(options.radius) && options.radius > 0 && options.maxInstances > 0);
     s_options = options;
     s_collisionPopulation = {};
+    s_supplement.reset();
     s_txdParents.clear();
     s_txdParentCatalogValid = true;
     s_collisionPopulation.IncludesStreamed = options.includeStreamed;
@@ -1462,6 +1611,46 @@ bool StreamPager_Update(float camX, float camY, float camZ, WorldShotScene& scen
         return false;
     }
 
+    // --- 2b. Optional single-chain LOD supplement selection + cap reserve. ---
+    // Default disabled: no-supplement behavior below is bit-identical. When the
+    // configured child is in the final candidate window, one slot is reserved
+    // for its real parent (same position, LOD-filtered, authored transform).
+    // The child is preserved at the cap edge by evicting the farthest other
+    // candidate; cap 1 with a selected child rejects the whole update.
+    bool lodPairNeeded = false;
+    const LodSupplementConfig* lodSup = nullptr;
+    if (s_supplement.has_value()) {
+        lodSup = &(*s_supplement);
+        for (const Cand& c : cands) {
+            if (c.row == lodSup->childRow) {
+                lodPairNeeded = true;
+                break;
+            }
+        }
+        if (lodPairNeeded) {
+            if (kMaxInstances <= 1) {
+                SetErr(err, errSize,
+                       "LOD supplement pair needs 2 slots but cap is 1 (child selected, update rejected)");
+                return false;
+            }
+            if (cands.size() >= static_cast<size_t>(kMaxInstances)) {
+                int removeIdx = -1;
+                for (int i = static_cast<int>(cands.size()) - 1; i >= 0; --i) {
+                    if (cands[static_cast<size_t>(i)].row != lodSup->childRow) {
+                        removeIdx = i;
+                        break;
+                    }
+                }
+                if (removeIdx < 0) {
+                    SetErr(err, errSize,
+                           "LOD supplement cannot reserve pair slot (child only, cap overflow)");
+                    return false;
+                }
+                cands.erase(cands.begin() + removeIdx);
+            }
+        }
+    }
+
     // --- 3. Reference sets for this window. ---
     std::map<std::string, int> wantModel; // key -> instance count
     std::map<std::string, int> wantTxd; // lower txd -> user count
@@ -1478,6 +1667,22 @@ bool StreamPager_Update(float camX, float camY, float camZ, WorldShotScene& scen
                 }
             } else {
                 std::string tk = p.txd;
+                ToLowerInPlace(tk);
+                wantTxd[tk]++;
+            }
+        }
+    }
+    // Parent is wanted only when its child is selected; otherwise it evicts
+    // via the normal unreferenced path below. Same stage-5 lineage path.
+    if (lodPairNeeded && lodSup) {
+        wantModel[lodSup->parentKey]++;
+        if (!lodSup->parentTxd.empty()) {
+            if (s_options.includeStreamed) {
+                for (const auto& txd : BuildTxdNameChain(lodSup->parentTxd).names) {
+                    wantTxd[txd]++;
+                }
+            } else {
+                std::string tk = lodSup->parentTxd;
                 ToLowerInPlace(tk);
                 wantTxd[tk]++;
             }
@@ -1626,6 +1831,28 @@ bool StreamPager_Update(float camX, float camY, float camZ, WorldShotScene& scen
         }
     }
 
+    // Supplement pair must be fully loadable before publishing any scene:
+    // never continue with a half pair. Other candidates keep honest skipping.
+    if (lodPairNeeded && lodSup) {
+        const auto childIt = s_cache.find(lodSup->childKey);
+        const auto parentIt = s_cache.find(lodSup->parentKey);
+        const bool childOk = childIt != s_cache.end() && childIt->second.tris > 0 &&
+                             !childIt->second.pos.empty();
+        const bool parentOk = parentIt != s_cache.end() && parentIt->second.tris > 0 &&
+                              !parentIt->second.pos.empty();
+        if (!childOk || !parentOk) {
+            if (!childOk && !parentOk) {
+                SetErr(err, errSize,
+                       "LOD supplement child and parent geometry missing/failed (pair rejected)");
+            } else if (!childOk) {
+                SetErr(err, errSize, "LOD supplement child geometry missing/failed (pair rejected)");
+            } else {
+                SetErr(err, errSize, "LOD supplement parent geometry missing/failed (pair rejected)");
+            }
+            return false;
+        }
+    }
+
     // --- 7. Build the world-space scene in candidate order. ---
     bool haveBox = false;
     int placed = 0;
@@ -1638,6 +1865,13 @@ bool StreamPager_Update(float camX, float camY, float camZ, WorldShotScene& scen
         const PagerInst& p = s_insts[static_cast<size_t>(c.row)];
         auto cit = s_cache.find(p.key);
         if (cit == s_cache.end()) {
+            // Supplement pair never skips half: the pre-build check above
+            // already rejected a missing child/parent. Other candidates keep
+            // the honest skip.
+            if (lodPairNeeded && lodSup && c.row == lodSup->childRow) {
+                SetErr(err, errSize, "LOD supplement child geometry missing/failed (pair rejected)");
+                return false;
+            }
             continue; // failed/skinned/evicted-race: skip honestly
         }
         const CachedModel& cached = cit->second;
@@ -1651,122 +1885,33 @@ bool StreamPager_Update(float camX, float camY, float camZ, WorldShotScene& scen
             std::copy_n(it->second->Basis[2].begin(), 3, up);
         }
         const auto* pos = position(c.row);
-        WorldShotMesh mesh;
-        MeshColor(placed, mesh.color);
-        mesh.tris = cached.tris;
-        mesh.sourceModelId = p.modelId;
-        mesh.sourceModelName = cached.sourceModelName;
-        mesh.sourceTxdName = cached.sourceTxdName;
-        mesh.sourceArchiveName = cached.sourceArchiveName;
-        mesh.sourcePlacementId = static_cast<uint32_t>(p.order);
-        size_t count = cached.pos.size();
-        mesh.pos.resize(count);
-        mesh.nrm.resize(count);
-        mesh.uv.resize(cached.uv.size());
-        mesh.triImg.resize(cached.triImg.size());
-        mesh.triCol.resize(cached.triCol.size());
-        if (s_options.includeStreamed) {
-            mesh.dayColors = cached.dayColors;
-            mesh.nightColors = cached.nightColors;
-            mesh.surfaces = cached.surfaces;
-        }
-        for (size_t ti = 0; ti < cached.triImg.size(); ++ti) {
-            int local = cached.triImg[ti];
-            if (local >= 0 && local < static_cast<int>(cached.images.size())) {
-                const WorldShotImage& src = cached.images[local];
-                if (s_options.includeStreamed) {
-                    if (!src.hasSourceIdentity) {
-                        mesh.triImg[ti] = -2;
-                    } else if (auto git = streamedGlobalImg.find(src.sourceIdentity);
-                               git != streamedGlobalImg.end()) {
-                        mesh.triImg[ti] = git->second;
-                    } else {
-                        int gi = static_cast<int>(scene.images.size());
-                        scene.images.push_back(src);
-                        streamedGlobalImg[src.sourceIdentity] = gi;
-                        mesh.triImg[ti] = gi;
-                    }
-                } else {
-                    auto git = globalImg.find(src.name);
-                    if (git != globalImg.end()) {
-                        mesh.triImg[ti] = git->second;
-                    } else {
-                        int gi = static_cast<int>(scene.images.size());
-                        scene.images.push_back(src);
-                        globalImg[src.name] = gi;
-                        mesh.triImg[ti] = gi;
-                    }
-                }
-            } else {
-                mesh.triImg[ti] = local;
-            }
-            mesh.triCol[ti * 3] = cached.triCol[ti * 3];
-            mesh.triCol[ti * 3 + 1] = cached.triCol[ti * 3 + 1];
-            mesh.triCol[ti * 3 + 2] = cached.triCol[ti * 3 + 2];
-        }
-        for (size_t i = 0; i < count; i += 3) {
-            float lx = cached.pos[i];
-            float ly = cached.pos[i + 1];
-            float lz = cached.pos[i + 2];
-            float wx = pos[0] + right[0] * lx + fwd[0] * ly + up[0] * lz;
-            float wy = pos[1] + right[1] * lx + fwd[1] * ly + up[1] * lz;
-            float wz = pos[2] + right[2] * lx + fwd[2] * ly + up[2] * lz;
-            mesh.pos[i] = wx;
-            mesh.pos[i + 1] = wy;
-            mesh.pos[i + 2] = wz;
-            float nx = cached.nrm[i];
-            float ny = cached.nrm[i + 1];
-            float nz = cached.nrm[i + 2];
-            float rx = right[0] * nx + fwd[0] * ny + up[0] * nz;
-            float ry = right[1] * nx + fwd[1] * ny + up[1] * nz;
-            float rz = right[2] * nx + fwd[2] * ny + up[2] * nz;
-            float len = std::sqrt(rx * rx + ry * ry + rz * rz);
-            if (len > 1e-9f) {
-                rx /= len;
-                ry /= len;
-                rz /= len;
-            }
-            mesh.nrm[i] = rx;
-            mesh.nrm[i + 1] = ry;
-            mesh.nrm[i + 2] = rz;
-            {
-                size_t vi2 = (i / 3) * 2;
-                if (vi2 + 1 < cached.uv.size()) {
-                    mesh.uv[vi2] = cached.uv[vi2];
-                    mesh.uv[vi2 + 1] = cached.uv[vi2 + 1];
-                }
-            }
-            if (!haveBox) {
-                scene.bboxMin[0] = scene.bboxMax[0] = wx;
-                scene.bboxMin[1] = scene.bboxMax[1] = wy;
-                scene.bboxMin[2] = scene.bboxMax[2] = wz;
-                haveBox = true;
-            } else {
-                if (wx < scene.bboxMin[0]) {
-                    scene.bboxMin[0] = wx;
-                }
-                if (wy < scene.bboxMin[1]) {
-                    scene.bboxMin[1] = wy;
-                }
-                if (wz < scene.bboxMin[2]) {
-                    scene.bboxMin[2] = wz;
-                }
-                if (wx > scene.bboxMax[0]) {
-                    scene.bboxMax[0] = wx;
-                }
-                if (wy > scene.bboxMax[1]) {
-                    scene.bboxMax[1] = wy;
-                }
-                if (wz > scene.bboxMax[2]) {
-                    scene.bboxMax[2] = wz;
-                }
-            }
-        }
-        scene.meshes.push_back(std::move(mesh));
-        if (rendered) rendered->push_back(NativePlacementIdentity::From(s_collisionPopulation.Instances[p.order - 1]));
+        EmitPlacedMesh(cached, pos, right, fwd, up, p.modelId, static_cast<uint32_t>(p.order),
+                       NativePlacementIdentity::From(s_collisionPopulation.Instances[p.order - 1]), placed,
+                       scene, globalImg, streamedGlobalImg, haveBox, rendered);
         usedModels.insert(p.key);
         ++placed;
         tris += cached.tris;
+    }
+    // Real parent DFF via the same stage-5 lineage path and stage-7 helper,
+    // with authored placement/model/TXD/order (never an invented transform).
+    if (lodPairNeeded && lodSup) {
+        auto parentCache = s_cache.find(lodSup->parentKey);
+        if (parentCache == s_cache.end() || parentCache->second.tris <= 0 ||
+            parentCache->second.pos.empty()) {
+            SetErr(err, errSize, "LOD supplement parent geometry missing/failed (pair rejected)");
+            return false;
+        }
+        const CachedModel& parentCached = parentCache->second;
+        float right[3];
+        float fwd[3];
+        float up[3];
+        QuatToBasis(lodSup->parentQuat, right, fwd, up);
+        EmitPlacedMesh(parentCached, lodSup->parentPos, right, fwd, up, lodSup->parentModelId,
+                       static_cast<uint32_t>(lodSup->parentOrder), lodSup->parent, placed, scene, globalImg,
+                       streamedGlobalImg, haveBox, rendered);
+        usedModels.insert(lodSup->parentKey);
+        ++placed;
+        tris += parentCached.tris;
     }
     if (placed == 0) {
         SetErr(err, errSize, "window has no loadable models (all failed)");
@@ -1819,6 +1964,7 @@ void StreamPager_Counters(int& sectorsLoaded, int& sectorsEvicted, int& modelsPe
 }
 
 void StreamPager_Shutdown() {
+    s_supplement.reset();
     s_collisionPopulation = {};
     s_txdParents.clear();
     s_txdParentCatalogValid = true;
@@ -1851,4 +1997,151 @@ bool StreamPager_CollisionPopulation(NativeCollisionPopulation& out, std::string
     }
     out = s_collisionPopulation;
     error.clear(); return true;
+}
+
+bool StreamPager_ConfigureLodSupplement(const NativePlacementIdentity& child,
+                                        const NativePlacementIdentity& parent, std::string& error) {
+    if (!s_init) {
+        error = "LOD supplement requires initialized pager";
+        return false;
+    }
+    if (!s_options.includeStreamed) {
+        error = "LOD supplement requires pager includeStreamed=true";
+        return false;
+    }
+    if (child == parent) {
+        error = "LOD supplement child and parent must differ";
+        return false;
+    }
+    int childPop = -1;
+    int parentPop = -1;
+    int childMatches = 0;
+    int parentMatches = 0;
+    for (size_t i = 0; i < s_collisionPopulation.Instances.size(); ++i) {
+        const auto& p = s_collisionPopulation.Instances[i];
+        if (child.Matches(p)) {
+            ++childMatches;
+            if (childPop < 0) {
+                childPop = static_cast<int>(i);
+            }
+        }
+        if (parent.Matches(p)) {
+            ++parentMatches;
+            if (parentPop < 0) {
+                parentPop = static_cast<int>(i);
+            }
+        }
+    }
+    if (childMatches != 1 || childPop < 0) {
+        error = "LOD supplement unknown/non-unique child identity";
+        return false;
+    }
+    if (parentMatches != 1 || parentPop < 0) {
+        error = "LOD supplement unknown/non-unique parent identity";
+        return false;
+    }
+    const NativeCollisionPlacement& childPl = s_collisionPopulation.Instances[static_cast<size_t>(childPop)];
+    const NativeCollisionPlacement& parentPl = s_collisionPopulation.Instances[static_cast<size_t>(parentPop)];
+    if (childPl.Binary || parentPl.Binary) {
+        error = "LOD supplement requires text placements";
+        return false;
+    }
+    if (childPl.Ipl != parentPl.Ipl) {
+        error = "LOD supplement child/parent IPL mismatch";
+        return false;
+    }
+    if (childPl.Lod != static_cast<int>(parentPl.Record)) {
+        error = "LOD supplement child Lod does not bind parent record";
+        return false;
+    }
+    if (parentPl.Lod != -1) {
+        error = "LOD supplement parent must be LOD root (Lod==-1)";
+        return false;
+    }
+    if (StartsWithLod(childPl.Model)) {
+        error = "LOD supplement child must not be LOD model";
+        return false;
+    }
+    if (!StartsWithLod(parentPl.Model)) {
+        error = "LOD supplement parent must be LOD model";
+        return false;
+    }
+    int childRow = -1;
+    bool parentInRender = false;
+    for (size_t r = 0; r < s_insts.size(); ++r) {
+        if (s_insts[r].order == childPop + 1) {
+            if (childRow >= 0) {
+                error = "LOD supplement duplicate child render row";
+                return false;
+            }
+            childRow = static_cast<int>(r);
+        }
+        if (s_insts[r].order == parentPop + 1) {
+            parentInRender = true;
+        }
+    }
+    if (childRow < 0) {
+        error = "LOD supplement child not in static render population";
+        return false;
+    }
+    if (parentInRender) {
+        error = "LOD supplement parent must be LOD-filtered (not in render population)";
+        return false;
+    }
+    std::string childKey = childPl.Model;
+    std::string parentKey = parentPl.Model;
+    ToLowerInPlace(childKey);
+    ToLowerInPlace(parentKey);
+    const auto childIde = s_ide.find(childKey);
+    if (childIde == s_ide.end()) {
+        error = "LOD supplement child model missing from IDE";
+        return false;
+    }
+    const auto parentIde = s_ide.find(parentKey);
+    if (parentIde == s_ide.end()) {
+        error = "LOD supplement parent model missing from IDE";
+        return false;
+    }
+    for (float v : parentPl.Position) {
+        if (!std::isfinite(v)) {
+            error = "LOD supplement parent nonfinite position";
+            return false;
+        }
+    }
+    for (float v : parentPl.Quaternion) {
+        if (!std::isfinite(v)) {
+            error = "LOD supplement parent nonfinite rotation";
+            return false;
+        }
+    }
+    LodSupplementConfig cfg;
+    cfg.child = child;
+    cfg.parent = parent;
+    cfg.childPopIdx = childPop;
+    cfg.parentPopIdx = parentPop;
+    cfg.childRow = childRow;
+    cfg.childKey = std::move(childKey);
+    cfg.parentKey = std::move(parentKey);
+    cfg.parentTxd = parentIde->second.txd;
+    cfg.parentModelId = parentPl.ModelId;
+    cfg.parentOrder = parentPop + 1;
+    cfg.parentPos[0] = parentPl.Position[0];
+    cfg.parentPos[1] = parentPl.Position[1];
+    cfg.parentPos[2] = parentPl.Position[2];
+    float qx = parentPl.Quaternion[0];
+    float qy = parentPl.Quaternion[1];
+    float qz = parentPl.Quaternion[2];
+    float qw = parentPl.Quaternion[3];
+    if (s_options.includeStreamed) {
+        qx = -qx;
+        qy = -qy;
+        qz = -qz;
+    }
+    cfg.parentQuat[0] = qx;
+    cfg.parentQuat[1] = qy;
+    cfg.parentQuat[2] = qz;
+    cfg.parentQuat[3] = qw;
+    s_supplement = std::move(cfg);
+    error.clear();
+    return true;
 }

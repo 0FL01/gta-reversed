@@ -8,6 +8,7 @@
 #pragma once
 
 #include <cstddef>
+#include <string>
 
 #include "app/platform/linux/WorldShot.h"
 #include "app/platform/linux/NativeCollisionAssets.h"
@@ -67,3 +68,13 @@ void StreamPager_Shutdown();
 // and low-byte Interior. Legacy offline mode deliberately rejects this export.
 // Call under pager ownership; result survives shutdown.
 bool StreamPager_CollisionPopulation(NativeCollisionPopulation& out, std::string& error);
+// Optional single-chain LOD supplement (P1-A04): real paired render for one
+// catalog-validated child/parent pair (no hardcoded IDs here).
+// Called after Init and before the first Update. Validates exact full
+// population identities, child Lod binding to the parent record, parent
+// LOD provenance/filtering and includeStreamed; stores one optional owned
+// configuration. Shutdown resets to disabled. Default disabled preserves the
+// native/offline path exactly.
+bool StreamPager_ConfigureLodSupplement(const NativePlacementIdentity& child,
+                                        const NativePlacementIdentity& parent,
+                                        std::string& error);
