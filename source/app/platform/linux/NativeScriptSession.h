@@ -55,9 +55,24 @@ struct NativeScriptGroupRef { std::int32_t Value = -1; };
 struct NativeScriptPedRef { std::int32_t Value = -1; };
 struct NativeScriptPickupRef { std::int32_t Value = -1; };
 struct NativeScriptBlipRef { std::int32_t Value = -1; };
+// Source generator slot references: zero is valid; -1 is allocation failure.
+struct NativeScriptCarGeneratorRef { std::int32_t Value = -1; };
 template<typename Ref> struct NativeScriptReferenceResult {
     NativeScriptServiceResult Result;
     Ref Reference;
+};
+struct NativeScriptCarGeneratorRequest {
+    NativeScriptRequestId Id;
+    NativeScriptPosition Position;
+    float AngleDegrees = 0;
+    std::int32_t ModelId = 0, PrimaryColor = 0, SecondaryColor = 0;
+    std::int32_t ForceSpawn = 0, AlarmChance = 0, DoorLockChance = 0;
+    std::int32_t MinDelay = 0, MaxDelay = 0;
+};
+struct NativeScriptCarGeneratorSwitchRequest {
+    NativeScriptRequestId Id;
+    NativeScriptCarGeneratorRef Generator;
+    std::int32_t Count = 0;
 };
 struct NativeScriptPlayerLookupRequest {
     NativeScriptRequestId Id;
@@ -145,6 +160,8 @@ public:
     virtual NativeScriptServiceResult SetBlipDisplay(const NativeScriptBlipDisplayRequest&) { return {}; }
     virtual NativeScriptServiceResult SetEntryExitFlag(const NativeScriptEntryExitFlagRequest&) { return {}; }
     virtual NativeScriptServiceResult DeactivateGarage(const NativeScriptGarageRequest&) { return {}; }
+    virtual NativeScriptReferenceResult<NativeScriptCarGeneratorRef> CreateCarGenerator(const NativeScriptCarGeneratorRequest&) { return {}; }
+    virtual NativeScriptServiceResult SwitchCarGenerator(const NativeScriptCarGeneratorSwitchRequest&) { return {}; }
     virtual NativeScriptPickupCollectedResult HasPickupBeenCollected(const NativeScriptPickupReferenceRequest&);
     virtual NativeScriptServiceResult RemoveScriptPickup(const NativeScriptPickupReferenceRequest&);
 };
@@ -283,10 +300,10 @@ private:
     struct Instruction {
         std::uint16_t Opcode = 0;
         std::uint32_t Next = 0;
-        std::array<std::uint32_t, 6> Values{};
+        std::array<std::uint32_t, 13> Values{};
         std::uint32_t OutputValue = 0; // decoded old cell for checked in-place arithmetic
         std::array<char, 8> Text{};
-        std::array<std::uint8_t, 6> Tags{}; // normalized scalar/array operand bank
+        std::array<std::uint8_t, 13> Tags{}; // normalized scalar/array operand bank
         bool OutputGlobal = true;
         bool Negated = false;
         std::int32_t Int(unsigned i) const;

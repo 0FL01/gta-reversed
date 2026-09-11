@@ -10,6 +10,7 @@
 #include "app/platform/linux/NativePlayerAssets.h"
 #include "app/platform/linux/RealtimeScriptHost.h"
 #include "app/platform/linux/NativeGaragesRuntime.h"
+#include "app/platform/linux/NativeCarGeneratorRuntime.h"
 #include "app/platform/linux/NativePadFeedback.h"
 
 #ifndef GL_GLEXT_PROTOTYPES
@@ -363,11 +364,8 @@ struct GpuScene {
 struct ResidentWorld {
     std::unique_ptr<realtime_streaming::CpuWorld> cpu;
     GpuScene gpu;
-    // Own the startup query world: subsequent host publications cannot dangle it.
-    std::shared_ptr<const RealtimeGameplayWorld> startupCollision;
-
     const RealtimeGameplayWorld& Collision() const {
-        return startupCollision ? *startupCollision : cpu->Collision;
+        return cpu->QueryWorld();
     }
 };
 
@@ -376,6 +374,7 @@ struct LiveWorld {
     std::unique_ptr<ResidentWorld> pending, retiring;
     std::shared_ptr<const NativeCollisionContext> collisionContext;
     std::unique_ptr<realtime_streaming::Worker> worker;
+    RealtimeScriptHost* scriptHost = nullptr; // outlives this world; main-thread only
     double uploadMs = 0;
 
     ~LiveWorld() {
@@ -416,19 +415,18 @@ struct LiveWorld {
         active->cpu = std::make_unique<realtime_streaming::CpuWorld>();
         auto& cpu = *active->cpu;
         cpu.Position = {publication.Center.X, publication.Center.Y, publication.Center.Z};
-        // First live resident; the two host startup CPU publications have their
-        // own revision counter. Worker generations continue this live sequence.
-        cpu.Generation = 1;
+        // Continue the source-residency publication sequence, not a new counter.
+        cpu.Generation = host.WorldRevision();
         cpu.Frame = publication.Frame;
         cpu.Scene = *publication.Scene; // owned snapshot, no pager/RW parser or second BVH
         cpu.Overrides = publication.Overrides;
         cpu.SourceCollision = publication.SourceCollision;
-        active->startupCollision = publication.Collision;
+        cpu.BorrowedCollision = publication.Collision;
         return active->gpu.Upload(cpu.Scene);
     }
 
     void Start(bool collision) {
-        worker = std::make_unique<realtime_streaming::Worker>(collision, collisionContext, active->cpu->Overrides);
+        worker = std::make_unique<realtime_streaming::Worker>(collision, collisionContext, active->cpu->Overrides, active->cpu->Generation);
     }
 
     // Call once, BEFORE Tick: physics and draw see exactly the same generation.
@@ -465,6 +463,18 @@ struct LiveWorld {
             }
             uploadMs += realtime_streaming::Milliseconds() - start;
             if (pending->gpu.complete) {
+                if (scriptHost) {
+                    const auto residency = scriptHost->ReconcileCarGeneratorsBeforeWorldCommit(
+                        pending->cpu->Generation, pending->cpu->SourceCollision);
+                    if (residency.Status != NativeCarGeneratorResidencyStatus::Ready) {
+                        // No removal/model-retention owner yet. Never publish
+                        // a new world beside old definitions or acknowledge cleanup.
+                        std::printf("play-cargen-residency-terminal status=%s generation=%llu removals=%zu message=%s\n",
+                            residency.Status == NativeCarGeneratorResidencyStatus::PendingCleanup ? "Unsupported" : "Error",
+                            static_cast<unsigned long long>(pending->cpu->Generation), residency.Removals.size(), residency.Detail.c_str());
+                        return false;
+                    }
+                }
                 active.swap(pending); // matching immutable soup + BVH + GL handles
                 retiring = std::move(pending);
                 worker->Retire(std::move(retiring->cpu));
@@ -698,6 +708,11 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
         load.iplTotal, load.iplKept, load.binaryIplFiles, load.binaryInstances, options.radius, options.maxInstances);
     RealtimeGameplay gameplay;
     std::string gameplayError;
+    RealtimeScriptHost scriptHost(gameplay);
+    if (newGame && !scriptHost.SeedSourceRngAfterRwInit(gameplayError)) {
+        std::printf("play-fail source RNG: %s\n", gameplayError.c_str());
+        return 1;
+    }
     std::shared_ptr<const NativeCollisionContext> collisionContext;
     if (!freecam) {
         const auto started = realtime_streaming::Milliseconds();
@@ -711,7 +726,6 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             realtime_streaming::Milliseconds() - started, stats.Models, stats.Triangles, stats.Spheres, stats.Boxes,
             stats.Empty, stats.Unsupported, collisionContext->Population.Instances.size(), collisionContext->Radius);
     }
-    RealtimeScriptHost scriptHost(gameplay);
     NativeGaragesRuntime garageRuntime(scriptHost.Garages(), gameplay, scriptHost.Vehicles());
     constexpr std::size_t scriptQuota = 256; // one bounded scheduler pass per presented frame
     if (newGame) {
@@ -748,7 +762,16 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             unsigned(clock.Hours), unsigned(clock.Minutes), scriptHost.State().Fade.Alpha);
     }
     GpuScene actorGpu, scriptGpu, entryGpu;
+    std::unique_ptr<NativeCarGeneratorRuntime> carGenerators;
     if (newGame) {
+        carGenerators = std::make_unique<NativeCarGeneratorRuntime>(scriptHost.CarGenerators(), gameplay,
+            scriptHost.Vehicles(), scriptHost.State());
+        const auto rng = scriptHost.InspectSourceRng();
+        assert(rng.Value);
+        std::printf("play-cargens sources=%zu definitions=%zu generation=%llu seed=%u draws=%llu spawned=0\n",
+            scriptHost.CarGeneratorResidency().Active().size(), scriptHost.CarGenerators().Census().Registered,
+            static_cast<unsigned long long>(scriptHost.CarGeneratorResidency().Generation()), rng.Value->Seed,
+            static_cast<unsigned long long>(rng.Value->DrawCount));
         WorldShotScene scriptImages;
         scriptImages.images = scriptHost.Entities().PreparedImages();
         if (!scriptGpu.UploadTextures(scriptImages) || !entryGpu.UploadTextures(scriptHost.EntryExits().PreparedModel())) {
@@ -767,6 +790,7 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
     const bool gameplayEnabled = !freecam;
     LiveWorld world;
     world.collisionContext = collisionContext;
+    world.scriptHost = newGame ? &scriptHost : nullptr;
     int updates = 0;
     auto reportWorld = [&]() {
         const auto& cpu = *world.active->cpu;
@@ -976,6 +1000,17 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             if (!vehicleSnapshot) {
                 std::printf("play-vehicle-terminal status=Unsupported message=%s\n", gameplayError.c_str());
                 return 1;
+            }
+            camera.Apply(width, height, std::max(1600.0f, environment.GetParams().farClip));
+            NativeCarGeneratorRuntimeInput generatorInput;
+            generatorInput.Frame = frames;
+            generatorInput.Camera = RealtimeHud::CapturePriceView(.1f, std::max(1600.0f, environment.GetParams().farClip), 60);
+            const auto generatorResult = carGenerators->Tick(*world.active->cpu, generatorInput, vehicleSnapshot);
+            if (generatorResult.Status != NativeScriptServiceStatus::Ready) {
+                std::printf("play-cargen-terminal status=%s frame=%llu demands=%zu spawned=0 message=%s\n",
+                    generatorResult.Status == NativeScriptServiceStatus::Error ? "Error" : "Unsupported",
+                    static_cast<unsigned long long>(frames), carGenerators->Frame().Demands.size(), generatorResult.Message.c_str());
+                return 1; // retained demand has no fulfillment owner yet; never fake a spawn
             }
             const auto garageResult = garageRuntime.Tick(*world.active->cpu, {frames}, vehicleSnapshot);
             if (garageResult.Status != NativeScriptServiceStatus::Ready) {

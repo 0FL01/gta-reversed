@@ -28,17 +28,25 @@ struct CpuWorld {
     uint64_t Generation{};
     WorldShotScene Scene;
     RealtimeGameplayWorld Collision;
+    // Startup may adopt the host's already-built query world. All consumers
+    // use QueryWorld(), so diagnostics and physics share that exact owner.
+    std::shared_ptr<const RealtimeGameplayWorld> BorrowedCollision;
     std::shared_ptr<const NativeCollisionSnapshot> SourceCollision;
     std::shared_ptr<const NativePlacementOverrides> Overrides;
     E2EPagerFrame Frame{};
     std::string Error;
     double Started{}, PagerMs{}, CollisionMs{};
 
+    const RealtimeGameplayWorld& QueryWorld() const {
+        return BorrowedCollision ? *BorrowedCollision : Collision;
+    }
+
     // Without a context, retain the legacy render fixture path. Runtime physics always
     // supplies a source context; both outputs belong to Position/Generation.
     void Build(bool collision, const std::shared_ptr<const NativeCollisionContext>& context = {},
                std::shared_ptr<const NativePlacementOverrides> overrides = {}) {
         Overrides = std::move(overrides);
+        BorrowedCollision.reset();
         Started = Milliseconds();
         char error[512]{};
         if (!StreamPager_Update(Position.X, Position.Y, Position.Z, Scene, Frame, error, sizeof(error), Overrides)) {
@@ -74,8 +82,9 @@ struct CpuWorld {
 class Worker {
 public:
     explicit Worker(bool collision, std::shared_ptr<const NativeCollisionContext> context = {},
-                    std::shared_ptr<const NativePlacementOverrides> overrides = {})
-        : m_Collision(collision), m_Context(std::move(context)), m_Overrides(std::move(overrides)), m_Thread([this] { Run(); }) {}
+                    std::shared_ptr<const NativePlacementOverrides> overrides = {}, uint64_t initialGeneration = 1)
+        : m_Collision(collision), m_Context(std::move(context)), m_Overrides(std::move(overrides)),
+          m_Generation(initialGeneration), m_Thread([this] { Run(); }) {}
     ~Worker() { Stop({}, {}); }
     Worker(const Worker&) = delete;
     Worker& operator=(const Worker&) = delete;

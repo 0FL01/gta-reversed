@@ -114,7 +114,7 @@ def run(game_dir):
                 raise subprocess.CalledProcessError(process.returncode, process.args, output=output)
             summary = re.search(r'^native-pickup-feedback .*$', output, re.MULTILINE)
             assert summary and 'failures=0' in summary.group()
-            assert 'actualCommands=679 terminal=014B@207007 hud33=actual-GL' in summary.group()
+            assert 'actualCommands=1207 terminal=04CE@212086 hud33=actual-GL' in summary.group()
             assert 'callback=1 motors=25700/25700 durationMs=120' in summary.group()
             assert 'ring=0214-true-false-negated-true' in summary.group()
             assert 'noDevice=normal unsupported=explicit virtual-only=1' in summary.group()

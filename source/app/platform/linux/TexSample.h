@@ -22,6 +22,10 @@ struct Texture;
 // One decoded texture: RGBA8 bytes straight from a TXD raster.
 using TexImage = WorldShotImage;
 
+// Startup-only engine introspection, under exclusive parser ownership. Keeps
+// RW implementation headers out of service/VM consumers.
+bool TexSample_IsEngineStarted();
+
 // DFF parse with honest material linkage. Materials resolve against
 // `primary` first, then `fallbacks` in order (both must outlive the
 // returned clump; typically the TXD caches in SceneShot/StreamPager).

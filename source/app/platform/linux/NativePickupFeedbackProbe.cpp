@@ -259,10 +259,10 @@ int main(int argc, char** argv) try {
             host.SealStartup();
             const auto terminal = host.RunPass(10000);
             const auto& mission = host.Session().Threads()[1];
-            Check(terminal.Status == NativeScriptStatus::Unsupported && terminal.Executed == 679 &&
-                mission.Commands == 679 && terminal.Opcode == 0x014B && terminal.IP == 207007 &&
-                mission.LastOpcode == 0x0004 && mission.LastInstructionIP == 207000 && host.WorldRevision() == 3,
-                "actual HUD-ready SCM remains strict 679 commands and 014B@207007");
+            Check(terminal.Status == NativeScriptStatus::Unsupported && terminal.Executed == 1207 &&
+                mission.Commands == 1207 && terminal.Opcode == 0x04CE && terminal.IP == 212086 &&
+                mission.LastOpcode == 0x0004 && mission.LastInstructionIP == 212079 && host.WorldRevision() == 3,
+                "actual HUD-ready SCM remains strict 1207 commands and 04CE@212086");
             Require(host.World() && gameplay.State().Ready &&
                 gameplay.Activity().Authority == NativePlayerActivityAuthority::SourceBacked,
                 "actual host owns a ready world and controller activity");

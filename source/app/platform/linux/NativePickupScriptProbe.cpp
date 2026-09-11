@@ -151,10 +151,10 @@ int main(int argc, char** argv) try {
         static_cast<unsigned long long>(mission.Commands), terminal.IP, terminal.Opcode,
         mission.LastOpcode, mission.LastInstructionIP, hud.IsRadarSpriteUploaded(33),
         hud.PreparedRadarSprite(33)->name);
-    Check(terminal.Status == NativeScriptStatus::Unsupported && terminal.Executed == 679 &&
-        mission.Commands == 679 && terminal.IP == 207007 && terminal.Opcode == 0x014B &&
-        mission.LastInstructionIP == 207000 && mission.LastOpcode == 0x0004 && host.WorldRevision() == 3,
-        "actual HUD-ready mission reaches 679 commands and strict 014B@207007 without a full-boot claim");
+    Check(terminal.Status == NativeScriptStatus::Unsupported && terminal.Executed == 1207 &&
+        mission.Commands == 1207 && terminal.IP == 212086 && terminal.Opcode == 0x04CE &&
+        mission.LastInstructionIP == 212079 && mission.LastOpcode == 0x0004 && host.WorldRevision() == 3,
+        "actual HUD-ready mission reaches 1207 commands and strict 04CE@212086 without a full-boot claim");
 
     auto& entities = host.Entities();
     const auto player = gameplay.State().PedRoot;

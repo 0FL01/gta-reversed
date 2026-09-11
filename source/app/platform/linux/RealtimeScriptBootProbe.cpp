@@ -7,6 +7,7 @@
 #include "app/platform/linux/RealtimeScriptHost.h"
 #include "app/platform/linux/RealtimeHud.h"
 #include "app/platform/linux/NativeGaragesRuntime.h"
+#include "app/platform/linux/NativeCarGeneratorRuntime.h"
 #include "app/platform/linux/RealtimeStreaming.h"
 #include "app/platform/linux/IfpAnim.h"
 #include <algorithm>
@@ -24,7 +25,8 @@ float previousVerticalSpeed = 0, previousPedZ = 12.8757f;
 
 static bool Swap(SDL_Window* window, const RealtimeHudState& hud, const RealtimeScriptHost& host,
                  const RealtimeGameplay& game, const realtime_streaming::CpuWorld& cpu,
-                 const RealtimeGameplayWorld& collision, const NativeGaragesRuntime& runtime) {
+                 const RealtimeGameplayWorld& collision, const NativeGaragesRuntime& runtime,
+                 const NativeCarGeneratorRuntime* generators) {
     ++frames;
     int width = 0, height = 0;
     GLint framebuffer = -1, packBuffer = -1, readBuffer = -1;
@@ -72,7 +74,9 @@ static bool Swap(SDL_Window* window, const RealtimeHudState& hud, const Realtime
         return a.X == b.X && a.Y == b.Y && a.Z == b.Z;
     };
     bool paired = host.World() == &collision && publication.Collision.get() == &collision && publication.Scene &&
-        cpu.Generation == 1 && host.WorldRevision() == 3 && cpu.Error.empty() &&
+        cpu.Generation == 3 && host.WorldRevision() == 3 && cpu.Error.empty() &&
+        cpu.BorrowedCollision == publication.Collision && &cpu.QueryWorld() == &collision &&
+        cpu.Collision.TriangleCount() == 0 && cpu.Collision.SphereCount() == 0 && cpu.Collision.BoxCount() == 0 &&
         cpu.SourceCollision && cpu.SourceCollision == publication.SourceCollision &&
         cpu.Overrides && cpu.Overrides == publication.Overrides && cpu.Overrides == host.InitialPlacementOverrides() &&
         cpu.SourceCollision->Overrides == cpu.Overrides &&
@@ -102,8 +106,9 @@ static bool Swap(SDL_Window* window, const RealtimeHudState& hud, const Realtime
     const auto threads = host.Session().Threads();
     const auto missionCommands = threads.size() == 2 ? threads[1].Commands : ~std::uint64_t{};
     const auto missionIP = threads.size() == 2 ? threads[1].IP : 0;
-    constexpr std::array<std::uint32_t, 3> expectedIPs{200000, 202662, 205508};
-    const bool scheduler = frames <= 3 && threads.size() == 2 && vm.Commands == 53 && vm.IP == 56369 &&
+    // Measured in cargens-boot-measured.log with the actual production quota.
+    constexpr std::array<std::uint32_t, 5> expectedIPs{200000, 202662, 205508, 207969, 210403};
+    const bool scheduler = frames <= 5 && threads.size() == 2 && vm.Commands == 53 && vm.IP == 56369 &&
         threads[0].Commands == 53 && threads[0].IP == 56369 && threads[0].Waiting && threads[0].Active &&
         threads[0].LastOpcode == 0x0001 && threads[1].Generation == 1 && threads[1].Active && !threads[1].Waiting &&
         threads[1].MissionIndex == 0 && missionCommands == (frames - 1) * 256 &&
@@ -156,6 +161,41 @@ static bool Swap(SDL_Window* window, const RealtimeHudState& hud, const Realtime
     previousSimulation = state.SimulatedSeconds;
     previousPedZ = state.Ped.Z;
     previousVerticalSpeed = state.VerticalSpeed;
+    const auto& registry = host.CarGenerators();
+    const auto& residency = host.CarGeneratorResidency();
+    const auto rng = host.InspectSourceRng();
+    const auto pool = host.Vehicles().Census();
+    const auto creates = std::count_if(registry.Events().begin(), registry.Events().end(), [](const auto& event) {
+        return event.Kind == NativeCarGeneratorEventKind::Create014B;
+    });
+    const auto switches = registry.Events().size() - creates;
+    constexpr std::array<std::ptrdiff_t, 5> expectedCreates{0, 0, 0, 9, 10};
+    bool generatorReady = generators && residency.Generation() == cpu.Generation && residency.Snapshot() == cpu.SourceCollision &&
+        residency.Active().size() == 22 && registry.Census().Registered == 88 + static_cast<std::size_t>(creates) &&
+        frames <= expectedCreates.size() && creates == expectedCreates[frames - 1] && switches == static_cast<std::size_t>(creates) &&
+        !pool.Alive && !pool.CreatedEvents && rng.Status == NativeSourceRngStatus::Ready && rng.Value &&
+        rng.Value->DrawCount == 0 && rng.Value->State == rng.Value->Seed;
+    if (generators) {
+        const auto& frame = generators->Frame();
+        std::size_t quarterUsed = 0;
+        for (std::size_t slot = frames % 4; slot < NativeCarGenerators::Capacity; slot += 4) {
+            quarterUsed += registry.Entries()[slot].Used;
+        }
+        generatorReady &= frame.Revision == frames && frame.Frame == frames - 1 && frame.WorldGeneration == cpu.Generation &&
+            frame.RegistryRevision == registry.Revision() && frame.Demands.empty() &&
+            frame.ActivityRevision == game.Activity().Revision &&
+            frame.Process.Result.Status == NativeScriptServiceStatus::Ready && frame.Process.ProcessCounterBefore == (frames - 1) % 4 &&
+            frame.Process.ProcessCounterAfter == frames % 4 && frame.Process.Visited == quarterUsed;
+        for (const auto& action : frame.Process.Actions) generatorReady &= action.Requirement == NativeCarGeneratorRequirement::None &&
+            action.Result.Status == NativeScriptServiceStatus::Ready;
+    }
+    std::printf("boot-cargens %s frame=%u quarter=%u sources=%zu registered=%zu creates=%td switches=%zu demands=%zu poolCreated=%zu seed=%u draws=%llu borrowed=%d\n",
+        generatorReady ? "PASS" : "FAIL", frames, generators ? generators->Frame().Process.ProcessCounterAfter : 255,
+        residency.Active().size(), registry.Census().Registered, creates, switches,
+        generators ? generators->Frame().Demands.size() : ~std::size_t{}, pool.CreatedEvents,
+        rng.Value ? rng.Value->Seed : 0, static_cast<unsigned long long>(rng.Value ? rng.Value->DrawCount : ~std::uint64_t{}),
+        &cpu.QueryWorld() == host.World());
+    ok &= generatorReady;
     ok &= black && paired && actor && scheduler && presentation && startup && garageReady && cameraUnchanged && sourceBody && physics;
     if (const auto* path = std::getenv("MAD_SA_BOOT_CAPTURE"); path && !rgb.empty()) {
         // Optional diagnostic of this very same back buffer, never asset output.
@@ -184,7 +224,7 @@ static bool Swap(SDL_Window* window, const RealtimeHudState& hud, const Realtime
 }
 } // namespace boot_probe
 
-#define SDL_GL_SwapWindow(window) boot_probe::Swap((window), hudState, scriptHost, gameplay, *world.active->cpu, world.active->Collision(), garageRuntime)
+#define SDL_GL_SwapWindow(window) boot_probe::Swap((window), hudState, scriptHost, gameplay, *world.active->cpu, world.active->Collision(), garageRuntime, carGenerators.get())
 #include "Realtime.cpp"
 #undef SDL_GL_SwapWindow
 
@@ -196,7 +236,7 @@ int main(int argc, char** argv) {
     }
     if (!gameDir) return 2;
     const int result = Realtime_Run(argc, argv, gameDir);
-    const bool ok = result == 1 && boot_probe::passed && boot_probe::frames == 3;
+    const bool ok = result == 1 && boot_probe::passed && boot_probe::frames == 5;
     std::printf("boot-runtime %s exit=%d swaps=%u fullboot=0\n", ok ? "PASS" : "FAIL", result, boot_probe::frames);
     return ok ? result : 2; // runner must validate the exact terminal log, not accept arbitrary exit 1
 }

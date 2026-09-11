@@ -14,6 +14,7 @@ using uint64 = std::uint64_t;
 #define __stdcall
 #endif
 #include "oswrapper/oswrapper.h"
+#include "app/platform/linux/TexSample.h"
 
 namespace {
 static_assert(std::is_nothrow_copy_assignable_v<RealtimeScriptHostEvent>);
@@ -28,10 +29,28 @@ RealtimeScriptHost::RealtimeScriptHost(RealtimeGameplay& gameplay): m_Gameplay(g
 RealtimeScriptHost::~RealtimeScriptHost() {
     if (m_PendingLoad && m_Cancel) m_Cancel(*m_PendingLoad);
 }
+bool RealtimeScriptHost::SeedSourceRngAfterRwInit(std::string& error) {
+    const auto readiness = m_SourceRng.Readiness();
+    if (readiness == NativeSourceRngStatus::Ready) { error.clear(); return true; }
+    if (m_Sealed || readiness != NativeSourceRngStatus::Unseeded) {
+        error = "source RNG seed requires unsealed main-thread startup"; return false;
+    }
+    if (!TexSample_IsEngineStarted()) {
+        error = "source RNG seed must follow actual native RW initialization"; return false;
+    }
+    // GameInit 0x5BF3B0: RwInitialize, srand(RsTimer()). Native OS_TimeMS is
+    // the platform timer authority; neither the VM clock nor a fixture seed.
+    const auto seed = OS_TimeMS();
+    if (m_SourceRng.SeedOnce(seed) != NativeSourceRngStatus::Ready) {
+        error = "source RNG initial seed rejected"; return false;
+    }
+    error.clear(); return true;
+}
 bool RealtimeScriptHost::InitializeBeforeWorker(const char* gameDir, std::string& error,
     std::shared_ptr<const NativeCollisionContext> collision) {
     if (!gameDir || !*gameDir) { error = "script host needs game directory"; return false; }
     if (m_Initialized || m_Sealed) { error = "script host initialization must precede worker startup, once"; return false; }
+    if (!SeedSourceRngAfterRwInit(error)) return false;
     if (!collision) collision = NativeCollisionContext::LoadBeforeWorker(gameDir, 900.0f, error);
     if (!collision) return false;
     m_CollisionContext = std::move(collision);
@@ -43,6 +62,8 @@ bool RealtimeScriptHost::InitializeBeforeWorker(const char* gameDir, std::string
     if (!m_Entities.LoadBeforeWorker(gameDir, error)) return false;
     if (!m_EntryExits.LoadBeforeWorker(gameDir, error)) return false;
     if (!m_Garages.LoadBeforeWorker(gameDir, *m_CollisionContext, error)) return false;
+    if (!m_CarGenerators.LoadBeforeWorker(gameDir, State().TimeMs, error) ||
+        !m_CarGeneratorResidency.Initialize(m_CarGenerators, m_CollisionContext->Population, error)) return false;
     std::vector<NativePlacementOverride> placements;
     for (const auto& door : m_Garages.Doors()) {
         if (!door.RequiresDynamicPublication) continue;
@@ -53,10 +74,11 @@ bool RealtimeScriptHost::InitializeBeforeWorker(const char* gameDir, std::string
                               door.SourcePose.Basis, garage ? bool(garage->Flags & 0x40) : door.CollisionEnabled});
     }
     m_InitialPlacementOverrides = std::make_shared<const NativePlacementOverrides>(std::move(placements));
-    // These are the only vehicle producers implemented in this native mode.
-    // Missing original traffic/generators are NOT declared source-empty.
+    // These are native producer authorities. Generator definitions and retained
+    // runtime demands do not imply that construction/world insertion is ported.
     if (!m_Vehicles.BindProducer(NativeVehicleProducer::NativeScm, error) ||
         !m_Vehicles.BindProducer(NativeVehicleProducer::NativeGameplayController, error) ||
+        !m_Vehicles.BindProducer(NativeVehicleProducer::CarGenerator, error) ||
         !m_Vehicles.SealProducerExtent(error)) return false;
     m_Initialized = true;
     error.clear(); return true;
@@ -108,6 +130,8 @@ bool RealtimeScriptHost::PrepareInitialGarageWorldBeforeWorker(std::string& erro
     publication.Overrides = overrides;
     publication.SourceCollision = std::move(snapshot);
     publication.Collision = world;
+    const auto residency = ReconcileCarGeneratorsBeforeWorldCommit(m_WorldRevision + 1, publication.SourceCollision);
+    if (residency.Status != NativeCarGeneratorResidencyStatus::Ready) { error = residency.Detail; return false; }
     m_Publication = std::move(publication);
     m_World = std::move(world);
     m_InitialPlacementOverrides = std::move(overrides);
@@ -136,7 +160,9 @@ NativeScriptServiceResult RealtimeScriptHost::PrepareContactBlipRequest(NativeSc
     request.RadarSpriteReady = true;
     return Ready();
 }
-void RealtimeScriptHost::SealStartup() { m_Sealed = true; m_EntryExits.SealStartup(); m_Garages.SealStartup(); }
+void RealtimeScriptHost::SealStartup() {
+    m_Sealed = true; m_EntryExits.SealStartup(); m_Garages.SealStartup(); m_CarGenerators.SealStartup();
+}
 NativeScriptResult RealtimeScriptHost::RunPass(std::size_t quota) {
     if (!m_Initialized) return {NativeScriptStatus::Error, 0, 0, 0, "script host not initialized"};
     return m_Session.RunPass(*this, quota);
@@ -155,9 +181,9 @@ std::optional<NativeScriptServiceResult> RealtimeScriptHost::Replay(const Realti
     if (m_Entities.OwnsRequest(event.Id)) return Error("service request ID already owned by property/radar service");
     for (const auto& old : m_Events) {
         if (old.Id != event.Id) continue;
-        if (old.Opcode != event.Opcode || old.Arguments != event.Arguments || old.Index != event.Index || old.StateArgument != event.StateArgument || old.Name != event.Name)
+        if (old.Opcode != event.Opcode || old.Arguments != event.Arguments || old.Index != event.Index || old.StateArgument != event.StateArgument || old.Name != event.Name || old.GeneratorArguments != event.GeneratorArguments)
             return Error("service request ID reused with different command/arguments");
-        return Ready();
+        return NativeScriptServiceResult{old.Status, old.Status == NativeScriptServiceStatus::Ready ? "" : "replayed failed service request"};
     }
     // Reserve the event journal before any live effect. Its state snapshots
     // contain no allocating members, so Commit cannot fail after publication.
@@ -176,7 +202,9 @@ NativeScriptServiceResult RealtimeScriptHost::PublishWorld(const NativeScriptSce
     if (m_PendingLoad && (m_PendingPosition != request.Position || m_PendingGround != requireGround))
         return Error("pending world request ID reused with changed command/position");
     RealtimeScriptWorldPublication publication;
-    if (m_Loader) {
+    if (m_PendingWorldPublication) {
+        publication = *m_PendingWorldPublication;
+    } else if (m_Loader) {
         auto result = m_Loader(request, publication);
         if (result.Status == NativeScriptServiceStatus::Pending) {
             m_PendingLoad = request.Id; m_PendingPosition = request.Position; m_PendingGround = requireGround;
@@ -195,13 +223,18 @@ NativeScriptServiceResult RealtimeScriptHost::PublishWorld(const NativeScriptSce
     }
     if (!publication.Scene || publication.Center != request.Position || publication.Frame.instances <= 0 ||
         publication.Frame.tris <= 0 || publication.Scene->meshes.empty()) return Error("world loader did not supply requested resident scene");
-    auto world = std::make_shared<RealtimeGameplayWorld>();
+    std::shared_ptr<const RealtimeGameplayWorld> world = publication.Collision;
     std::string error;
-    auto snapshot = std::make_shared<NativeCollisionSnapshot>();
     // Pure owned data, including when a live loader supplies the render scene.
     // Never trust a callback's collision as a replacement for source residency.
-    if (!m_CollisionContext->Snapshot(request.Position.X, request.Position.Y, *snapshot, error, publication.Overrides) ||
-        !world->Rebuild(*snapshot, error)) return Error(error);
+    if (!m_PendingWorldPublication) {
+        auto snapshot = std::make_shared<NativeCollisionSnapshot>();
+        auto rebuilt = std::make_shared<RealtimeGameplayWorld>();
+        if (!m_CollisionContext->Snapshot(request.Position.X, request.Position.Y, *snapshot, error, publication.Overrides) ||
+            !rebuilt->Rebuild(*snapshot, error)) return Error(error);
+        world = std::move(rebuilt);
+        publication.SourceCollision = std::move(snapshot);
+    }
     if (!world->TriangleCount() && !world->SphereCount() && !world->BoxCount())
         return Error("loaded region has no source COL primitives");
     float ground;
@@ -209,7 +242,14 @@ NativeScriptServiceResult RealtimeScriptHost::PublishWorld(const NativeScriptSce
     if (requireGround && !world->Ground(p.X, p.Y, p.Z + 1.0f, p.Z - 150.0f, ground))
         return Error("LOAD_SCENE has no actual resident ground at requested position");
     publication.Collision = world;
-    publication.SourceCollision = std::move(snapshot);
+    const auto residency = ReconcileCarGeneratorsBeforeWorldCommit(m_WorldRevision + 1, publication.SourceCollision);
+    if (residency.Status != NativeCarGeneratorResidencyStatus::Ready) {
+        m_PendingWorldPublication = publication;
+        m_PendingLoad = request.Id; m_PendingPosition = request.Position; m_PendingGround = requireGround;
+        return {residency.Status == NativeCarGeneratorResidencyStatus::PendingCleanup ?
+            NativeScriptServiceStatus::Pending : NativeScriptServiceStatus::Error, residency.Detail};
+    }
+    m_PendingWorldPublication.reset(); m_PendingLoad.reset();
     m_World = std::move(world); m_Publication = std::move(publication); ++m_WorldRevision;
     return Ready();
 }
@@ -375,4 +415,52 @@ NativeScriptServiceResult RealtimeScriptHost::RemoveScriptPickup(const NativeScr
     for (const auto& event : m_Events) if (event.Id == request.Id)
         return Error("pickup removal request ID already owned by player/world service");
     return m_Entities.RemoveScriptPickup(request);
+}
+
+NativeCarGeneratorResidencyResult RealtimeScriptHost::ReconcileCarGeneratorsBeforeWorldCommit(
+    std::uint64_t generation, std::shared_ptr<const NativeCollisionSnapshot> sourceCollision,
+    const NativeCarGeneratorResidencyCleanup* cleanup) {
+    if (!m_Initialized) {
+        NativeCarGeneratorResidencyResult result;
+        result.Detail = "generator residency requires initialized host";
+        return result;
+    }
+    return m_CarGeneratorResidency.Reconcile(m_CarGenerators, generation, std::move(sourceCollision),
+        State().TimeMs, cleanup, &m_Vehicles);
+}
+
+NativeScriptReferenceResult<NativeScriptCarGeneratorRef> RealtimeScriptHost::CreateCarGenerator(
+    const NativeScriptCarGeneratorRequest& request) {
+    if (!m_Initialized) return {Error("generator service requires initialized host"), {}};
+    if (m_PendingLoad) return {Error("generator service cannot cross pending world request"), {}};
+    const auto p = request.Position;
+    if (!Finite(p) || !std::isfinite(request.AngleDegrees)) return {Error("nonfinite generator request"), {}};
+    RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=0x014B,
+        .Arguments={p.X, p.Y, p.Z, request.AngleDegrees},
+        .GeneratorArguments={request.ModelId, request.PrimaryColor, request.SecondaryColor, request.ForceSpawn,
+            request.AlarmChance, request.DoorLockChance, request.MinDelay, request.MaxDelay}};
+    if (auto result = Replay(event)) {
+        if (result->Status != NativeScriptServiceStatus::Ready) return {*result, {}};
+        const auto old = std::ranges::find(m_Events, request.Id, &RealtimeScriptHostEvent::Id);
+        return {*result, {old->Reference}};
+    }
+    const NativeCarGeneratorCreateRequest native{request.Id, p, request.AngleDegrees, request.ModelId,
+        request.PrimaryColor, request.SecondaryColor, request.ForceSpawn, request.AlarmChance,
+        request.DoorLockChance, request.MinDelay, request.MaxDelay};
+    const auto result = m_CarGenerators.Create(native, State().TimeMs);
+    event.Status = result.Result.Status;
+    event.Reference = result.Reference.Value; Commit(event);
+    return {result.Result, {result.Reference.Value}};
+}
+
+NativeScriptServiceResult RealtimeScriptHost::SwitchCarGenerator(const NativeScriptCarGeneratorSwitchRequest& request) {
+    if (!m_Initialized) return Error("generator service requires initialized host");
+    if (m_PendingLoad) return Error("generator service cannot cross pending world request");
+    RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=0x014C,
+        .Index=request.Generator.Value, .StateArgument=request.Count};
+    if (auto result = Replay(event)) return *result;
+    const auto result = m_CarGenerators.Switch({request.Id, {request.Generator.Value}, request.Count}, State().TimeMs);
+    event.Status = result.Status;
+    event.Reference = request.Generator.Value; Commit(event);
+    return result;
 }

@@ -7,6 +7,8 @@
 #include "app/platform/linux/NativeEntryExits.h"
 #include "app/platform/linux/NativeGarages.h"
 #include "app/platform/linux/NativeVehiclePool.h"
+#include "app/platform/linux/NativeCarGeneratorResidency.h"
+#include "app/platform/linux/NativeSourceRng.h"
 #include "app/platform/linux/RealtimeGameplay.h"
 #include "app/platform/linux/StreamPager.h"
 #include <functional>
@@ -37,6 +39,8 @@ struct RealtimeScriptHostEvent {
     std::array<float, 4> Arguments{};
     std::int32_t Index = 0, Reference = -1, StateArgument = 0;
     std::array<char, 8> Name{};
+    std::array<std::int32_t, 8> GeneratorArguments{};
+    NativeScriptServiceStatus Status = NativeScriptServiceStatus::Ready;
     RealtimeGameplayState Player{};
     RealtimeGameplayCamera Camera{};
 };
@@ -60,6 +64,15 @@ public:
     // once BEFORE launching the RW streaming worker. Pager lifecycle stays parent-owned.
     bool InitializeBeforeWorker(const char* gameDir, std::string& error,
         std::shared_ptr<const NativeCollisionContext> collision = {});
+    // Call immediately after native RW initialization, before source consumers.
+    // InitializeBeforeWorker also calls this if the parent has not yet done so.
+    // Captures OS_TimeMS exactly once; repeated calls never reseed.
+    bool SeedSourceRngAfterRwInit(std::string& error);
+    NativeSourceRngRef SourceRng() { return m_SourceRng.Reference(); }
+    NativeSourceRngInspection InspectSourceRng() const { return m_SourceRng.Inspect(); }
+    // Local CRT algorithm authority, not original global draw-order parity:
+    // source ENEX random startup draws are still unported.
+    static constexpr bool OriginalRandomDrawOrderParity = false;
     // After main53 has created the actual player, before world adoption/upload,
     // SealStartup and the worker. Publishes expected first common-update COL;
     // verifies unchanged render poses and never commits garage flags or a Tick.
@@ -98,6 +111,16 @@ public:
     const NativeGarages& Garages() const { return m_Garages; }
     NativeVehiclePool& Vehicles() { return m_Vehicles; }
     const NativeVehiclePool& Vehicles() const { return m_Vehicles; }
+    NativeCarGenerators& CarGenerators() { return m_CarGenerators; }
+    const NativeCarGenerators& CarGenerators() const { return m_CarGenerators; }
+    const NativeCarGeneratorResidency& CarGeneratorResidency() const { return m_CarGeneratorResidency; }
+    // Parent provision transaction: exact selected immutable source-COL packet,
+    // BEFORE active world commit/render. Ready requires an immediate non-failing
+    // world handoff. Pending/Error keep the previous registry; retry the same
+    // generation/snapshot after the actual runtime owner fulfills removals.
+    NativeCarGeneratorResidencyResult ReconcileCarGeneratorsBeforeWorldCommit(
+        std::uint64_t generation, std::shared_ptr<const NativeCollisionSnapshot> sourceCollision,
+        const NativeCarGeneratorResidencyCleanup* cleanup = nullptr);
     std::shared_ptr<const NativeVehiclePoolSnapshot> PublishVehicles(std::uint64_t frame, std::string& error);
     const RealtimeScriptPlayerInfo& PlayerInfo() const { return m_PlayerInfo; }
     // Register the main-thread presentation consumer. Production wiring must
@@ -129,6 +152,8 @@ public:
     NativeScriptServiceResult SetBlipDisplay(const NativeScriptBlipDisplayRequest&) override;
     NativeScriptServiceResult SetEntryExitFlag(const NativeScriptEntryExitFlagRequest&) override;
     NativeScriptServiceResult DeactivateGarage(const NativeScriptGarageRequest&) override;
+    NativeScriptReferenceResult<NativeScriptCarGeneratorRef> CreateCarGenerator(const NativeScriptCarGeneratorRequest&) override;
+    NativeScriptServiceResult SwitchCarGenerator(const NativeScriptCarGeneratorSwitchRequest&) override;
     NativeScriptPickupCollectedResult HasPickupBeenCollected(const NativeScriptPickupReferenceRequest&) override;
     NativeScriptServiceResult RemoveScriptPickup(const NativeScriptPickupReferenceRequest&) override;
 
@@ -146,6 +171,9 @@ private:
     NativeEntryExits m_EntryExits;
     NativeGarages m_Garages;
     NativeVehiclePool m_Vehicles;
+    NativeSourceRng m_SourceRng;
+    NativeCarGenerators m_CarGenerators;
+    NativeCarGeneratorResidency m_CarGeneratorResidency;
     std::shared_ptr<const NativeCollisionContext> m_CollisionContext;
     std::shared_ptr<const NativePlacementOverrides> m_InitialPlacementOverrides;
     std::shared_ptr<const RealtimeGameplayWorld> m_World;
@@ -154,6 +182,7 @@ private:
     CancelLoad m_Cancel;
     RadarSpriteReady m_RadarSpriteReady;
     std::optional<NativeScriptRequestId> m_PendingLoad;
+    std::optional<RealtimeScriptWorldPublication> m_PendingWorldPublication;
     NativeScriptPosition m_PendingPosition;
     bool m_PendingGround = false;
     std::optional<NativeScriptPosition> m_CollisionRegion, m_LoadedScene;

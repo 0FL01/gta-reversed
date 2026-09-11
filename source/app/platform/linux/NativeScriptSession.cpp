@@ -48,7 +48,7 @@ uint32 Word(std::span<const uint8> bytes, std::size_t pos, unsigned count = 4) {
 enum class Operand { Integer, Float, String, Output, FloatOutput, InOutInteger, InOutFloat };
 struct Signature {
     uint16 Opcode;
-    std::array<Operand, 6> Types{};
+    std::array<Operand, 13> Types{};
     unsigned Count = 0;
 };
 using O = Operand;
@@ -97,6 +97,9 @@ constexpr Signature Signatures[] = {
     {0x02B9, {O::String}, 1},
     {0x0213, {O::Integer, O::Integer, O::Float, O::Float, O::Float, O::Output}, 6},
     {0x0214, {O::Integer}, 1}, {0x0215, {O::Integer}, 1},
+    {0x014B, {O::Float, O::Float, O::Float, O::Float, O::Integer, O::Integer, O::Integer,
+              O::Integer, O::Integer, O::Integer, O::Integer, O::Integer, O::Output}, 13},
+    {0x014C, {O::Integer, O::Integer}, 2},
 };
 
 const Signature* FindSignature(uint16 opcode) {
@@ -497,12 +500,27 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
 
     int32 reference = -1;
     bool pickupCollected = false;
-    if (d.Opcode == 0x04E4 || d.Opcode == 0x03CB || d.Opcode == 0x0053 || d.Opcode == 0x07AF || d.Opcode == 0x01F5 || d.Opcode == 0x0373 || d.Opcode == 0x0173 || d.Opcode == 0x0517 || d.Opcode == 0x0518 || d.Opcode == 0x0570 || d.Opcode == 0x018B || d.Opcode == 0x09B4 || d.Opcode == 0x02B9 || d.Opcode == 0x0213 || d.Opcode == 0x0214 || d.Opcode == 0x0215) {
+    if (d.Opcode == 0x04E4 || d.Opcode == 0x03CB || d.Opcode == 0x0053 || d.Opcode == 0x07AF || d.Opcode == 0x01F5 || d.Opcode == 0x0373 || d.Opcode == 0x0173 || d.Opcode == 0x0517 || d.Opcode == 0x0518 || d.Opcode == 0x0570 || d.Opcode == 0x018B || d.Opcode == 0x09B4 || d.Opcode == 0x02B9 || d.Opcode == 0x0213 || d.Opcode == 0x0214 || d.Opcode == 0x0215 || d.Opcode == 0x014B || d.Opcode == 0x014C) {
         const NativeScriptRequestId id{m_SessionId, m_CommandSequence + 1, state.IP};
         NativeScriptServiceResult result;
         // All operands/output bounds have been checked before ANY host call.
         struct Guard { bool& Flag; Guard(bool& flag): Flag(flag) { Flag = true; } ~Guard() { Flag = false; } } guard{m_InService};
         try {
+            if (d.Opcode == 0x014B) {
+                // Pinned schema: model -1 selects a random local-popcycle car,
+                // NOT an SCM used-object index. Host owns source constructor
+                // narrowing/model checks, including a successful -1 result.
+                auto created = services.CreateCarGenerator({id,
+                    {d.Float(0), d.Float(1), d.Float(2)}, d.Float(3),
+                    d.Int(4), d.Int(5), d.Int(6), d.Int(7), d.Int(8), d.Int(9), d.Int(10), d.Int(11)});
+                result = std::move(created.Result); reference = created.Reference.Value;
+            }
+            if (d.Opcode == 0x014C) {
+                // VehicleCommands::SwitchCarGenerator takes int32 count: zero
+                // switches off; nonzero switches on, then count<=100 is assigned
+                // to uint16 m_nGenerateCount. Negative counts must reach host.
+                result = services.SwitchCarGenerator({id, {a}, b});
+            }
             if (d.Opcode == 0x0213) {
                 NativeScriptPickupRequest request{id, a, b, {d.Float(2), d.Float(3), d.Float(4)}};
                 if (a < 0) {
@@ -677,6 +695,7 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
     case 0x0053: write(4, uint32(a)); break;
     case 0x0517: case 0x0570: write(4, uint32(reference)); break;
     case 0x0518: case 0x0213: write(5, uint32(reference)); break;
+    case 0x014B: write(12, uint32(reference)); break;
     case 0x07AF: case 0x01F5: write(1, uint32(reference)); break;
     case 0x0746: {
         auto& categories = m_State.Relationships[b];

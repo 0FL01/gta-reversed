@@ -33,6 +33,10 @@ using uint64 = uint64_t;
 
 // --- Production: linkage, decode, CPU rasterizer (R6c) ---
 
+bool TexSample_IsEngineStarted() {
+    return rw::Engine::state == rw::Engine::Started;
+}
+
 rw::Texture* TexSample_FindVehicleTexture(const char* name, rw::TexDictionary* model,
                                         rw::TexDictionary* shared) {
     if (auto* texture = shared ? shared->find(name) : nil) {
