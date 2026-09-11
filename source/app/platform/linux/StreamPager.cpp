@@ -47,6 +47,8 @@ constexpr float kCellSize = 300.0f;
 constexpr float kHysteresis = 100.0f;
 StreamPagerOptions s_options;
 NativeCollisionPopulation s_collisionPopulation;
+std::set<std::string> s_txdParentChildren;
+bool s_txdParentCatalogValid = true;
 
 void SetErr(char* err, std::size_t errSize, const char* msg) {
     if (!err || errSize == 0) {
@@ -239,7 +241,7 @@ struct IdeEntry {
 
 void ParseIdeText(const std::string& text, std::map<std::string, IdeEntry>& out,
                   std::set<std::string>& animModels, std::map<int, std::string>& modelIds) {
-    int mode = 0; // 0 none, 1 static, 2 anim
+    int mode = 0; // 0 none, 1 static, 2 anim, 3 TXD parents
     bool timeModel = false;
     size_t pos = 0;
     while (pos <= text.size()) {
@@ -266,11 +268,26 @@ void ParseIdeText(const std::string& text, std::map<std::string, IdeEntry>& out,
             timeModel = false;
             continue;
         }
+        if (head == "txdp") {
+            mode = 3;
+            continue;
+        }
         if (mode == 0) {
             continue;
         }
         std::string line = raw;
         SanitizeLine(line);
+        if (mode == 3) {
+            char child[64]{}, parent[64]{};
+            if (std::sscanf(line.c_str(), "%63s %63s", child, parent) != 2) {
+                s_txdParentCatalogValid = false;
+            } else {
+                std::string childKey = child;
+                ToLowerInPlace(childKey);
+                s_txdParentChildren.insert(childKey);
+            }
+            continue;
+        }
         int id = -1;
         char model[64] = {};
         char txd[64] = {};
@@ -412,6 +429,7 @@ struct ImgEntry {
 
 struct ImgIndex {
     std::string absPath;
+    std::string archiveName;
     std::vector<ImgEntry> entries;
 };
 
@@ -428,6 +446,8 @@ bool BuildImgIndex(const std::string& absPath, ImgIndex& idx) {
         return false;
     }
     idx.absPath = absPath;
+    const auto slash = absPath.find_last_of('/');
+    idx.archiveName = absPath.substr(slash == std::string::npos ? 0 : slash + 1);
     idx.entries.reserve(count);
     for (uint32 i = 0; i < count; ++i) {
         uint32 off = 0;
@@ -568,13 +588,17 @@ struct CachedModel {
     int tris = 0;
     std::vector<uint8> dayColors, nightColors;
     std::vector<WorldShotSurface> surfaces;
+    std::string sourceModelName;
+    std::string sourceTxdName;
+    std::string sourceArchiveName;
 };
 
 // librw skips Rockstar's 0x253F2F9 plugin. Read only that bounded extension,
 // without registering process-global plugins after another parser starts RW.
 // Original layout: uint32 present, then numVertices RGBA (NightColors).
 static bool ReadNightColors(const std::vector<uint8>& bytes, rw::Clump* clump,
-                            std::map<const rw::Geometry*, std::vector<uint8>>& out) {
+                            std::map<const rw::Geometry*, std::vector<uint8>>& out,
+                            std::map<const rw::Geometry*, int>& geometryOrdinals) {
     struct Chunk { uint32 type; size_t begin, end; };
     auto children = [&](size_t begin, size_t end, std::vector<Chunk>& chunks) {
         if (end > bytes.size()) {
@@ -653,9 +677,13 @@ static bool ReadNightColors(const std::vector<uint8>& bytes, rw::Clump* clump,
         if (index >= atomicGeometry.size() || atomicGeometry[index] >= colors.size()) {
             return false;
         }
-        const auto& night = colors[atomicGeometry[index++]];
+        const auto geometryOrdinal = atomicGeometry[index++];
+        const auto& night = colors[geometryOrdinal];
         if (!night.empty() && (!geo || night.size() != static_cast<size_t>(geo->numVertices) * 4)) {
             return false;
+        }
+        if (geo) {
+            geometryOrdinals[geo] = static_cast<int>(geometryOrdinal);
         }
         out[geo] = night;
     }
@@ -663,7 +691,9 @@ static bool ReadNightColors(const std::vector<uint8>& bytes, rw::Clump* clump,
 }
 
 bool FlattenClumpStatic(rw::Clump* clump, const LinkedClump& lc, CachedModel& out,
-                        const std::map<const rw::Geometry*, std::vector<uint8>>& nightColors) {
+                        const std::map<const rw::Geometry*, std::vector<uint8>>& nightColors,
+                        const std::map<const rw::Geometry*, int>& geometryOrdinals,
+                        bool sourceNullTextureAllowed) {
     out.pos.clear();
     out.nrm.clear();
     out.uv.clear();
@@ -752,6 +782,11 @@ bool FlattenClumpStatic(rw::Clump* clump, const LinkedClump& lc, CachedModel& ou
                                 imgIdx = -2;
                             }
                         }
+                    } else if (s_options.includeStreamed && sourceNullTextureAllowed && rit != lc.resolved.end()) {
+                        // Source TxdStoreFindCB returns null for an absent texture
+                        // in a valid dictionary/parent chain (e.g. signs:chrome).
+                        // Keep the authored material/prelight, not invented texels.
+                        imgIdx = -1;
                     } else {
                         imgIdx = -2;
                     }
@@ -763,6 +798,10 @@ bool FlattenClumpStatic(rw::Clump* clump, const LinkedClump& lc, CachedModel& ou
                 const auto slot = materialSlots.try_emplace(
                     std::make_pair(geo, static_cast<int>(tri.matId)), static_cast<int>(materialSlots.size()));
                 surface.sourceMaterial = slot.first->second;
+                if (const auto geometry = geometryOrdinals.find(geo); geometry != geometryOrdinals.end()) {
+                    surface.sourceGeometry = geometry->second;
+                }
+                surface.sourceTriangle = t;
                 const bool lit = geo->flags & rw::Geometry::LIGHT;
                 surface.ambient = lit && mat ? mat->surfaceProps.ambient : 0.0f;
                 surface.diffuse = lit && norms && mat ? mat->surfaceProps.diffuse : 0.0f;
@@ -889,6 +928,7 @@ struct PagerInst {
     std::string model;
     std::string key; // lowercased model
     std::string txd; // IDE txd (may be empty)
+    int modelId = -1;
     float pos[3] = {};
     float quat[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
     int order = 0; // DAT order (stable tiebreak)
@@ -938,9 +978,12 @@ int s_modelsPeak = 0;
 int s_trisPeak = 0;
 int s_texResident = 0;
 
-bool FindInImgs(const std::string& wantLower, std::vector<uint8>& out) {
+bool FindInImgs(const std::string& wantLower, std::vector<uint8>& out, std::string* sourceArchive = nullptr) {
     for (const ImgIndex& idx : s_imgs) {
         if (ImgReadBytes(idx, wantLower, out)) {
+            if (sourceArchive) {
+                *sourceArchive = idx.archiveName;
+            }
             return true;
         }
     }
@@ -954,6 +997,8 @@ bool StreamPager_Init(const char* gameDir, E2ELoadInfo& info, char* err, std::si
     assert(std::isfinite(options.radius) && options.radius > 0 && options.maxInstances > 0);
     s_options = options;
     s_collisionPopulation = {};
+    s_txdParentChildren.clear();
+    s_txdParentCatalogValid = true;
     s_collisionPopulation.IncludesStreamed = options.includeStreamed;
     info = E2ELoadInfo{};
     if (!gameDir || !gameDir[0]) {
@@ -1115,6 +1160,7 @@ bool StreamPager_Init(const char* gameDir, E2ELoadInfo& info, char* err, std::si
         PagerInst p;
         p.model = inst.model;
         p.key = key;
+        p.modelId = inst.modelId;
         auto it = s_ide.find(key);
         p.txd = it != s_ide.end() ? it->second.txd : std::string();
         p.pos[0] = inst.pos[0];
@@ -1353,7 +1399,8 @@ bool StreamPager_Update(float camX, float camY, float camZ, WorldShotScene& scen
             }
         }
         std::vector<uint8> dffBytes;
-        if (!FindInImgs(kv.first + ".dff", dffBytes)) {
+        std::string sourceArchive;
+        if (!FindInImgs(kv.first + ".dff", dffBytes, &sourceArchive)) {
             s_failed.insert(kv.first);
             continue;
         }
@@ -1365,9 +1412,16 @@ bool StreamPager_Update(float camX, float camY, float camZ, WorldShotScene& scen
             continue;
         }
         CachedModel cached;
+        cached.sourceModelName = iit != s_ide.end() ? iit->second.model : kv.first;
+        cached.sourceTxdName = txdName;
+        cached.sourceArchiveName = sourceArchive;
         std::map<const rw::Geometry*, std::vector<uint8>> nightColors;
-        bool ok = !s_options.includeStreamed || ReadNightColors(dffBytes, lc.clump, nightColors);
-        ok = ok && FlattenClumpStatic(lc.clump, lc, cached, nightColors);
+        std::map<const rw::Geometry*, int> geometryOrdinals;
+        bool ok = !s_options.includeStreamed || ReadNightColors(dffBytes, lc.clump, nightColors, geometryOrdinals);
+        std::string txdKey = txdName;
+        ToLowerInPlace(txdKey);
+        const bool sourceNullTextureAllowed = primary && s_txdParentCatalogValid && !s_txdParentChildren.contains(txdKey);
+        ok = ok && FlattenClumpStatic(lc.clump, lc, cached, nightColors, geometryOrdinals, sourceNullTextureAllowed);
         TexSample_FreeLinked(lc);
         if (!ok) {
             s_failed.insert(kv.first); // skinned or GPU-only: honestly skipped
@@ -1446,6 +1500,11 @@ bool StreamPager_Update(float camX, float camY, float camZ, WorldShotScene& scen
         WorldShotMesh mesh;
         MeshColor(placed, mesh.color);
         mesh.tris = cached.tris;
+        mesh.sourceModelId = p.modelId;
+        mesh.sourceModelName = cached.sourceModelName;
+        mesh.sourceTxdName = cached.sourceTxdName;
+        mesh.sourceArchiveName = cached.sourceArchiveName;
+        mesh.sourcePlacementId = static_cast<uint32_t>(p.order);
         size_t count = cached.pos.size();
         mesh.pos.resize(count);
         mesh.nrm.resize(count);
@@ -1593,6 +1652,8 @@ void StreamPager_Counters(int& sectorsLoaded, int& sectorsEvicted, int& modelsPe
 
 void StreamPager_Shutdown() {
     s_collisionPopulation = {};
+    s_txdParentChildren.clear();
+    s_txdParentCatalogValid = true;
     for (rw::TexDictionary* txd : s_txdOrder) {
         if (txd) {
             txd->destroy();

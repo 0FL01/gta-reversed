@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 #include <array>
 
@@ -19,6 +20,8 @@ struct WorldShotSurface {
     int vehicleColorIndex = -1; // carcols index when a paint marker was resolved
     bool vehicleAlpha = false; // realtime car: authored material/vertex/texture alpha
     int sourceMaterial{-1}; // Model-local geometry/material-slot identity; optional for older producers.
+    int sourceGeometry{-1};
+    int sourceTriangle{-1};
 };
 
 struct WorldShotStats {
@@ -51,6 +54,11 @@ struct WorldShotMesh {
     // (RenderWare semantics), never a replacement authored color.
     std::vector<uint8_t> dayColors, nightColors;
     std::vector<WorldShotSurface> surfaces; // one per triangle, or empty
+    int sourceModelId{-1};
+    std::string sourceModelName;
+    std::string sourceTxdName;
+    std::string sourceArchiveName;
+    uint32_t sourcePlacementId{0};
 };
 
 // One decoded TXD texture: RGBA8 bytes straight from TXD raster bytes.
