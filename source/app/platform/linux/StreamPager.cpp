@@ -675,6 +675,7 @@ bool FlattenClumpStatic(rw::Clump* clump, const LinkedClump& lc, CachedModel& ou
     out.surfaces.clear();
     out.tris = 0;
     std::map<const rw::Texture*, int> imgCache;
+    std::map<std::pair<const rw::Geometry*, int>, int> materialSlots;
     FORLIST(link, clump->atomics) {
         rw::Atomic* atomic = rw::Atomic::fromClump(link);
         rw::Geometry* geo = atomic ? atomic->geometry : nil;
@@ -759,6 +760,9 @@ bool FlattenClumpStatic(rw::Clump* clump, const LinkedClump& lc, CachedModel& ou
             const rw::V3d* p[3] = { &objVerts[tri.v[0]], &objVerts[tri.v[1]], &objVerts[tri.v[2]] };
             if (s_options.includeStreamed) {
                 WorldShotSurface surface;
+                const auto slot = materialSlots.try_emplace(
+                    std::make_pair(geo, static_cast<int>(tri.matId)), static_cast<int>(materialSlots.size()));
+                surface.sourceMaterial = slot.first->second;
                 const bool lit = geo->flags & rw::Geometry::LIGHT;
                 surface.ambient = lit && mat ? mat->surfaceProps.ambient : 0.0f;
                 surface.diffuse = lit && norms && mat ? mat->surfaceProps.diffuse : 0.0f;

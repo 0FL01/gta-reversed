@@ -171,6 +171,8 @@ bool TimeCycle_LoadWeatherHour(const char* gameDir, const char* weather, int hou
         bool hasDirectionalMult = false;
         uint8_t lowCloudColours[3] = {};
         bool hasLowCloudColours = false;
+        uint8_t postFx[2][4] = {};
+        bool hasPostFx = false;
     };
     std::vector<Row> rows;
     for (size_t i = sec + 1; i < lines.size(); ++i) {
@@ -262,6 +264,23 @@ bool TimeCycle_LoadWeatherHour(const char* gameDir, const char* weather, int hou
                     row.directionalMult = value;
                 }
             }
+            if (toks.size() >= 48) {
+                row.hasPostFx = true;
+                for (int pass = 0; pass < 2; ++pass) {
+                    for (int k = 0; k < 4; ++k) {
+                        const auto& token = toks[40 + pass * 4 + k];
+                        char* end = nullptr;
+                        const float value = std::strtof(token.c_str(), &end);
+                        if (end == token.c_str() || *end || !std::isfinite(value) || value < 0 || value > 255) {
+                            row.hasPostFx = false;
+                            continue;
+                        }
+                        // Source order A,R,G,B; integer narrowing after alpha*2
+                        // is explicit modulo 256, including PC alpha 255 -> 254.
+                        row.postFx[pass][k == 0 ? 3 : k - 1] = static_cast<uint8_t>(static_cast<unsigned>(value * (k == 0 ? 2.0f : 1.0f)) & 255u);
+                    }
+                }
+            }
             char* endFar = nullptr;
             char* endFog = nullptr;
             const float far = std::strtof(toks[27].c_str(), &endFar);
@@ -343,6 +362,10 @@ bool TimeCycle_LoadWeatherHour(const char* gameDir, const char* weather, int hou
         for (int k = 0; k < 3; ++k) out.lowCloudColours[k] = row.lowCloudColours[k];
     }
     out.fogSt = row.fogSt;
+    out.hasPostFx = rows.size() == 8 && row.hasPostFx;
+    if (out.hasPostFx) {
+        std::memcpy(out.postFx, row.postFx, sizeof(out.postFx));
+    }
     for (int k = 0; k < 4; ++k) {
         out.water[k] = row.water[k];
     }

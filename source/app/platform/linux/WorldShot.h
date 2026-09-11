@@ -18,6 +18,7 @@ struct WorldShotSurface {
     float diffuse = 1.0f;
     int vehicleColorIndex = -1; // carcols index when a paint marker was resolved
     bool vehicleAlpha = false; // realtime car: authored material/vertex/texture alpha
+    int sourceMaterial{-1}; // Model-local geometry/material-slot identity; optional for older producers.
 };
 
 struct WorldShotStats {

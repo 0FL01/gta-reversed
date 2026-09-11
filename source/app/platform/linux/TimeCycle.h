@@ -28,6 +28,8 @@ struct TimeCycleParams {
     // Optional additive metadata: malformed cloud columns do not alter legacy
     // row selection/colours. True only for valid RGB in a complete 8-row section.
     bool hasLowCloudColours = false;
+    uint8_t postFx[2][4] = {}; // RGBA; PC Initialise doubles alpha into uint8
+    bool hasPostFx = false; // optional tokens[40..47], complete 8-row section
 };
 
 // Loads the `weather` row for `hour` (0-23) relative to gameDir (sets the
