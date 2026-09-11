@@ -12,6 +12,8 @@
 #include <vector>
 #include <array>
 
+#include "app/platform/linux/NativeAssetIdentity.h"
+
 // Optional native GPU metadata. Offline renderers continue using triCol.
 struct WorldShotSurface {
     std::array<float, 4> color{1, 1, 1, 1};
@@ -68,6 +70,8 @@ struct WorldShotImage {
     int h;
     uint32_t filter; // DFF material filterAddressing (wrap modes)
     std::vector<uint8_t> rgba; // w*h*4, top row first (librw lock order)
+    NativeAssetIdentity::Texture sourceIdentity;
+    bool hasSourceIdentity{false};
 };
 
 struct WorldShotScene {

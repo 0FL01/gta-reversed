@@ -45,9 +45,10 @@ namespace {
 // hysteresis H (evict past R+H so border cells don't thrash).
 constexpr float kCellSize = 300.0f;
 constexpr float kHysteresis = 100.0f;
+constexpr size_t kMaxTxdLineage = 64;
 StreamPagerOptions s_options;
 NativeCollisionPopulation s_collisionPopulation;
-std::set<std::string> s_txdParentChildren;
+std::map<std::string, std::string> s_txdParents;
 bool s_txdParentCatalogValid = true;
 
 void SetErr(char* err, std::size_t errSize, const char* msg) {
@@ -278,13 +279,17 @@ void ParseIdeText(const std::string& text, std::map<std::string, IdeEntry>& out,
         std::string line = raw;
         SanitizeLine(line);
         if (mode == 3) {
-            char child[64]{}, parent[64]{};
-            if (std::sscanf(line.c_str(), "%63s %63s", child, parent) != 2) {
+            char child[64]{}, parent[64]{}, extra[2]{};
+            if (std::sscanf(line.c_str(), "%63s %63s %1s", child, parent, extra) != 2) {
                 s_txdParentCatalogValid = false;
             } else {
                 std::string childKey = child;
+                std::string parentKey = parent;
                 ToLowerInPlace(childKey);
-                s_txdParentChildren.insert(childKey);
+                ToLowerInPlace(parentKey);
+                // LoadTexDictionaryParent assigns the slot each time: later
+                // declarations override earlier ones in source DAT order.
+                s_txdParents[childKey] = parentKey;
             }
             continue;
         }
@@ -423,6 +428,7 @@ void ParseIplText(const std::string& text, std::vector<IplInst>& out, bool sourc
 
 struct ImgEntry {
     std::string nameLower;
+    std::string memberName;
     uint32 off = 0;
     uint32 size = 0;
 };
@@ -430,10 +436,11 @@ struct ImgEntry {
 struct ImgIndex {
     std::string absPath;
     std::string archiveName;
+    std::string identityArchive;
     std::vector<ImgEntry> entries;
 };
 
-bool BuildImgIndex(const std::string& absPath, ImgIndex& idx) {
+bool BuildImgIndex(const std::string& absPath, const std::string& identityArchive, ImgIndex& idx) {
     FILE* f = std::fopen(absPath.c_str(), "rb");
     if (!f) {
         return false;
@@ -446,6 +453,7 @@ bool BuildImgIndex(const std::string& absPath, ImgIndex& idx) {
         return false;
     }
     idx.absPath = absPath;
+    idx.identityArchive = identityArchive;
     const auto slash = absPath.find_last_of('/');
     idx.archiveName = absPath.substr(slash == std::string::npos ? 0 : slash + 1);
     idx.entries.reserve(count);
@@ -460,7 +468,8 @@ bool BuildImgIndex(const std::string& absPath, ImgIndex& idx) {
         }
         name[23] = '\0';
         ImgEntry e;
-        e.nameLower = name;
+        e.memberName = name;
+        e.nameLower = e.memberName;
         ToLowerInPlace(e.nameLower);
         e.off = off;
         e.size = size & 0x7FFFu;
@@ -470,7 +479,8 @@ bool BuildImgIndex(const std::string& absPath, ImgIndex& idx) {
     return true;
 }
 
-bool ImgReadBytes(const ImgIndex& idx, const std::string& wantLower, std::vector<uint8>& out) {
+bool ImgReadBytes(const ImgIndex& idx, const std::string& wantLower, std::vector<uint8>& out,
+                  std::string* sourceMember = nullptr) {
     for (const ImgEntry& e : idx.entries) {
         if (e.nameLower != wantLower || e.size == 0) {
             continue;
@@ -485,6 +495,9 @@ bool ImgReadBytes(const ImgIndex& idx, const std::string& wantLower, std::vector
             ok = std::fread(out.data(), 1, out.size(), f) == out.size();
         }
         (void)std::fclose(f);
+        if (ok && sourceMember) {
+            *sourceMember = e.memberName;
+        }
         return ok && !out.empty();
     }
     return false;
@@ -593,6 +606,58 @@ struct CachedModel {
     std::string sourceArchiveName;
 };
 
+enum class TxdLineageValidity {
+    Complete,
+    MalformedCatalog,
+    Cycle,
+    TooDeep,
+    UnavailableDictionary,
+};
+
+struct TxdNameChain {
+    std::vector<std::string> names;
+    TxdLineageValidity validity{TxdLineageValidity::Complete};
+};
+
+struct TxdLookupChain {
+    std::vector<rw::TexDictionary*> dictionaries;
+    std::vector<NativeAssetIdentity::ArchiveMember> lineage;
+    TxdLineageValidity validity{TxdLineageValidity::Complete};
+};
+
+static TxdNameChain BuildTxdNameChain(std::string child) {
+    TxdNameChain chain;
+    ToLowerInPlace(child);
+    if (child.empty() || !s_txdParentCatalogValid) {
+        chain.validity = TxdLineageValidity::MalformedCatalog;
+        return chain;
+    }
+    std::set<std::string> visited;
+    for (size_t depth = 0; depth < kMaxTxdLineage; ++depth) {
+        if (!visited.insert(child).second) {
+            chain.validity = TxdLineageValidity::Cycle;
+            return chain;
+        }
+        chain.names.push_back(child);
+        const auto parent = s_txdParents.find(child);
+        if (parent == s_txdParents.end()) {
+            return chain;
+        }
+        child = parent->second;
+    }
+    chain.validity = TxdLineageValidity::TooDeep;
+    return chain;
+}
+
+static int FindTextureOwner(const TxdLookupChain& chain, const char* name, const rw::Texture* texture) {
+    for (size_t i = 0; i < chain.dictionaries.size(); ++i) {
+        if (const auto* found = chain.dictionaries[i]->find(name)) {
+            return !texture || found == texture ? static_cast<int>(i) : -1;
+        }
+    }
+    return -1;
+}
+
 // librw skips Rockstar's 0x253F2F9 plugin. Read only that bounded extension,
 // without registering process-global plugins after another parser starts RW.
 // Original layout: uint32 present, then numVertices RGBA (NightColors).
@@ -693,7 +758,7 @@ static bool ReadNightColors(const std::vector<uint8>& bytes, rw::Clump* clump,
 bool FlattenClumpStatic(rw::Clump* clump, const LinkedClump& lc, CachedModel& out,
                         const std::map<const rw::Geometry*, std::vector<uint8>>& nightColors,
                         const std::map<const rw::Geometry*, int>& geometryOrdinals,
-                        bool sourceNullTextureAllowed) {
+                        const TxdLookupChain* sourceChain) {
     out.pos.clear();
     out.nrm.clear();
     out.uv.clear();
@@ -705,6 +770,7 @@ bool FlattenClumpStatic(rw::Clump* clump, const LinkedClump& lc, CachedModel& ou
     out.surfaces.clear();
     out.tris = 0;
     std::map<const rw::Texture*, int> imgCache;
+    std::map<NativeAssetIdentity::Texture, int> streamedImgCache;
     std::map<std::pair<const rw::Geometry*, int>, int> materialSlots;
     FORLIST(link, clump->atomics) {
         rw::Atomic* atomic = rw::Atomic::fromClump(link);
@@ -768,25 +834,54 @@ bool FlattenClumpStatic(rw::Clump* clump, const LinkedClump& lc, CachedModel& ou
                     auto rit = lc.resolved.find(mat->texture);
                     if (rit != lc.resolved.end() && rit->second.real) {
                         const rw::Texture* real = rit->second.real;
-                        auto cit = imgCache.find(real);
-                        if (cit != imgCache.end()) {
-                            imgIdx = cit->second;
-                        } else {
-                            TexImage decoded;
-                            if (TexSample_Decode(real, decoded)) {
-                                decoded.filter = rit->second.filter;
-                                imgIdx = static_cast<int>(out.images.size());
-                                out.images.push_back(std::move(decoded));
-                                imgCache[real] = imgIdx;
-                            } else {
+                        if (s_options.includeStreamed) {
+                            const int owner = sourceChain ?
+                                FindTextureOwner(*sourceChain, rit->second.name, real) : -1;
+                            if (owner < 0) {
                                 imgIdx = -2;
+                            } else {
+                                NativeAssetIdentity::Texture identity;
+                                identity.lineage = sourceChain->lineage;
+                                identity.owner = sourceChain->lineage[static_cast<size_t>(owner)];
+                                identity.name.assign(real->name, strnlen(real->name, sizeof(real->name)));
+                                identity.filter = rit->second.filter;
+                                auto cit = streamedImgCache.find(identity);
+                                if (cit != streamedImgCache.end()) {
+                                    imgIdx = cit->second;
+                                } else {
+                                    TexImage decoded;
+                                    if (TexSample_Decode(real, decoded)) {
+                                        decoded.filter = rit->second.filter;
+                                        decoded.sourceIdentity = identity;
+                                        decoded.hasSourceIdentity = true;
+                                        imgIdx = static_cast<int>(out.images.size());
+                                        out.images.push_back(std::move(decoded));
+                                        streamedImgCache[std::move(identity)] = imgIdx;
+                                    } else {
+                                        imgIdx = -2;
+                                    }
+                                }
+                            }
+                        } else {
+                            auto cit = imgCache.find(real);
+                            if (cit != imgCache.end()) {
+                                imgIdx = cit->second;
+                            } else {
+                                TexImage decoded;
+                                if (TexSample_Decode(real, decoded)) {
+                                    decoded.filter = rit->second.filter;
+                                    imgIdx = static_cast<int>(out.images.size());
+                                    out.images.push_back(std::move(decoded));
+                                    imgCache[real] = imgIdx;
+                                } else {
+                                    imgIdx = -2;
+                                }
                             }
                         }
-                    } else if (s_options.includeStreamed && sourceNullTextureAllowed && rit != lc.resolved.end()) {
-                        // Source TxdStoreFindCB returns null for an absent texture
-                        // in a valid dictionary/parent chain (e.g. signs:chrome).
-                        // Keep the authored material/prelight, not invented texels.
-                        imgIdx = -1;
+                    } else if (s_options.includeStreamed && sourceChain && rit != lc.resolved.end()) {
+                        // Only absence from every dictionary in a complete authored
+                        // chain is source-null. An existing undecodable texture is not.
+                        imgIdx = FindTextureOwner(*sourceChain, rit->second.name, nullptr) < 0 ? -1 : -2;
                     } else {
                         imgIdx = -2;
                     }
@@ -969,6 +1064,7 @@ std::vector<ImgIndex> s_imgs;
 std::map<std::string, CachedModel> s_cache; // resident DFF models
 std::set<std::string> s_failed; // known-bad models (missing/skinned/anim)
 std::map<std::string, rw::TexDictionary*> s_txds; // resident TXDs (nil = miss)
+std::map<std::string, NativeAssetIdentity::ArchiveMember> s_txdSources;
 std::vector<rw::TexDictionary*> s_txdOrder; // non-nil, for shutdown/evict
 rw::TexDictionary* s_empty = nil;
 std::set<Cell> s_active;
@@ -978,16 +1074,44 @@ int s_modelsPeak = 0;
 int s_trisPeak = 0;
 int s_texResident = 0;
 
-bool FindInImgs(const std::string& wantLower, std::vector<uint8>& out, std::string* sourceArchive = nullptr) {
+bool FindInImgs(const std::string& wantLower, std::vector<uint8>& out,
+                std::string* sourceArchive = nullptr,
+                NativeAssetIdentity::ArchiveMember* sourceIdentity = nullptr) {
     for (const ImgIndex& idx : s_imgs) {
-        if (ImgReadBytes(idx, wantLower, out)) {
+        std::string sourceMember;
+        if (ImgReadBytes(idx, wantLower, out, sourceIdentity ? &sourceMember : nullptr)) {
             if (sourceArchive) {
                 *sourceArchive = idx.archiveName;
+            }
+            if (sourceIdentity) {
+                *sourceIdentity = {idx.identityArchive, std::move(sourceMember)};
             }
             return true;
         }
     }
     return false;
+}
+
+static TxdLookupChain BuildTxdLookupChain(const std::string& child) {
+    const auto names = BuildTxdNameChain(child);
+    TxdLookupChain chain;
+    chain.validity = names.validity;
+    if (chain.validity != TxdLineageValidity::Complete) {
+        return chain;
+    }
+    for (const auto& name : names.names) {
+        const auto txd = s_txds.find(name);
+        const auto source = s_txdSources.find(name);
+        if (txd == s_txds.end() || !txd->second || source == s_txdSources.end()) {
+            chain.dictionaries.clear();
+            chain.lineage.clear();
+            chain.validity = TxdLineageValidity::UnavailableDictionary;
+            return chain;
+        }
+        chain.dictionaries.push_back(txd->second);
+        chain.lineage.push_back(source->second);
+    }
+    return chain;
 }
 
 } // namespace
@@ -997,7 +1121,7 @@ bool StreamPager_Init(const char* gameDir, E2ELoadInfo& info, char* err, std::si
     assert(std::isfinite(options.radius) && options.radius > 0 && options.maxInstances > 0);
     s_options = options;
     s_collisionPopulation = {};
-    s_txdParentChildren.clear();
+    s_txdParents.clear();
     s_txdParentCatalogValid = true;
     s_collisionPopulation.IncludesStreamed = options.includeStreamed;
     info = E2ELoadInfo{};
@@ -1025,7 +1149,7 @@ bool StreamPager_Init(const char* gameDir, E2ELoadInfo& info, char* err, std::si
         std::vector<std::string> ide2;
         std::vector<std::string> ipl2;
         CollectDatLists(defaultDat, ide2, ipl2);
-        idePaths.insert(idePaths.end(), ide2.begin(), ide2.end());
+        idePaths.insert(options.includeStreamed ? idePaths.begin() : idePaths.end(), ide2.begin(), ide2.end());
         iplPaths.insert(iplPaths.end(), ipl2.begin(), ipl2.end());
     }
     if (idePaths.empty() || iplPaths.empty()) {
@@ -1040,6 +1164,9 @@ bool StreamPager_Init(const char* gameDir, E2ELoadInfo& info, char* err, std::si
     for (const std::string& rel : idePaths) {
         std::string text;
         if (!ReadGameText(game, rel, text)) {
+            if (options.includeStreamed) {
+                s_txdParentCatalogValid = false;
+            }
             continue;
         }
         ParseIdeText(text, s_ide, animModels, modelIds);
@@ -1090,7 +1217,7 @@ bool StreamPager_Init(const char* gameDir, E2ELoadInfo& info, char* err, std::si
             continue;
         }
         ImgIndex idx;
-        if (BuildImgIndex(abs, idx)) {
+        if (BuildImgIndex(abs, rel, idx)) {
             s_imgs.push_back(std::move(idx));
         }
     }
@@ -1128,6 +1255,7 @@ bool StreamPager_Init(const char* gameDir, E2ELoadInfo& info, char* err, std::si
     s_cache.clear();
     s_failed.clear();
     s_txds.clear();
+    s_txdSources.clear();
     s_txdOrder.clear();
     s_active.clear();
     s_sectorsLoaded = 0;
@@ -1344,9 +1472,15 @@ bool StreamPager_Update(float camX, float camY, float camZ, WorldShotScene& scen
         }
         wantModel[p.key]++;
         if (!p.txd.empty()) {
-            std::string tk = p.txd;
-            ToLowerInPlace(tk);
-            wantTxd[tk]++;
+            if (s_options.includeStreamed) {
+                for (const auto& txd : BuildTxdNameChain(p.txd).names) {
+                    wantTxd[txd]++;
+                }
+            } else {
+                std::string tk = p.txd;
+                ToLowerInPlace(tk);
+                wantTxd[tk]++;
+            }
         }
     }
 
@@ -1356,19 +1490,23 @@ bool StreamPager_Update(float camX, float camY, float camZ, WorldShotScene& scen
             continue;
         }
         std::vector<uint8> txdBytes;
-        if (FindInImgs(kv.first + ".txd", txdBytes)) {
+        NativeAssetIdentity::ArchiveMember sourceIdentity;
+        if (FindInImgs(kv.first + ".txd", txdBytes, nullptr, &sourceIdentity)) {
             rw::TexDictionary* txd = ParseTxd(txdBytes);
-            if (txd && txd->count() > 0) {
+            if (txd && (s_options.includeStreamed || txd->count() > 0)) {
                 s_txds[kv.first] = txd;
+                s_txdSources[kv.first] = std::move(sourceIdentity);
                 s_txdOrder.push_back(txd);
             } else {
                 if (txd) {
                     txd->destroy();
                 }
                 s_txds[kv.first] = nil;
+                s_txdSources.erase(kv.first);
             }
         } else {
             s_txds[kv.first] = nil;
+            s_txdSources.erase(kv.first);
         }
     }
 
@@ -1384,18 +1522,33 @@ bool StreamPager_Update(float camX, float camY, float camZ, WorldShotScene& scen
             txdName = iit->second.txd;
         }
         rw::TexDictionary* primary = nil;
-        if (!txdName.empty()) {
-            std::string tk = txdName;
-            ToLowerInPlace(tk);
-            auto tit = s_txds.find(tk);
-            if (tit != s_txds.end()) {
-                primary = tit->second;
-            }
-        }
         std::vector<rw::TexDictionary*> fb;
-        for (rw::TexDictionary* txd : s_txdOrder) {
-            if (txd && txd != primary) {
-                fb.push_back(txd);
+        TxdLookupChain sourceChain;
+        if (s_options.includeStreamed) {
+            sourceChain = BuildTxdLookupChain(txdName);
+            if (sourceChain.validity != TxdLineageValidity::Complete || sourceChain.dictionaries.empty()) {
+                const auto message = std::string{"unavailable authored TXD lineage for model "} + kv.first + " (" + txdName + ")";
+                SetErr(err, errSize, message.c_str());
+                return false;
+            }
+            if (sourceChain.validity == TxdLineageValidity::Complete &&
+                !sourceChain.dictionaries.empty()) {
+                primary = sourceChain.dictionaries.front();
+                fb.assign(sourceChain.dictionaries.begin() + 1, sourceChain.dictionaries.end());
+            }
+        } else {
+            if (!txdName.empty()) {
+                std::string tk = txdName;
+                ToLowerInPlace(tk);
+                auto tit = s_txds.find(tk);
+                if (tit != s_txds.end()) {
+                    primary = tit->second;
+                }
+            }
+            for (rw::TexDictionary* txd : s_txdOrder) {
+                if (txd && txd != primary) {
+                    fb.push_back(txd);
+                }
             }
         }
         std::vector<uint8> dffBytes;
@@ -1418,10 +1571,9 @@ bool StreamPager_Update(float camX, float camY, float camZ, WorldShotScene& scen
         std::map<const rw::Geometry*, std::vector<uint8>> nightColors;
         std::map<const rw::Geometry*, int> geometryOrdinals;
         bool ok = !s_options.includeStreamed || ReadNightColors(dffBytes, lc.clump, nightColors, geometryOrdinals);
-        std::string txdKey = txdName;
-        ToLowerInPlace(txdKey);
-        const bool sourceNullTextureAllowed = primary && s_txdParentCatalogValid && !s_txdParentChildren.contains(txdKey);
-        ok = ok && FlattenClumpStatic(lc.clump, lc, cached, nightColors, geometryOrdinals, sourceNullTextureAllowed);
+        const auto* identityChain = s_options.includeStreamed &&
+            sourceChain.validity == TxdLineageValidity::Complete ? &sourceChain : nullptr;
+        ok = ok && FlattenClumpStatic(lc.clump, lc, cached, nightColors, geometryOrdinals, identityChain);
         TexSample_FreeLinked(lc);
         if (!ok) {
             s_failed.insert(kv.first); // skinned or GPU-only: honestly skipped
@@ -1458,6 +1610,7 @@ bool StreamPager_Update(float camX, float camY, float camZ, WorldShotScene& scen
                 txd->destroy();
             }
             s_txds.erase(k);
+            s_txdSources.erase(k);
             for (auto it = s_txdOrder.begin(); it != s_txdOrder.end(); ++it) {
                 if (*it == txd) {
                     s_txdOrder.erase(it);
@@ -1479,6 +1632,7 @@ bool StreamPager_Update(float camX, float camY, float camZ, WorldShotScene& scen
     int tris = 0;
     std::set<std::string> usedModels;
     std::map<std::string, int> globalImg; // texture name -> scene image
+    std::map<NativeAssetIdentity::Texture, int> streamedGlobalImg;
     scene.images.clear();
     for (const Cand& c : cands) {
         const PagerInst& p = s_insts[static_cast<size_t>(c.row)];
@@ -1520,14 +1674,28 @@ bool StreamPager_Update(float camX, float camY, float camZ, WorldShotScene& scen
             int local = cached.triImg[ti];
             if (local >= 0 && local < static_cast<int>(cached.images.size())) {
                 const WorldShotImage& src = cached.images[local];
-                auto git = globalImg.find(src.name);
-                if (git != globalImg.end()) {
-                    mesh.triImg[ti] = git->second;
+                if (s_options.includeStreamed) {
+                    if (!src.hasSourceIdentity) {
+                        mesh.triImg[ti] = -2;
+                    } else if (auto git = streamedGlobalImg.find(src.sourceIdentity);
+                               git != streamedGlobalImg.end()) {
+                        mesh.triImg[ti] = git->second;
+                    } else {
+                        int gi = static_cast<int>(scene.images.size());
+                        scene.images.push_back(src);
+                        streamedGlobalImg[src.sourceIdentity] = gi;
+                        mesh.triImg[ti] = gi;
+                    }
                 } else {
-                    int gi = static_cast<int>(scene.images.size());
-                    scene.images.push_back(src);
-                    globalImg[src.name] = gi;
-                    mesh.triImg[ti] = gi;
+                    auto git = globalImg.find(src.name);
+                    if (git != globalImg.end()) {
+                        mesh.triImg[ti] = git->second;
+                    } else {
+                        int gi = static_cast<int>(scene.images.size());
+                        scene.images.push_back(src);
+                        globalImg[src.name] = gi;
+                        mesh.triImg[ti] = gi;
+                    }
                 }
             } else {
                 mesh.triImg[ti] = local;
@@ -1652,7 +1820,7 @@ void StreamPager_Counters(int& sectorsLoaded, int& sectorsEvicted, int& modelsPe
 
 void StreamPager_Shutdown() {
     s_collisionPopulation = {};
-    s_txdParentChildren.clear();
+    s_txdParents.clear();
     s_txdParentCatalogValid = true;
     for (rw::TexDictionary* txd : s_txdOrder) {
         if (txd) {
@@ -1661,6 +1829,7 @@ void StreamPager_Shutdown() {
     }
     s_txdOrder.clear();
     s_txds.clear();
+    s_txdSources.clear();
     s_cache.clear();
     s_failed.clear();
     s_insts.clear();
