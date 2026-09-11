@@ -94,6 +94,7 @@ static void IdeProperties(const std::string& line, const std::string& section, N
         m.Kind = NativeWorldModelKind::Clump;
         m.HasAnimBlend = anim == "null" ? NativeWorldKnownBool::False : NativeWorldKnownBool::True;
         m.DrawDistance = draw; m.IdeFlags = static_cast<uint32_t>(flags);
+        m.TxdName = txd; m.AnimationName = anim; m.TimeOn.reset(); m.TimeOff.reset();
         return;
     }
     if (section != "objs" && section != "tobj") return;
@@ -118,6 +119,9 @@ static void IdeProperties(const std::string& line, const std::string& section, N
     }
     Require(known, "invalid or unrepresented static IDE numeric grammar");
     m.DrawDistance = draw; m.IdeFlags = static_cast<uint32_t>(flags);
+    m.TxdName = txd; m.AnimationName.reset();
+    if (section == "tobj") { m.TimeOn = on; m.TimeOff = off; }
+    else { m.TimeOn.reset(); m.TimeOff.reset(); }
 }
 static std::string Resolve(const char* gameDir, std::string relative) {
     Require(gameDir && *gameDir, "missing game directory");

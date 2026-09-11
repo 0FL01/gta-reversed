@@ -2,14 +2,19 @@
 
 python3 -B /workspace/gta-reversed/source/app/platform/linux/NativeLodCatalogProbe.py
 Generated objects and derived evidence only: artifacts/graphics/NativeLodCatalog*.
+Runs the synthetic on-disk malformed-reader gate (valid baseline + four single-
+descriptor mutations) in a tempdir under artifacts/graphics, then the 50935
+real-data oracle. No /game writes, no tmp, no copied game bytes in the fixture.
 """
 import collections
 import json
 import math
 import pathlib
 import shlex
+import shutil
 import struct
 import subprocess
+import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[5]
 SOURCE = ROOT / 'gta-reversed/source/app/platform/linux'
@@ -150,10 +155,20 @@ def transform_hash(data):
 def main():
     assert OUT.is_dir()
     build()
-    result = subprocess.run([str(OUT / 'NativeLodCatalogProbe'), str(GAME)], capture_output=True, text=True, timeout=300)
-    (OUT / 'NativeLodCatalog-probe.log').write_text(result.stdout + result.stderr)
-    result.check_returncode()
-    output = [line.split('\t') for line in result.stdout.splitlines()]
+    fixture = pathlib.Path(tempfile.mkdtemp(prefix='NativeLodCatalog-fixture-', dir=OUT))
+    try:
+        result = subprocess.run([str(OUT / 'NativeLodCatalogProbe'), str(GAME), str(fixture)],
+                                capture_output=True, text=True, timeout=300)
+        (OUT / 'NativeLodCatalog-probe.log').write_text(result.stdout + result.stderr)
+        result.check_returncode()
+        output = [line.split('\t') for line in result.stdout.splitlines()]
+        disk = [r for r in output if r[0] == 'DISKFIXTURE']
+        assert disk == [['DISKFIXTURE', 'pass', 'baseline,other-section,advisory-size,advertised-range,actual-inst-range,actual-cargen-range,inst-budget,cumulative']], \
+            ('synthetic disk fixture', disk)
+    except BaseException:
+        print('fixture dir retained: ' + str(fixture))
+        raise
+    shutil.rmtree(fixture, ignore_errors=True)
     sources, placements, text_count = raw_catalog()
     actual_sources = [r[2:] for r in output if r[0] == 'SOURCE']
     assert actual_sources == [[str(v) for v in s] for s in sources], 'source order/provenance mismatch'
@@ -163,6 +178,17 @@ def main():
     assert len(sources) == 242 and sum(not s[2] for s in sources) == 52 and sum(bool(s[2]) for s in sources) == 190
     assert len(actual) == len(placements) == 50935 and text_count == 9268 and len(placements) - text_count == 41667
     assert sum(parent >= 0 for parent in parents) == 6103 and len(counts) == 6086 and statuses == {0: 44832, 1: 6103}
+    # Integrated source-review census: claims to verify, not targets to fit.
+    # Time-kind and distinct-ID counts are independently derivable from the raw
+    # IDE/IPL decode above; class counts come from the authoritative C++ metadata
+    # (IDE objs/tobj/anim + object.dat) via the probe CENSUS line.
+    assert sum(p['kind'] == 2 for p in placements) == 161, 'time placements 161'
+    assert len(set(p['ident'] for p in placements)) == 12839, 'placed static model IDs 12839 (not the 14259-entry IDE namespace)'
+    census = [r[1:] for r in output if r[0] == 'CENSUS']
+    assert len(census) == 1, 'missing integrated CENSUS line'
+    assert census[0] == ['242', '52', '190', '50935', '9268', '41667',
+                         '6103', '6086', '0', '161', '12839',
+                         '34759', '68', '16108', '0'], ('CENSUS mismatch', census[0])
     for i, (p, a) in enumerate(zip(placements, actual)):
         # SetupRelatedIpls' ppCurrIplInstance tail contains only streamed rows
         # with a raw LOD index; 0x5B5285 is not reached for unlinked binary rows.
@@ -214,7 +240,9 @@ def main():
                   edges=sum(n >= 0 for n in parents), lod_targets=len(counts),
                   statuses=dict(statuses),
                   child_count_histogram=dict(sorted(collections.Counter(counts.values()).items())),
-                  time_placements=sum(p['kind'] == 2 for p in placements), samples=samples, source_cases=special,
+                  time_placements=sum(p['kind'] == 2 for p in placements),
+                  distinct_model_ids=len(set(p['ident'] for p in placements)),
+                  census=census[0], samples=samples, source_cases=special,
                   graphics='UNRESOLVED: renderer does not consume graph',
                   runtime_semantics='Unknown: collision-load ownership, LinkLods mutation order/cache path, time counterpart residency')
     (OUT / 'NativeLodCatalog-oracle.json').write_text(json.dumps(report, indent=2) + '\n')

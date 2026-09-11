@@ -2,6 +2,8 @@
 #include "app/platform/linux/NativeWorldEntityInfo.h"
 #include "app/platform/linux/StreamPager.h"
 #include <cstdio>
+#include <cmath>
+#include <cstdint>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
@@ -44,7 +46,8 @@ static void Fixtures() {
     using B = NativeWorldKnownBool;
     const std::vector<NativeWorldEntitySourceText> ide{
         {"first.ide", "objs\n10 oldname txd 100 0\n11 plain txd 100 0\n12 lod_dummy txd 100 0\nend\ntobj\n13 door_dy txd 100 0 6 20\n14 door_nt txd 100 0 20 6\nend\n"},
-        {"second.ide", "objs\n10 NewName txd 100 0\n15 def0 txd 100 0\n16 def1 txd 100 0\n17 def2 txd 100 0\n18 def3 txd 100 0\nend\nanim\n20 inert txd null 100 0\n21 moving txd NULL 100 0\n22 assignedanim txd anim 100 0\nend\n"}
+        {"second.ide", "objs\n10 NewName txd 100 0\n15 def0 txd 100 0\n16 def1 txd 100 0\n17 def2 txd 100 0\n18 def3 txd 100 0\nend\nanim\n20 inert txd null 100 0\n21 moving txd NULL 100 0\n22 assignedanim txd anim 100 0\nend\n"},
+        {"third.ide", "objs\n30 mixedcase MixedTXD 100 0\nend\nanim\n31 animmodel AnimTXD myanim 100 0\nend\ntobj\n32 negtime NegTXD 100 0 -12 300\n33 extremes BigTXD 100 0 -2147483648 2147483647\nend\n"}
     };
     const NativeWorldEntitySourceText objects{"object-fixture.dat",
         " ; comment\n# comment\n"
@@ -62,10 +65,12 @@ static void Fixtures() {
     NativeCollisionPopulation pop;
     for (auto [id, name] : std::initializer_list<std::pair<int, const char*>>{
         {10,"newname"},{11,"plain"},{12,"lod_dummy"},{13,"door_dy"},{14,"door_nt"},
-        {15,"def0"},{16,"def1"},{17,"def2"},{18,"def3"},{20,"inert"},{21,"moving"},{22,"assignedanim"},{99,"unknown"}}) {
+        {15,"def0"},{16,"def1"},{17,"def2"},{18,"def3"},{20,"inert"},{21,"moving"},{22,"assignedanim"},
+        {30,"mixedcase"},{31,"animmodel"},{32,"negtime"},{33,"extremes"},{99,"unknown"}}) {
         pop.Models[id] = {name, false}; pop.Instances.push_back(Placement(id, name, id));
     }
     pop.Models[13].TimeModel = pop.Models[14].TimeModel = true;
+    pop.Models[32].TimeModel = pop.Models[33].TimeModel = true;
     pop.Instances[0].Interior = 256; // Explicit legacy/import fixture: full word not certified.
     pop.Instances[1].Binary = true; pop.Instances[1].Flags = 0x300;
     NativeWorldEntityInfo info; std::string error;
@@ -92,6 +97,28 @@ static void Fixtures() {
     }
     Require(model(20,"inert").InitialClass == C::Building && model(21,"moving").InitialClass == C::AnimatedBuilding &&
             model(22,"assignedanim").InitialClass == C::DummyObject, "case-sensitive anim null / dummy precedence");
+    Require(model(11,"plain").TxdName == "txd" && !model(11,"plain").AnimationName &&
+            !model(11,"plain").TimeOn && !model(11,"plain").TimeOff &&
+            model(11,"plain").Kind == NativeWorldModelKind::Atomic, "objs TXD/kind without anim/time");
+    Require(model(13,"door_dy").TxdName == "txd" && !model(13,"door_dy").AnimationName &&
+            model(13,"door_dy").TimeOn == 6 && model(13,"door_dy").TimeOff == 20 &&
+            model(13,"door_dy").Kind == NativeWorldModelKind::TimeAtomic, "tobj TXD/signed hours preserved");
+    Require(model(20,"inert").TxdName == "txd" && model(20,"inert").AnimationName == "null" &&
+            !model(20,"inert").TimeOn && !model(20,"inert").TimeOff &&
+            model(20,"inert").Kind == NativeWorldModelKind::Clump, "anim null filename preserved exactly");
+    Require(model(21,"moving").AnimationName == "NULL" && model(22,"assignedanim").AnimationName == "anim" &&
+            model(22,"assignedanim").TxdName == "txd", "anim filename case preserved");
+    Require(model(30,"mixedcase").TxdName == "MixedTXD" && !model(30,"mixedcase").AnimationName &&
+            !model(30,"mixedcase").TimeOn && model(30,"mixedcase").Kind == NativeWorldModelKind::Atomic,
+            "objs exact authored TXD spelling");
+    Require(model(31,"animmodel").TxdName == "AnimTXD" && model(31,"animmodel").AnimationName == "myanim" &&
+            !model(31,"animmodel").TimeOn && model(31,"animmodel").Kind == NativeWorldModelKind::Clump,
+            "anim TXD/filename preserved");
+    Require(model(32,"negtime").TxdName == "NegTXD" && model(32,"negtime").TimeOn == -12 &&
+            model(32,"negtime").TimeOff == 300 && !model(32,"negtime").AnimationName,
+            "arbitrary signed tobj hours accepted without 0..24 invention");
+    Require(model(33,"extremes").TimeOn == INT32_MIN && model(33,"extremes").TimeOff == INT32_MAX,
+            "full signed int32 tobj range preserved");
     const auto text = info.Query(pop.Instances[0]), binary = info.Query(pop.Instances[1]);
     Require(text.Placement && !text.Placement->SourceInstanceType && text.Placement->Area == 0 &&
             binary.Placement && binary.Placement->SourceInstanceType == 0x300 && binary.Placement->Area == 0,
@@ -127,15 +154,42 @@ static void Fixtures() {
     auto moved = pop.Instances[0]; moved.Position = {1,2,3};
     Require(info.Query(moved).Status == NativeWorldInfoStatus::Ready, "replacement position preserves identity");
     const auto* preserved = info.FindModel(10,"newname");
+    const auto preservedTxd = preserved->TxdName;
+    const auto preservedAnim = preserved->AnimationName;
+    const auto preservedOn = preserved->TimeOn;
+    const auto* preservedTime = info.FindModel(32,"negtime");
+    const auto preservedTimeOn = preservedTime->TimeOn;
+    const auto preservedTimeOff = preservedTime->TimeOff;
+    const auto* preservedAnimModel = info.FindModel(31,"animmodel");
+    const auto preservedAnimName = preservedAnimModel->AnimationName;
     auto reject = [&](const NativeCollisionPopulation& badPop, const auto& badIde, const auto& badObjects) {
         Require(!info.LoadSources(badPop, badIde, badObjects, error) && !error.empty() &&
-                info.FindModel(10,"newname") == preserved && info.Query(pop.Instances[0]).Model == preserved,
+                info.FindModel(10,"newname") == preserved && info.Query(pop.Instances[0]).Model == preserved &&
+                preserved->TxdName == preservedTxd && preserved->AnimationName == preservedAnim &&
+                preserved->TimeOn == preservedOn && preservedTime->TimeOn == preservedTimeOn &&
+                preservedTime->TimeOff == preservedTimeOff && preservedAnimModel->AnimationName == preservedAnimName,
                 "invalid load must preserve exact owner allocation");
     };
     reject(pop, ide, NativeWorldEntitySourceText{"bad", "plain 1 2 3\n"});
     reject(pop, ide, NativeWorldEntitySourceText{"bad", "plain 1 2 3 4 5 6 7 0 0 0 0 999999999999999999999\n"});
     auto malformed = ide; malformed.push_back({"bad.ide", "objs\n10 newname txd nonsense 0\nend\n"});
     reject(pop, malformed, objects);
+    auto missingTxd = ide; missingTxd.push_back({"bad.ide", "objs\n40 badmodel\nend\n"});
+    reject(pop, missingTxd, objects);
+    auto shortObjs = ide; shortObjs.push_back({"bad.ide", "objs\n40 badmodel txd\nend\n"});
+    reject(pop, shortObjs, objects);
+    auto longTxd = ide; longTxd.push_back({"bad.ide", "objs\n40 badmodel THIS_TXD_NAME_IS_WAY_TOO_LONG 100 0\nend\n"});
+    reject(pop, longTxd, objects);
+    auto missingAnim = ide; missingAnim.push_back({"bad.ide", "anim\n41 badanim txd\nend\n"});
+    reject(pop, missingAnim, objects);
+    auto shortAnim = ide; shortAnim.push_back({"bad.ide", "anim\n41 badanim txd myanim\nend\n"});
+    reject(pop, shortAnim, objects);
+    auto missingTime = ide; missingTime.push_back({"bad.ide", "tobj\n42 badtime txd 100 0\nend\n"});
+    reject(pop, missingTime, objects);
+    auto badTime = ide; badTime.push_back({"bad.ide", "tobj\n42 badtime txd 100 0 noon midnight\nend\n"});
+    reject(pop, badTime, objects);
+    auto badTimeRange = ide; badTimeRange.push_back({"bad.ide", "tobj\n42 badtime txd 100 0 9999999999 -9999999999\nend\n"});
+    reject(pop, badTimeRange, objects);
     auto ambiguous = ide; ambiguous.push_back({"alias.ide", "cars\n77 NEWNAME txd\nend\n"});
     reject(pop, ambiguous, objects); // Non-static namespace matters to source lookup too.
     auto wrong = pop; wrong.Models[10].Name = "oldname"; reject(wrong, ide, objects);
@@ -172,10 +226,24 @@ int main(int argc, char** argv) try {
     StreamPager_Shutdown(); // The metadata owns its copies; no pager pointers.
     s_Sealed = true; const auto opens = s_Opens;
     for (const auto& [id, m] : info.Models()) {
+        Require(!m.TxdName.empty() && m.TxdName.size() <= 23, "actual TXD identity");
+        Require(m.DrawDistance && std::isfinite(*m.DrawDistance) && m.IdeFlags, "actual draw/flags retained");
+        if (m.Kind == NativeWorldModelKind::Clump) {
+            Require(m.AnimationName && !m.AnimationName->empty() && m.AnimationName->size() <= 15 &&
+                    !m.TimeOn && !m.TimeOff, "actual anim filename without tobj hours");
+        } else if (m.Kind == NativeWorldModelKind::TimeAtomic) {
+            Require(!m.AnimationName && m.TimeOn && m.TimeOff, "actual tobj hours without anim filename");
+        } else {
+            Require(m.Kind == NativeWorldModelKind::Atomic && !m.AnimationName && !m.TimeOn && !m.TimeOff,
+                    "actual objs without anim/time");
+        }
         std::cout << "MODEL\t" << id << '\t' << m.Name << '\t' << static_cast<int>(m.InitialClass) << '\t'
                   << m.Ide.Source << '\t' << m.Ide.Line << '\t' << m.ObjectRows.size() << '\t'
                   << (m.ObjectRows.empty() ? 0 : m.ObjectRows.back().Line) << '\t'
-                  << (m.DefaultObjectInfoIndex ? int(*m.DefaultObjectInfoIndex) : -1) << '\n';
+                  << (m.DefaultObjectInfoIndex ? int(*m.DefaultObjectInfoIndex) : -1) << '\t'
+                  << m.TxdName << '\t' << (m.AnimationName ? *m.AnimationName : std::string()) << '\t'
+                  << (m.TimeOn ? std::to_string(*m.TimeOn) : std::string("none")) << '\t'
+                  << (m.TimeOff ? std::to_string(*m.TimeOff) : std::string("none")) << '\n';
     }
     std::array<size_t, 4> all{}, window{};
     for (const auto& p : context->Population.Instances) {
@@ -208,11 +276,15 @@ int main(int argc, char** argv) try {
         const auto q = info.Query(p);
         if (p.ModelId == 1224 && p.Record == 63) {
             Require(p.Model == "woodenbox" && q.InitialBuildingMask() == NativeWorldKnownBool::False &&
-                    q.Model->ObjectRows.back().Line == 126, "woodenbox source ground counterexample"); crate = true;
+                    q.Model->ObjectRows.back().Line == 126 && !q.Model->TxdName.empty() &&
+                    !q.Model->AnimationName && !q.Model->TimeOn && !q.Model->TimeOff,
+                    "woodenbox source ground counterexample"); crate = true;
         }
         if (p.ModelId == 16177 && p.Record == 32) {
             Require(p.Model == "ne_bit_07" && q.InitialBuildingMask() == NativeWorldKnownBool::True &&
-                    q.Model->ObjectRows.empty() && q.Model->Ide.Line == 179, "Rustler terrain witness classification"); terrain = true;
+                    q.Model->ObjectRows.empty() && q.Model->Ide.Line == 179 && !q.Model->TxdName.empty() &&
+                    !q.Model->AnimationName && !q.Model->TimeOn && !q.Model->TimeOff,
+                    "Rustler terrain witness classification"); terrain = true;
         }
     }
     Require(crate && terrain && opens == s_Opens, "witness coverage / frame IO");

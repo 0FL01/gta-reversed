@@ -1,7 +1,9 @@
 // Initial source entity classification, owned before worker startup. No RW state.
 #pragma once
 #include "app/platform/linux/NativeCollisionAssets.h"
+#include <cstdint>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <tuple>
 
@@ -23,6 +25,14 @@ struct NativeWorldModelInfo {
     NativeWorldKnownBool HasAnimBlend = NativeWorldKnownBool::Unknown;
     std::optional<float> DrawDistance;
     std::optional<uint32_t> IdeFlags;
+    // Exact authored static IDE metadata for objs/anim/tobj; empty/nullopt for other families.
+    // TxdName preserves the authored TXD spelling. AnimationName preserves the authored
+    // anim filename (including "null") for anim only. TimeOn/TimeOff preserve the authored
+    // tobj signed hour integers with no invented 0..24 bounds; source narrows runtime later.
+    std::string TxdName;
+    std::optional<std::string> AnimationName;
+    std::optional<int32_t> TimeOn;
+    std::optional<int32_t> TimeOff;
     NativeWorldObjectAssignment ObjectInfo = NativeWorldObjectAssignment::Unknown;
     // Ordered successful assignments, including duplicates and default assignments.
     std::vector<NativeWorldSourceRow> ObjectRows;

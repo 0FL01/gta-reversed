@@ -52,8 +52,16 @@ def reference():
                 section = None if t[0] == 'end' else t[0]
                 continue
             if section in ('objs', 'tobj', 'anim', 'cars', 'peds', 'weap', 'hier'):
-                models[int(t[0])] = dict(name=t[1], section=section, ide=ide, line=line,
-                                         anim=section == 'anim' and t[3] != 'null', objects=[], default=-1)
+                entry = dict(name=t[1], section=section, ide=ide, line=line,
+                             anim=section == 'anim' and t[3] != 'null', objects=[], default=-1,
+                             txd=t[2], animName=t[3] if section == 'anim' else '',
+                             timeOn=None, timeOff=None)
+                if section == 'tobj':
+                    entry['timeOn'], entry['timeOff'] = int(t[-2]), int(t[-1])
+                    assert -(2 ** 31) <= entry['timeOn'] < 2 ** 31 and -(2 ** 31) <= entry['timeOff'] < 2 ** 31
+                if section == 'anim':
+                    assert len(t) >= 6
+                models[int(t[0])] = entry
     keys = collections.defaultdict(list)
     key = lambda name: zlib.crc32(name.upper().encode('ascii')) ^ 0xffffffff
     for ident, model in models.items(): keys[key(model['name'])].append(ident)
@@ -139,10 +147,16 @@ def main():
     for line in result.stdout.splitlines():
         t = line.split('\t')
         if t[0] == 'MODEL':
-            _, ident, name, cls, ide, row, nobjects, last, default = t
+            _, ident, name, cls, ide, row, nobjects, last, default, txd, animName, timeOn, timeOff = t
             ident = int(ident); m = models[ident]; seen.add(ident)
             assert (name, int(cls), ide, int(row), int(nobjects), int(last), int(default)) == (
                 m['name'], m['class'], m['ide'], m['line'], len(m['objects']), m['objects'][-1] if m['objects'] else 0, m['default']), (ident, t, m)
+            assert txd == m['txd'] and animName == m['animName'], (ident, t, m)
+            assert timeOn == ('none' if m['timeOn'] is None else str(m['timeOn'])) and timeOff == (
+                'none' if m['timeOff'] is None else str(m['timeOff'])), (ident, t, m)
+            assert bool(txd) and (m['section'] != 'anim' or bool(animName)), (ident, t, m)
+            assert (m['section'] == 'tobj') == (timeOn != 'none' and timeOff != 'none'), (ident, t, m)
+            assert (m['section'] == 'anim') == bool(animName), (ident, t, m)
         elif t[0] == 'WINDOW': window[models[int(t[1])]['class']] += 1
         elif t[0] == 'ADDED':
             key = (t[1], int(t[2]), int(t[3]))

@@ -85,7 +85,7 @@ static std::string Stem(std::string path) {
     Require(dot != std::string::npos, "Error: IPL source extension missing");
     return Lower(name.substr(0, dot));
 }
-static void ReadText(const char* gameDir, NativeLodSource& source) {
+static void ReadText(const char* gameDir, NativeLodSource& source, size_t remaining) {
     std::string section;
     Lines(gameDir, source.Key, [&](const std::string& line, uint32_t number) {
         std::istringstream scan(line); std::string first; scan >> first;
@@ -102,17 +102,44 @@ static void ReadText(const char* gameDir, NativeLodSource& source) {
         Require(!scan.fail(), "Error: invalid IPL " + source.Key + ":" + std::to_string(number));
         p.Ipl = source.Key; p.Record = source.Records.size(); p.Model = Lower(p.Model);
         p.Flags = static_cast<uint32_t>(flags); p.Interior = p.Flags & 255;
+        // Cumulative allocation is bounded before append by the independent
+        // StreamPager population, not a per-source constant.
+        Require(source.Records.size() < remaining, "Error: IPL record budget " + source.Key);
         source.Records.push_back(std::move(p));
-        Require(source.Records.size() <= 250000, "Error: IPL record budget");
         return true;
     });
 }
-static void ReadBinary(File& file, NativeLodSource& source, const NativeCollisionPopulation& population) {
+static void ReadBinary(File& file, NativeLodSource& source, const NativeCollisionPopulation& population, size_t totalSoFar) {
     auto data = file.Read(uint64_t(source.Sector) * 2048, size_t(source.Sectors) * 2048);
     Require(data.size() >= 76 && std::memcmp(data.data(), "bnry", 4) == 0, "Error: unsupported archive IPL " + source.Key);
+    Require(totalSoFar <= population.Instances.size(), "Error: IPL record budget " + source.Key);
+    const size_t remaining = population.Instances.size() - totalSoFar;
+    // All six tBinaryIplFile section descriptors must fit the IMG member bytes.
+    // Counts at 4,8,12,16,20,24; offsets at 28,36,44,52,60,68; sizes at +4.
+    // Follows NativeCarGenerators::ParseBinaryIpl: empty sections (count==0 &&
+    // size==0) carry no extent; anything else must declare offset/size in-member.
+    constexpr size_t kHeaderSize = 76; // sizeof(tBinaryIplFile) == 0x4C
+    for (size_t i = 0; i < 6; ++i) {
+        const auto secCount = Word(data, 4 + i * 4);
+        const auto secOffset = Word(data, 28 + i * 8);
+        const auto secSize = Word(data, 32 + i * 8);
+        if (!secCount && !secSize) continue;
+        Require(secOffset >= kHeaderSize && secOffset <= data.size() && secSize <= data.size() - secOffset,
+                "Error: binary IPL section outside member " + source.Key);
+    }
     const auto count = Word(data, 4), start = Word(data, 28);
-    Require(count <= 250000 && (!count || (start >= 76 && start <= data.size() && count <= (data.size() - start) / 40)),
+    Require(count <= remaining, "Error: IPL record budget " + source.Key);
+    Require(count <= 250000 && (!count || (start >= kHeaderSize && start <= data.size() && uint64_t(count) * 40 <= data.size() - start)),
             "Error: binary inst table bounds " + source.Key);
+    // Source tBinaryIplFile spans use counts, not size fields (all stock sizes
+    // are zero). Advertised ranges above do not bound count-derived storage.
+    // Car-generator descriptor member size is 0x30 (CFileCarGenerator). Contents are
+    // never interpreted here; only bounds are validated.
+    const auto carCount = Word(data, 20), carOffset = Word(data, 60);
+    Require(!carCount || (carOffset >= kHeaderSize && carOffset <= data.size() &&
+            uint64_t(carCount) * 0x30 <= data.size() - carOffset),
+            "Error: binary car-generator records out of bounds " + source.Key);
+    // No interpreting non-inst sections beyond bounds.
     for (uint32_t r = 0; r < count; ++r) {
         const auto at = start + r * 40;
         NativeCollisionPlacement p;
@@ -125,11 +152,14 @@ static void ReadBinary(File& file, NativeLodSource& source, const NativeCollisio
         const auto model = population.Models.find(p.ModelId);
         Require(model != population.Models.end(), "Error: binary IPL model missing from full IDE namespace");
         p.Model = Lower(model->second.Name);
+        Require(source.Records.size() < remaining, "Error: IPL record budget " + source.Key);
         source.Records.push_back(std::move(p));
     }
 }
 static std::vector<NativeLodSource> ReadCatalog(const char* gameDir, const NativeCollisionPopulation& population) {
+    Require(population.Instances.size() <= 250000, "Error: full source population/catalog required");
     std::vector<NativeLodSource> sources;
+    size_t total{};
     // Game.cpp: DEFAULT then main DAT. Streaming::InitImageList 0x4083C0.
     std::vector<std::pair<std::string, NativeWorldSourceRow>> archives{
         {"MODELS\\GTA3.IMG", {"CStreaming::InitImageList@0x4083C0", 0}},
@@ -149,7 +179,10 @@ static std::vector<NativeLodSource> ReadCatalog(const char* gameDir, const Nativ
             Require(!path.empty() && sources.size() < 1024, "Error: DAT IPL declaration bounds");
             NativeLodSource source;
             source.Key = path; source.Name = Stem(path); source.Declaration = {dat, number};
-            ReadText(gameDir, source); sources.push_back(std::move(source));
+            Require(total <= population.Instances.size(), "Error: IPL record budget " + source.Key);
+            ReadText(gameDir, source, population.Instances.size() - total); total += source.Records.size();
+            Require(total <= population.Instances.size(), "Error: IPL record budget " + source.Key);
+            sources.push_back(std::move(source));
             return true;
         });
     }
@@ -178,7 +211,10 @@ static std::vector<NativeLodSource> ReadCatalog(const char* gameDir, const Nativ
             source.Declaration = declaration; source.Sector = Word(directory, r * 32);
             const auto sizes = Word(directory, r * 32 + 4);
             source.Sectors = (sizes >> 16) ? sizes >> 16 : sizes & 65535;
-            ReadBinary(file, source, population); sources.push_back(std::move(source));
+            Require(total <= population.Instances.size(), "Error: IPL record budget " + source.Key);
+            ReadBinary(file, source, population, total); total += source.Records.size();
+            Require(total <= population.Instances.size(), "Error: IPL record budget " + source.Key);
+            sources.push_back(std::move(source));
             Require(sources.size() <= 1024, "Error: IPL source budget");
         }
     }
@@ -198,6 +234,39 @@ std::shared_ptr<const NativeLodCatalog> NativeLodCatalog::LoadBeforeWorker(
     for (const auto& node : result->m_Nodes) {
         Require(node.Link == NativeLodLinkStatus::None || node.Link == NativeLodLinkStatus::Bound,
                 node.Evidence + " " + node.Identity.Ipl + ":" + std::to_string(node.Identity.Record));
+        // Disk validation requires complete source static model/placement metadata for
+        // every node. Pure Assemble stays permissive for synthetic graphs and
+        // unrepresented models; only this disk path certifies provenance.
+        const auto provenance = node.Identity.Ipl + ":" + std::to_string(node.Identity.Record);
+        const auto meta = result->m_Metadata.Query(node.Placement);
+        Require(meta.Status == NativeWorldInfoStatus::Ready && meta.Model && meta.Placement,
+                "Error: catalog placement lacks complete source metadata " + provenance);
+        Require(meta.Placement->SourceInstanceType && *meta.Placement->SourceInstanceType == node.Placement.Flags,
+                "Error: catalog placement lacks certified source instance type " + provenance);
+        Require(meta.Model->Kind != NativeWorldModelKind::Unknown &&
+                    meta.Model->InitialClass != NativeWorldInitialClass::Unknown,
+                "Error: catalog model lacks static classification " + provenance);
+        Require(meta.Model->DrawDistance && meta.Model->IdeFlags,
+                "Error: catalog model lacks authored draw/flags " + provenance);
+        Require(!meta.Model->TxdName.empty(), "Error: catalog model lacks authored TXD " + provenance);
+        switch (meta.Model->Kind) {
+        case NativeWorldModelKind::Atomic:
+            Require(!meta.Model->AnimationName && !meta.Model->TimeOn && !meta.Model->TimeOff,
+                    "Error: atomic model carries non-authored anim/time " + provenance);
+            break;
+        case NativeWorldModelKind::TimeAtomic:
+            // Authored tobj hours are preserved verbatim; no invented 0..24 range.
+            Require(meta.Model->TimeOn && meta.Model->TimeOff && !meta.Model->AnimationName,
+                    "Error: time model lacks authored hours " + provenance);
+            break;
+        case NativeWorldModelKind::Clump:
+            Require(meta.Model->AnimationName && !meta.Model->TimeOn && !meta.Model->TimeOff,
+                    "Error: clump model lacks authored animation " + provenance);
+            break;
+        default:
+            Require(false, "Error: catalog model lacks static kind " + provenance);
+            break;
+        }
     }
     result->m_DiskValidated = true;
     return result;
