@@ -25,6 +25,9 @@
 
 #include <cstddef>
 #include <array>
+#include <cstdint>
+#include <optional>
+#include <span>
 
 #include "app/platform/linux/WorldShot.h"
 
@@ -66,12 +69,34 @@ struct CarPoseAudit {
 
 enum class CarPoseTextures { ModelOnly, RealtimeVehicle };
 enum class CarPoseGeometry { FromTextureMode, StoredAtomics, PristineNear };
+// Source identity is validated before posing. Flags remain source provenance;
+// alpha-zero suppression is presentation, never a rewritten RpAtomic flag.
+struct VehicleAtomicOverride {
+    std::uint32_t SourceAtomic{}, SourceFrame{}, SourceGeometry{};
+    std::optional<bool> Visible;
+    std::optional<std::uint8_t> MaterialAlpha;
+    std::optional<std::uint32_t> BindFrame; // source preprocessing reattachment
+};
+struct VehicleFrameOverride {
+    std::uint32_t Frame{};
+    std::array<float, 12> LocalMatrix{}; // replacement, not a delta
+};
+inline const VehicleAtomicOverride* CarPose_FindAtomicOverride(
+    std::span<const VehicleAtomicOverride> overrides, std::uint32_t atomic) {
+    for (const auto& value : overrides) if (value.SourceAtomic == atomic) return &value;
+    return nullptr;
+}
+inline bool CarPose_OverrideVisible(const VehicleAtomicOverride* value) {
+    return !value || (value->Visible.value_or(true) && value->MaterialAlpha != 0);
+}
 struct CarPoseComponents {
     CarPoseGeometry geometry = CarPoseGeometry::FromTextureMode;
     // Forced instance choices, like CVehicleModelInfo::ms_compsToUse: -1 is
     // none, 0..5 index the available extra1..extra6 atomics in descriptor order
     // (missing frames do not consume indices). No weather/RNG selection here.
     std::array<int, 2> extras{-1, -1};
+    std::span<const VehicleAtomicOverride> atomics;
+    std::span<const VehicleFrameOverride> frames;
 };
 // ModelOnly preserves the historical offline fixtures. RealtimeVehicle requires
 // the common vehicle TXD and uses upstream common-before-model name resolution.

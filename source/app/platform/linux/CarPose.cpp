@@ -693,6 +693,69 @@ bool CarPose_Init(const char* gameDir, const char* model, double steerDeg, doubl
         return false;
     }
 
+    // Resolve original DFF ordinals against librw's clump order, before any
+    // visibility selection or reattachment. Never infer identity from meshes.
+    std::map<rw::Atomic*, const VehicleAtomicOverride*> atomicOverrides;
+    const auto rejectOverride = [&](const char* message) {
+        TexSample_FreeLinked(lc);
+        SetErr(err, errSize, message);
+        return false;
+    };
+    if (!components.atomics.empty() || !components.frames.empty()) {
+        std::vector<rw::Atomic*> atomics;
+        FORLIST(link, lc.clump->atomics) atomics.push_back(rw::Atomic::fromClump(link));
+        std::vector<std::array<uint32, 3>> stored;
+        uint32 clumpSize{};
+        std::memcpy(&clumpSize, dffBytes.data() + 4, 4);
+        if (clumpSize > dffBytes.size() - 12) return rejectOverride("override clump bounds");
+        for (size_t p = 12; p < 12ull + clumpSize;) {
+            if (12ull + clumpSize - p < 12) return rejectOverride("override chunk header");
+            uint32 type{}, size{};
+            std::memcpy(&type, dffBytes.data() + p, 4);
+            std::memcpy(&size, dffBytes.data() + p + 4, 4);
+            if (size > 12ull + clumpSize - p - 12) return rejectOverride("override chunk bounds");
+            if (type == 20) {
+                uint32 st{}, ss{};
+                if (size < 28) return rejectOverride("override atomic bounds");
+                std::memcpy(&st, dffBytes.data() + p + 12, 4);
+                std::memcpy(&ss, dffBytes.data() + p + 16, 4);
+                if (st != 1 || ss != 16) return rejectOverride("override atomic struct");
+                std::array<uint32, 3> value{};
+                std::memcpy(value.data(), dffBytes.data() + p + 24, 12);
+                stored.push_back(value);
+            }
+            p += 12ull + size;
+        }
+        if (stored.size() != atomics.size()) return rejectOverride("override atomic count");
+        for (size_t i = 0; i < stored.size(); ++i) {
+            if (stored[i][0] >= byRaw.size() || atomics[i]->getFrame() != byRaw[stored[i][0]] ||
+                atomics[i]->getFlags() != stored[i][2]) return rejectOverride("override source atomic order/flags");
+        }
+        std::set<uint32> targets;
+        for (const auto& value : components.atomics) {
+            if (!targets.insert(value.SourceAtomic).second || value.SourceAtomic >= stored.size())
+                return rejectOverride("duplicate/missing atomic override target");
+            const auto& source = stored[value.SourceAtomic];
+            if (source[0] != value.SourceFrame || source[1] != value.SourceGeometry ||
+                (value.BindFrame && *value.BindFrame >= byRaw.size()))
+                return rejectOverride("nonmatching atomic override binding");
+            atomicOverrides.emplace(atomics[value.SourceAtomic], &value);
+        }
+        targets.clear();
+        for (const auto& value : components.frames) {
+            if (!targets.insert(value.Frame).second || value.Frame >= byRaw.size())
+                return rejectOverride("duplicate/missing frame override target");
+            for (float scalar : value.LocalMatrix) if (!std::isfinite(scalar))
+                return rejectOverride("nonfinite frame override");
+            const auto& m = value.LocalMatrix;
+            const float det = m[0]*(m[4]*m[8]-m[5]*m[7]) - m[1]*(m[3]*m[8]-m[5]*m[6]) + m[2]*(m[3]*m[7]-m[4]*m[6]);
+            if (!std::isfinite(det) || std::abs(det) < 1e-9f) return rejectOverride("singular frame override");
+        }
+        for (const auto& [atomic, value] : atomicOverrides) {
+            if (value->BindFrame) atomic->setFrame(byRaw[*value->BindFrame]);
+        }
+    }
+
     const bool pristine = components.geometry == CarPoseGeometry::PristineNear ||
         (components.geometry == CarPoseGeometry::FromTextureMode && textures == CarPoseTextures::RealtimeVehicle);
     std::map<rw::Frame*, const RawFrame*> frameInfo;
@@ -731,6 +794,8 @@ bool CarPose_Init(const char* gameDir, const char* model, double steerDeg, doubl
         }
     }
     const auto visible = [&](rw::Atomic* atomic) {
+        const auto it = atomicOverrides.find(atomic);
+        if (it != atomicOverrides.end() && !CarPose_OverrideVisible(it->second)) return false;
         if (!pristine) return true;
         const auto& name = frameInfo.at(atomic->getFrame())->name;
         // HideDamagedAtomicCB (0x4C7720): strstr, case-sensitive, on the
@@ -815,6 +880,7 @@ bool CarPose_Init(const char* gameDir, const char* model, double steerDeg, doubl
     // is body and must stay byte-identical through the pose. ---
     struct KitGeom {
         rw::Geometry* geo = nil;
+        rw::Atomic* atomic = nil;
         rw::Frame* frame = nil; // its stored atomic frame
         rw::Frame* owner = nil; // wheel dummy above it
     };
@@ -822,7 +888,7 @@ bool CarPose_Init(const char* gameDir, const char* model, double steerDeg, doubl
     std::vector<rw::Atomic*> bodyAtomics;
     FORLIST(link, lc.clump->atomics) {
         rw::Atomic* atomic = rw::Atomic::fromClump(link);
-        if (pristine) {
+        if (pristine || !atomicOverrides.empty()) {
             bool extra = false;
             for (auto* candidate : extras) extra |= candidate == atomic;
             if (extra || !visible(atomic)) continue;
@@ -848,6 +914,7 @@ bool CarPose_Init(const char* gameDir, const char* model, double steerDeg, doubl
         if (owner) {
             KitGeom k;
             k.geo = geo;
+            k.atomic = atomic;
             k.frame = af;
             k.owner = owner;
             kit.push_back(k);
@@ -911,6 +978,17 @@ bool CarPose_Init(const char* gameDir, const char* model, double steerDeg, doubl
     // about its axle first, then yaws the whole assembly, then translates.
     // POSTCONCAT would orbit the wheel around the car root instead (caught
     // by the audit: the dummy position must not move).
+    for (const auto& value : components.frames) {
+        auto* frame = byRaw[value.Frame];
+        const auto& v = value.LocalMatrix;
+        frame->matrix.setIdentity();
+        frame->matrix.right = rw::makeV3d(v[0], v[1], v[2]);
+        frame->matrix.up = rw::makeV3d(v[3], v[4], v[5]);
+        frame->matrix.at = rw::makeV3d(v[6], v[7], v[8]);
+        frame->matrix.pos = rw::makeV3d(v[9], v[10], v[11]);
+        frame->matrix.flags = 0; // replacement may include nonuniform scale
+        frame->updateObjects();
+    }
     for (const Wheel& w : wheels) {
         if (w.front && steerDeg != 0.0) {
             w.frame->rotate(&zAxis, static_cast<float>(steerDeg), rw::COMBINEPRECONCAT);
@@ -941,7 +1019,7 @@ bool CarPose_Init(const char* gameDir, const char* model, double steerDeg, doubl
     const bool hasPaint = LoadPaint(wantLower, paint, paintIndices);
     std::map<const rw::Texture*, int> imgCache;
     std::vector<bool> imageAlpha;
-    auto emitTris = [&](rw::Geometry* geo, const rw::Matrix& m, int& meshTris, bool& ok) {
+    auto emitTris = [&](rw::Geometry* geo, rw::Atomic* atomic, const rw::Matrix& m, int& meshTris, bool& ok) {
         ok = true;
         const int numVerts = geo->numVertices;
         rw::V3d* verts = geo->morphTargets[0].vertices;
@@ -951,7 +1029,16 @@ bool CarPose_Init(const char* gameDir, const char* model, double steerDeg, doubl
         std::vector<rw::V3d> wn(norms ? static_cast<size_t>(numVerts) : 0);
         rw::V3d::transformPoints(wv.data(), verts, numVerts, &m);
         if (norms) {
-            rw::V3d::transformVectors(wn.data(), norms, numVerts, &m);
+            auto normalMatrix = m;
+            if (!components.frames.empty()) {
+                rw::Matrix inverse;
+                rw::Matrix::invert(&inverse, &m);
+                normalMatrix.right = rw::makeV3d(inverse.right.x, inverse.up.x, inverse.at.x);
+                normalMatrix.up = rw::makeV3d(inverse.right.y, inverse.up.y, inverse.at.y);
+                normalMatrix.at = rw::makeV3d(inverse.right.z, inverse.up.z, inverse.at.z);
+                normalMatrix.flags = 0;
+            }
+            rw::V3d::transformVectors(wn.data(), norms, numVerts, &normalMatrix);
         }
         WorldShotMesh mesh;
         MeshColor(meshIndex, mesh.color);
@@ -1009,6 +1096,9 @@ bool CarPose_Init(const char* gameDir, const char* model, double steerDeg, doubl
             surface.diffuse = lit && norms && mat ? mat->surfaceProps.diffuse : 0.0f;
             if (mat) {
                 auto color = mat->color;
+                const auto overrideIt = atomicOverrides.find(atomic);
+                if (overrideIt != atomicOverrides.end() && overrideIt->second->MaterialAlpha)
+                    color.alpha = *overrideIt->second->MaterialAlpha;
                 // CVehicleModelInfo::SetEditableMaterialsCB, RGB markers.
                 const uint32 rgb = uint32(color.red) | (uint32(color.green) << 8) | (uint32(color.blue) << 16);
                 const int slot = rgb == 0x00FF3C ? 0 : rgb == 0xAF00FF ? 1 :
@@ -1134,7 +1224,7 @@ bool CarPose_Init(const char* gameDir, const char* model, double steerDeg, doubl
         }
         int got = 0;
         bool ok = false;
-        emitTris(geo, m, got, ok);
+        emitTris(geo, atomic, m, got, ok);
         if (ok) {
             totalTris += got;
             bodyTris += got;
@@ -1154,7 +1244,7 @@ bool CarPose_Init(const char* gameDir, const char* model, double steerDeg, doubl
             rw::Matrix::mult(&m, &kitRel[k], dummyLtm);
             int got = 0;
             bool ok = false;
-            emitTris(kit[k].geo, m, got, ok);
+            emitTris(kit[k].geo, kit[k].atomic, m, got, ok);
             if (ok) {
                 totalTris += got;
                 if (w.raw == wheels[0].raw) {
