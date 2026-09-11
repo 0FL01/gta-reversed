@@ -28,6 +28,7 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
         app/platform/linux/MainLinux.cpp
         app/platform/linux/Realtime.cpp
         app/platform/linux/RealtimeEnvironment.cpp
+        app/platform/linux/RealtimeClouds.cpp
         app/platform/linux/RealtimeGameplay.cpp
         app/platform/linux/RealtimeHud.cpp
         app/platform/linux/NativePlayerAssets.cpp

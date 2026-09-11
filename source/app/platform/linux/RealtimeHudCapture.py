@@ -24,6 +24,7 @@ parser.add_argument('--seconds', type=int, choices=(16, 28), default=16)
 scene = parser.add_mutually_exclusive_group()
 scene.add_argument('--player-cj', action='store_true')
 scene.add_argument('--water', action='store_true', help='static shoreline free-camera, actual unpaused water clock')
+scene.add_argument('--clouds', action='store_true', help='source low clouds with fixed SUNNY_LA weather')
 args = parser.parse_args()
 source = pathlib.Path(__file__).resolve().parent
 workspace = source.parents[4]
@@ -73,7 +74,10 @@ else:
     env['MANGOHUD_CONFIG'] = ('fps,frametime,gpu_name,gpu_stats,cpu_stats,autostart_log=1,'
         f'log_duration=0,log_interval=100,output_folder={output}')
     command = ['mangohud', str(binary), '--play', '--game-dir', str(game), '--seconds', str(args.seconds)]
-    command += ['--freecam', '--cam', '820,-1880,6', '--freeze-time'] if args.water else ['--demo']
+    if args.clouds:
+        command += ['--freecam', '--cam', '1600,-1700,30', '--weather', 'SUNNY_LA', '--freeze-time']
+    else:
+        command += ['--freecam', '--cam', '820,-1880,6', '--freeze-time'] if args.water else ['--demo']
     if args.player_cj:
         command.append('--player-cj')
     path = output / 'RealtimeHudCapture.log'
@@ -124,6 +128,11 @@ else:
         changed = sum(first[i:i+3] != last[i:i+3] for i in range(0, len(first), 3))
         assert changed > 1000, 'Static-camera/frozen-hour water must visibly animate'
         print(f'integrated-water PASS clock={clocks[0]}..{clocks[-1]} changedPixels={changed}')
+    elif args.clouds:
+        assert 'player=hidden-freecam' in text and 'projectionFov=60 spriteFov=70' in text
+        witness = re.search(r'cloud-capture changedPixels=(\d+) survivingAfterWorld=(\d+) restored=1', text)
+        assert witness and int(witness[1]) > 1000 and int(witness[2]) > 1000
+        print(f'integrated-clouds PASS changedPixels={witness[1]} survivingAfterWorld={witness[2]}')
     else:
         assert replay, 'Integrated demo must finish jump/land/entry/drive/brake/exit'
     print(f'integrated-capture PASS captures={len(captures)} runtimeExit=0 replayComplete={int(replay)} overlayInReadback=0')

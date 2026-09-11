@@ -24,6 +24,10 @@ struct TimeCycleParams {
     uint8_t ambObjects[3] = {}; // Amb_Obj, additive GPU-facing fields
     float directionalMult = 0.0f; // final timecyc column (51), not legacy Dir RGB
     bool hasDirectionalMult = false;
+    uint8_t lowCloudColours[3] = {}; // tokens[30..32], CTimeCycle::Initialise
+    // Optional additive metadata: malformed cloud columns do not alter legacy
+    // row selection/colours. True only for valid RGB in a complete 8-row section.
+    bool hasLowCloudColours = false;
 };
 
 // Loads the `weather` row for `hour` (0-23) relative to gameDir (sets the

@@ -3,6 +3,7 @@
 #include "app/platform/linux/Realtime.h"
 #include "app/platform/linux/StreamPager.h"
 #include "app/platform/linux/RealtimeEnvironment.h"
+#include "app/platform/linux/RealtimeClouds.h"
 #include "app/platform/linux/RealtimeGameplay.h"
 #include "app/platform/linux/RealtimeHud.h"
 #include "app/platform/linux/RealtimeStreaming.h"
@@ -811,6 +812,11 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
         return 1;
     }
     std::printf("play-hud radar=144-tiles clock=game-time player=%s\n", gameplayEnabled ? "gameplay" : "hidden-freecam");
+    RealtimeClouds clouds;
+    if (!clouds.Load(gameDir, error, sizeof(error)) || !clouds.Upload(error, sizeof(error))) {
+        std::printf("play-fail low clouds: %s\n", error);
+        return 1;
+    }
     NativePadFeedback padFeedback;
     const auto reportPad = [](const NativePadFeedbackResult& result) {
         if (result.Status == NativePadFeedbackStatus::Error || result.Status == NativePadFeedbackStatus::Unsupported)
@@ -1078,6 +1084,36 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             }
         }
         environment.DrawSky(camera.x, camera.y, camera.z);
+        RealtimeLowCloudParams lowCloudParams;
+        if (!environment.GetFixedWeatherLowCloudParams(camera.z, lowCloudParams)) {
+            std::printf("play-cloud-terminal status=Unsupported message=fixed-weather metadata unavailable\n");
+            return 1;
+        }
+        const auto cloudCamera = RealtimeClouds::CaptureCamera({camera.x, camera.y, camera.z}, width, height,
+            0.1f, std::max(1600.0f, environment.GetParams().farClip), 70.0f, 0.0f);
+        RealtimeCloudState cloudState;
+        // The native camera projection remains 60 degrees. Source sprite sizing
+        // uses CDraw::FOV=70 independently; roll is genuinely zero in this camera.
+        cloudState.HasExteriorVisibility = true;
+        cloudState.CanSeeOutside = true; // area 0; interior transitions are still terminal
+        cloudState.HasWeather = cloudState.HasClock = cloudState.HasLowCloudColours = true;
+        cloudState.Foggyness = lowCloudParams.foggyness;
+        cloudState.CloudCoverage = lowCloudParams.cloudCoverage;
+        cloudState.ExtraSunnyness = lowCloudParams.extraSunnyness;
+        cloudState.Wind = lowCloudParams.wind;
+        cloudState.Hour = lowCloudParams.hour;
+        cloudState.GameMs = lowCloudParams.gameMs;
+        cloudState.LowCloudColours = lowCloudParams.colours;
+        const auto cloudResult = clouds.Draw(cloudCamera, cloudState);
+        if (cloudResult == RealtimeCloudResult::Unsupported) {
+            std::printf("play-cloud-terminal status=Unsupported message=camera or cloud render state\n");
+            return 1;
+        }
+        if (!frames) {
+            std::printf("play-clouds layer=low projectionFov=60 spriteFov=70 rgb=%u,%u,%u fog=%.2f coverage=%.2f extra=%.2f status=%d\n",
+                unsigned(lowCloudParams.colours[0]), unsigned(lowCloudParams.colours[1]), unsigned(lowCloudParams.colours[2]),
+                lowCloudParams.foggyness, lowCloudParams.cloudCoverage, lowCloudParams.extraSunnyness, static_cast<int>(cloudResult));
+        }
         environment.BeginWorld();
         world.active->gpu.Render();
         environment.EndWorld();

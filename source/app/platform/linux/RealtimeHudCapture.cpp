@@ -5,11 +5,13 @@
 #include <GL/gl.h>
 #include <GL/glext.h>
 #include <array>
+#include <algorithm>
 #include <cstdio>
 #include <vector>
 #include "app/platform/linux/RealtimeGameplay.h"
 #include "app/platform/linux/RealtimeHud.h"
 #include "app/platform/linux/RealtimeEnvironment.h"
+#include "app/platform/linux/RealtimeClouds.h"
 
 namespace hud_capture {
 struct ReadState {
@@ -28,6 +30,43 @@ struct ReadState {
         for (unsigned i = 0; i < transfer.size(); ++i) {
             glGetFloatv(floats[i], &transfer[i]);
         }
+    }
+};
+
+static bool ReadRgb(int width, int height, std::vector<unsigned char>& rgb) {
+    rgb.resize(static_cast<size_t>(width) * height * 3);
+    const ReadState before;
+    glPushAttrib(GL_PIXEL_MODE_BIT);
+    glPushClientAttrib(GL_CLIENT_PIXEL_STORE_BIT);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    glReadBuffer(GL_BACK);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    for (auto name : {GL_PACK_ROW_LENGTH, GL_PACK_SKIP_ROWS, GL_PACK_SKIP_PIXELS,
+                     GL_PACK_SWAP_BYTES, GL_PACK_LSB_FIRST, GL_PACK_IMAGE_HEIGHT, GL_PACK_SKIP_IMAGES})
+        glPixelStorei(name, 0);
+    for (auto name : {GL_RED_SCALE, GL_GREEN_SCALE, GL_BLUE_SCALE, GL_ALPHA_SCALE}) glPixelTransferf(name, 1);
+    for (auto name : {GL_RED_BIAS, GL_GREEN_BIAS, GL_BLUE_BIAS, GL_ALPHA_BIAS}) glPixelTransferf(name, 0);
+    glPixelTransferi(GL_MAP_COLOR, GL_FALSE);
+    glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, rgb.data());
+    glPopClientAttrib();
+    glPopAttrib();
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, before.integers[1]);
+    glReadBuffer(before.integers[0]);
+    const ReadState after;
+    return glGetError() == GL_NO_ERROR && before.integers == after.integers && before.transfer == after.transfer;
+}
+
+static std::vector<unsigned char> cloudBefore, cloudAfter;
+static bool cloudReadOk = true;
+// Observe the real cloud pass once without changing its inputs or drawing it twice.
+class CapturedClouds : public RealtimeClouds {
+public:
+    RealtimeCloudResult Draw(const RealtimeCloudCamera& camera, const RealtimeCloudState& state) const {
+        const bool observe = cloudBefore.empty() && std::max({state.Foggyness, state.CloudCoverage, state.ExtraSunnyness}) < 1;
+        if (observe) cloudReadOk &= ReadRgb(camera.Width, camera.Height, cloudBefore);
+        const auto result = RealtimeClouds::Draw(camera, state);
+        if (observe) cloudReadOk &= ReadRgb(camera.Width, camera.Height, cloudAfter);
+        return result;
     }
 };
 
@@ -82,7 +121,7 @@ static bool Swap(SDL_Window* window, const RealtimeHudView& view,
             ok = error == GL_NO_ERROR && before.integers == after.integers && before.transfer == after.transfer;
             char path[256];
             std::snprintf(path, sizeof(path), "artifacts/graphics/realtime-%s-integrated-%04u.ppm",
-                view.radar ? "hud" : "water", frame);
+                view.radar ? "hud" : cloudBefore.empty() ? "water" : "clouds", frame);
             if (ok) {
                 FILE* file = std::fopen(path, "wb");
                 ok = file != nullptr;
@@ -109,6 +148,17 @@ static bool Swap(SDL_Window* window, const RealtimeHudView& view,
                 static_cast<unsigned long long>(gameNs), static_cast<unsigned long long>(flowTicks),
                 selection.polygon, water.currentFlow[0], water.currentFlow[1]);
             ok &= flowTicks == gameNs / 1'000'000'000 * 30 + gameNs % 1'000'000'000 * 30 / 1'000'000'000;
+            if (frame == 1 && !cloudBefore.empty()) {
+                size_t changed = 0, surviving = 0;
+                ok &= cloudReadOk && cloudBefore.size() == rgb.size() && cloudAfter.size() == rgb.size();
+                if (ok) for (size_t i = 0; i < rgb.size(); i += 3) {
+                    const bool different = !std::equal(cloudBefore.begin() + i, cloudBefore.begin() + i + 3, cloudAfter.begin() + i);
+                    changed += different;
+                    surviving += different && std::equal(cloudAfter.begin() + i, cloudAfter.begin() + i + 3, rgb.begin() + i);
+                }
+                std::printf("cloud-capture changedPixels=%zu survivingAfterWorld=%zu restored=%d\n", changed, surviving, cloudReadOk);
+                ok &= changed > 1000 && surviving > 1000;
+            }
         } else {
             std::printf("hud-capture FAIL invalid drawable/default framebuffer=%d\n", framebuffer);
         }
@@ -122,5 +172,7 @@ static bool Swap(SDL_Window* window, const RealtimeHudView& view,
 // SDL headers are already included. Only the production call site is replaced;
 // HUD inputs are the exact locals submitted to Draw, with no replay injection.
 #define SDL_GL_SwapWindow(window) hud_capture::Swap((window), hudView, hudState, gameplay.State(), environment.GetWaterState(), gameNs, waterTicks, environment.GetWaterFlowSelection())
+#define RealtimeClouds hud_capture::CapturedClouds
 #include "Realtime.cpp"
+#undef RealtimeClouds
 #undef SDL_GL_SwapWindow

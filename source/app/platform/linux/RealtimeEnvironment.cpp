@@ -24,6 +24,42 @@ namespace {
 constexpr std::array<int, 9> kSampleHours{0, 5, 6, 7, 12, 19, 20, 22, 24};
 constexpr float kPi = 3.14159265358979323846f;
 
+struct FixedWeather {
+    const char* name;
+    float wind;
+    bool foggy, cloudy, extraSunny;
+    int clearCounterpart = -1;
+};
+// Exact eWeatherType order (0..22). OriginalWeatherConstants wind: retail
+// 94D510; Update 75EA21/75ECE2. Fixed Old==New factors from CWeather::Update
+// static evidence (round8-clouds); notably SANDSTORM is foggy and extra-colour
+// IDs are cloudy. These are source IDs, never weather-name classifiers.
+constexpr std::array<FixedWeather, 23> kFixedWeather{{
+    {"EXTRASUNNY_LA",          0,    false, false, true},
+    {"SUNNY_LA",               .25f, false, false, false},
+    {"EXTRASUNNY_SMOG_LA",     0,    false, false, true, 0},
+    {"SUNNY_SMOG_LA",          .2f,  false, false, false, 1},
+    {"CLOUDY_LA",              .7f,  false, true,  false},
+    {"SUNNY_SF",               .25f, false, false, false},
+    {"EXTRASUNNY_SF",          0,    false, false, true},
+    {"CLOUDY_SF",              .7f,  false, true,  false},
+    {"RAINY_SF",               1,    false, true,  false},
+    {"FOGGY_SF",               0,    true,  true,  false},
+    {"SUNNY_VEGAS",            .2f,  false, false, false},
+    {"EXTRASUNNY_VEGAS",       0,    false, false, true},
+    {"CLOUDY_VEGAS",           .4f,  false, true,  false},
+    {"EXTRASUNNY_COUNTRYSIDE", 0,    false, false, true},
+    {"SUNNY_COUNTRYSIDE",      .3f,  false, false, false},
+    {"CLOUDY_COUNTRYSIDE",     .7f,  false, true,  false},
+    {"RAINY_COUNTRYSIDE",      1,    false, true,  false},
+    {"EXTRASUNNY_DESERT",      0,    false, false, true},
+    {"SUNNY_DESERT",           .3f,  false, false, false},
+    {"SANDSTORM_DESERT",       1.5f, true,  true,  false},
+    {"UNDERWATER",             0,    false, true,  false},
+    {"EXTRACOLOURS_1",         0,    false, true,  false},
+    {"EXTRACOLOURS_2",         0,    false, true,  false},
+}};
+
 static bool Fail(char* err, std::size_t errSize, const char* message) {
     if (err && errSize) {
         std::snprintf(err, errSize, "%s", message);
@@ -118,6 +154,8 @@ bool RealtimeEnvironment::Load(const char* gameDir, char* err, std::size_t errSi
                                float hour, const char* weather) {
     assert(!m_WaterTexture && !m_SeaBedTexture && !m_LightingProgram && "ReleaseGpu before reloading environment");
     m_Loaded = false;
+    m_HasLowCloudParams = false;
+    m_FixedWeather = -1;
     m_WaterTriangles = 0;
     if (!std::isfinite(hour) || hour < 0.0f || hour >= 24.0f) {
         return Fail(err, errSize, "environment hour must be finite in [0,24)");
@@ -132,26 +170,32 @@ bool RealtimeEnvironment::Load(const char* gameDir, char* err, std::size_t errSi
             return Fail(err, errSize, "environment weather needs eight timecyc samples");
         }
     }
+    for (size_t i = 0; i < kFixedWeather.size(); ++i) {
+        if (!std::strcmp(weather, kFixedWeather[i].name)) m_FixedWeather = static_cast<int>(i);
+    }
+    if (m_FixedWeather < 0) return Fail(err, errSize, "water weather needs OriginalWeatherConstants mapping");
+    const auto& fixed = kFixedWeather[m_FixedWeather];
+    m_HasLowCloudParams = std::all_of(m_Samples.begin(), m_Samples.end(),
+        [](const auto& sample) { return sample.hasLowCloudColours; });
+    if (fixed.clearCounterpart >= 0) {
+        // Startup-only OS_File work, before the asset worker starts. A missing
+        // optional counterpart disables clouds without breaking legacy water.
+        for (size_t i = 0; i < m_ClearSamples.size(); ++i) {
+            char cloudErr[128]{};
+            if (!TimeCycle_LoadWeatherHour(gameDir, kFixedWeather[fixed.clearCounterpart].name,
+                    kSampleHours[i], m_ClearSamples[i], cloudErr, sizeof(cloudErr)) ||
+                m_ClearSamples[i].sampleIdx != static_cast<int>(i) || !m_ClearSamples[i].hasLowCloudColours) {
+                m_HasLowCloudParams = false;
+            }
+        }
+    }
     if (!WaterLevel_Load(gameDir, "data/water.dat", m_Water, err, errSize)) {
         return false;
     }
     if (!LoadWaterTexture(m_WaterImage, m_SeaBedImage, err, errSize)) return false;
     m_WaterState = {};
     m_WaterFlow.Initialise(m_Water);
-    // OriginalWeatherConstants wind table, read-only retail 94D510; CWeather
-    // Update 75EA21/75ECE2 clips wind then computes min(WindClipped+.3,1).
-    constexpr const char* names[]{"EXTRASUNNY_LA", "SUNNY_LA", "EXTRASUNNY_SMOG_LA", "SUNNY_SMOG_LA", "CLOUDY_LA",
-        "SUNNY_SF", "EXTRASUNNY_SF", "CLOUDY_SF", "RAINY_SF", "FOGGY_SF", "SUNNY_VEGAS", "EXTRASUNNY_VEGAS",
-        "CLOUDY_VEGAS", "EXTRASUNNY_COUNTRYSIDE", "SUNNY_COUNTRYSIDE", "CLOUDY_COUNTRYSIDE", "RAINY_COUNTRYSIDE",
-        "EXTRASUNNY_DESERT", "SUNNY_DESERT", "SANDSTORM_DESERT", "UNDERWATER", "EXTRACOLOURS_1", "EXTRACOLOURS_2"};
-    constexpr float wind[]{0, .25f, 0, .2f, .7f, .25f, 0, .7f, 1, 0, .2f, 0, .4f, 0, .3f, .7f, 1, 0, .3f, 1.5f, 0, 0, 0};
-    bool known = false;
-    for (size_t i = 0; i < std::size(names); ++i) {
-        if (std::strcmp(weather, names[i])) continue;
-        m_WaterState.wavyness = std::min(std::min(wind[i], 1.0f) + .3f, 1.0f);
-        known = true;
-    }
-    if (!known) return Fail(err, errSize, "water weather needs OriginalWeatherConstants mapping");
+    m_WaterState.wavyness = std::min(std::min(fixed.wind, 1.0f) + .3f, 1.0f);
     for (const auto& poly : m_Water.polys) if (poly.Visible()) m_WaterTriangles += poly.nverts - 2;
     const auto missing = std::count_if(m_Samples.begin(), m_Samples.end(),
         [](const auto& sample) { return !sample.hasDirectionalMult; });
@@ -195,6 +239,42 @@ bool RealtimeEnvironment::SetHour(float hour) {
     // CTimeCycle::Initialise m_vecDirnLightToSun; the animated sun sprite
     // orbit is a different vector, not the light used by app_light.cpp.
     m_Params.sunDirection = {-0.5f, -0.5f, std::sqrt(0.5f)};
+    return true;
+}
+
+bool RealtimeEnvironment::GetFixedWeatherLowCloudParams(float cameraZ, RealtimeLowCloudParams& out) const {
+    if (!m_Loaded || !m_HasLowCloudParams || !std::isfinite(cameraZ)) return false;
+    assert(m_FixedWeather >= 0 && m_FixedWeather < static_cast<int>(kFixedWeather.size()));
+    const auto& fixed = kFixedWeather[m_FixedWeather];
+    // CTimeCycle::CalcColoursForPoint 282..342; CColourSet::Interpolate
+    // 110..112 truncates the nonnegative 0..255 sum on EVERY interpolation.
+    const float hour = std::min(m_Params.hour, 23.999f);
+    size_t sample = 0;
+    while (sample + 1 < m_Samples.size() && hour >= kSampleHours[sample + 1]) ++sample;
+    const size_t next = (sample + 1) % m_Samples.size();
+    const float t = (hour - kSampleHours[sample]) / float(kSampleHours[sample + 1] - kSampleHours[sample]);
+    const float altitude = std::clamp((cameraZ - 20.0f) / 200.0f, 0.0f, 1.0f);
+    const auto blend = [](uint8_t a, uint8_t b, float fraction) {
+        // Explicit source multiplication/addition order (not std::lerp/FMA).
+        const volatile float first = a * (1.0f - fraction), second = b * fraction;
+        return static_cast<uint8_t>(first + second);
+    };
+    RealtimeLowCloudParams params;
+    params.hour = m_Params.hour;
+    params.gameMs = m_WaterState.gameMs;
+    for (size_t c = 0; c < params.colours.size(); ++c) {
+        uint8_t a = m_Samples[sample].lowCloudColours[c], b = m_Samples[next].lowCloudColours[c];
+        if (fixed.clearCounterpart >= 0) {
+            a = blend(a, m_ClearSamples[sample].lowCloudColours[c], altitude);
+            b = blend(b, m_ClearSamples[next].lowCloudColours[c], altitude);
+        }
+        params.colours[c] = blend(a, b, t);
+    }
+    params.foggyness = fixed.foggy ? 1.0f : 0.0f;
+    params.cloudCoverage = fixed.cloudy ? 1.0f : 0.0f;
+    params.extraSunnyness = fixed.extraSunny ? 1.0f : 0.0f;
+    params.wind = fixed.wind;
+    out = params;
     return true;
 }
 

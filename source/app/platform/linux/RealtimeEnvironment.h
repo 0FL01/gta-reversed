@@ -6,6 +6,7 @@
 
 #include <array>
 #include <cstddef>
+#include <limits>
 #include <span>
 
 struct RealtimeEnvironmentParams {
@@ -34,6 +35,19 @@ struct RealtimeWaterState {
     bool accumulateFlow = false;
     std::array<float, 2> currentFlow{};
     float flowTimeStep = 0.0f;
+};
+
+// Valid only after GetFixedWeatherLowCloudParams succeeds. Fixed Old==New
+// weather, no timecycle boxes/extra-colour overrides or weather transitions.
+struct RealtimeLowCloudParams {
+    float hour = std::numeric_limits<float>::quiet_NaN();
+    uint32_t gameMs = 0;
+    std::array<uint8_t, 3> colours{};
+    float foggyness = std::numeric_limits<float>::quiet_NaN();
+    float cloudCoverage = std::numeric_limits<float>::quiet_NaN();
+    float extraSunnyness = std::numeric_limits<float>::quiet_NaN();
+    float wind = std::numeric_limits<float>::quiet_NaN();
+    bool operator==(const RealtimeLowCloudParams&) const = default;
 };
 
 struct RealtimeWaterSample {
@@ -130,6 +144,11 @@ public:
     // No IO or GL work. Interpolates 22->24 against the midnight row.
     bool SetHour(float hour);
     const RealtimeEnvironmentParams& GetParams() const { return m_Params; }
+    // CPU-only/no IO. Uses current hour and SetWaterState's actual gameMs.
+    // Smog IDs 2/3 use cached clear counterparts, truncating each altitude-
+    // blended anchor BEFORE temporal interpolation. False leaves out untouched
+    // on unavailable source rows/unloaded environment/nonfinite camera Z.
+    bool GetFixedWeatherLowCloudParams(float cameraZ, RealtimeLowCloudParams& out) const;
     const WaterLevelData& GetWaterData() const { return m_Water; }
     int GetWaterTriangleCount() const { return m_WaterTriangles; }
     const WorldShotImage& GetWaterImage() const { return m_WaterImage; }
@@ -210,6 +229,9 @@ private:
     void BeginLighting(bool objects) const;
 
     std::array<TimeCycleParams, 8> m_Samples{};
+    std::array<TimeCycleParams, 8> m_ClearSamples{};
+    int m_FixedWeather = -1;
+    bool m_HasLowCloudParams = false;
     RealtimeEnvironmentParams m_Params{};
     WaterLevelData m_Water{};
     WorldShotImage m_WaterImage{}; // owned pixels; no RW objects survive Load

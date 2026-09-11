@@ -169,6 +169,8 @@ bool TimeCycle_LoadWeatherHour(const char* gameDir, const char* weather, int hou
         uint8_t water[4] = {}; // tokens[36..39] (WaterRGBA per header)
         float directionalMult = 0.0f;
         bool hasDirectionalMult = false;
+        uint8_t lowCloudColours[3] = {};
+        bool hasLowCloudColours = false;
     };
     std::vector<Row> rows;
     for (size_t i = sec + 1; i < lines.size(); ++i) {
@@ -235,6 +237,21 @@ bool TimeCycle_LoadWeatherHour(const char* gameDir, const char* weather, int hou
             }
             if (toks.size() < 29) {
                 continue;
+            }
+            // CTimeCycle::Initialise reads these as integers, separately from
+            // bottom-cloud RGB and cloud alpha. Keep legacy parsing unchanged
+            // on bad optional cloud data; the realtime provider gates it out.
+            if (toks.size() >= 33) {
+                row.hasLowCloudColours = true;
+                for (int k = 0; k < 3; ++k) {
+                    char* end = nullptr;
+                    const long value = std::strtol(toks[30 + k].c_str(), &end, 10);
+                    if (end == toks[30 + k].c_str() || *end || value < 0 || value > 255) {
+                        row.hasLowCloudColours = false;
+                        break;
+                    }
+                    row.lowCloudColours[k] = static_cast<uint8_t>(value);
+                }
             }
             if (toks.size() > 51) {
                 char* end = nullptr;
@@ -321,6 +338,10 @@ bool TimeCycle_LoadWeatherHour(const char* gameDir, const char* weather, int hou
     out.farClp = row.farClp;
     out.directionalMult = row.directionalMult;
     out.hasDirectionalMult = row.hasDirectionalMult;
+    out.hasLowCloudColours = rows.size() == 8 && row.hasLowCloudColours;
+    if (out.hasLowCloudColours) {
+        for (int k = 0; k < 3; ++k) out.lowCloudColours[k] = row.lowCloudColours[k];
+    }
     out.fogSt = row.fogSt;
     for (int k = 0; k < 4; ++k) {
         out.water[k] = row.water[k];
