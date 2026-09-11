@@ -92,6 +92,7 @@ constexpr Signature Signatures[] = {
     {0x0517, {O::Float, O::Float, O::Float, O::String, O::Output}, 5},
     {0x0518, {O::Float, O::Float, O::Float, O::Integer, O::String, O::Output}, 6},
     {0x0570, {O::Float, O::Float, O::Float, O::Integer, O::Output}, 5},
+    {0x04CE, {O::Float, O::Float, O::Float, O::Integer, O::Output}, 5},
     {0x018B, {O::Integer, O::Integer}, 2},
     {0x09B4, {O::Float, O::Float, O::Float, O::Integer, O::Integer}, 5},
     {0x02B9, {O::String}, 1},
@@ -500,7 +501,7 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
 
     int32 reference = -1;
     bool pickupCollected = false;
-    if (d.Opcode == 0x04E4 || d.Opcode == 0x03CB || d.Opcode == 0x0053 || d.Opcode == 0x07AF || d.Opcode == 0x01F5 || d.Opcode == 0x0373 || d.Opcode == 0x0173 || d.Opcode == 0x0517 || d.Opcode == 0x0518 || d.Opcode == 0x0570 || d.Opcode == 0x018B || d.Opcode == 0x09B4 || d.Opcode == 0x02B9 || d.Opcode == 0x0213 || d.Opcode == 0x0214 || d.Opcode == 0x0215 || d.Opcode == 0x014B || d.Opcode == 0x014C) {
+    if (d.Opcode == 0x04E4 || d.Opcode == 0x03CB || d.Opcode == 0x0053 || d.Opcode == 0x07AF || d.Opcode == 0x01F5 || d.Opcode == 0x0373 || d.Opcode == 0x0173 || d.Opcode == 0x0517 || d.Opcode == 0x0518 || d.Opcode == 0x0570 || d.Opcode == 0x04CE || d.Opcode == 0x018B || d.Opcode == 0x09B4 || d.Opcode == 0x02B9 || d.Opcode == 0x0213 || d.Opcode == 0x0214 || d.Opcode == 0x0215 || d.Opcode == 0x014B || d.Opcode == 0x014C) {
         const NativeScriptRequestId id{m_SessionId, m_CommandSequence + 1, state.IP};
         NativeScriptServiceResult result;
         // All operands/output bounds have been checked before ANY host call.
@@ -550,6 +551,10 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
                 auto created = services.CreateContactBlip({id, {d.Float(0), d.Float(1), d.Float(2)}, d.Int(3)});
                 result = std::move(created.Result); reference = created.Reference.Value;
             }
+            if (d.Opcode == 0x04CE) {
+                auto created = services.CreateCoordinateBlip({id, {d.Float(0), d.Float(1), d.Float(2)}, d.Int(3)});
+                result = std::move(created.Result); reference = created.Reference.Value;
+            }
             if (d.Opcode == 0x018B) result = services.SetBlipDisplay({id, {a}, b});
             if (d.Opcode == 0x04E4) result = services.RequestCollision({id, d.Float(0), d.Float(1)});
             if (d.Opcode == 0x03CB) result = services.LoadScene({id, {d.Float(0), d.Float(1), d.Float(2)}});
@@ -591,7 +596,7 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         }
         // Group generations occupy the high 16 bits, including the sign bit.
         // The host validates liveness; only the invalid sentinel is VM-invalid.
-        if ((d.Opcode == 0x07AF || d.Opcode == 0x01F5 || d.Opcode == 0x0517 || d.Opcode == 0x0518 || d.Opcode == 0x0570) && reference == -1) return invalid("Ready lookup returned invalid script reference");
+        if ((d.Opcode == 0x07AF || d.Opcode == 0x01F5 || d.Opcode == 0x0517 || d.Opcode == 0x0518 || d.Opcode == 0x0570 || d.Opcode == 0x04CE) && reference == -1) return invalid("Ready lookup returned invalid script reference");
     }
 
     // Commit point: nothing above changes script-visible state or global bytes.
@@ -693,7 +698,7 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         setStat(a, float(b), true);
         break;
     case 0x0053: write(4, uint32(a)); break;
-    case 0x0517: case 0x0570: write(4, uint32(reference)); break;
+    case 0x0517: case 0x0570: case 0x04CE: write(4, uint32(reference)); break;
     case 0x0518: case 0x0213: write(5, uint32(reference)); break;
     case 0x014B: write(12, uint32(reference)); break;
     case 0x07AF: case 0x01F5: write(1, uint32(reference)); break;

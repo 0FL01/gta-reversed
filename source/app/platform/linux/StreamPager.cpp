@@ -352,7 +352,7 @@ static bool ParseBinaryIpl(const std::vector<uint8>& bytes, const std::map<int, 
     return true;
 }
 
-void ParseIplText(const std::string& text, std::vector<IplInst>& out) {
+void ParseIplText(const std::string& text, std::vector<IplInst>& out, bool sourceInstanceType) {
     bool inInst = false;
     size_t pos = 0;
     while (pos <= text.size()) {
@@ -386,6 +386,13 @@ void ParseIplText(const std::string& text, std::vector<IplInst>& out) {
                             &qw, &inst.lod);
         if (n != 11 || id < 0) {
             continue;
+        }
+        if (sourceInstanceType) {
+            // FileLoader.cpp:1092-1110 reads m_nInstanceType, not m_nAreaCode.
+            // FileObjectInstance.h:19-27 gives area its low eight bits. Retain
+            // the entire authored word, including currently unassigned bits.
+            inst.flags = static_cast<uint32>(inst.interior);
+            inst.interior = static_cast<int>(inst.flags & 0xff);
         }
         inst.model = model;
         inst.modelId = id;
@@ -1015,7 +1022,7 @@ bool StreamPager_Init(const char* gameDir, E2ELoadInfo& info, char* err, std::si
             continue;
         }
         size_t before = all.size();
-        ParseIplText(text, all);
+        ParseIplText(text, all, options.includeStreamed);
         exportInstances(before, rel, false);
         if (all.size() > before) {
             ++iplFiles;

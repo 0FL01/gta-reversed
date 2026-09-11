@@ -106,7 +106,7 @@ def run(game_dir):
             lane_started = time.monotonic()
             output, _ = process.communicate(timeout=300)
             elapsed = time.monotonic() - lane_started
-            (OUTPUT / f'{NAME}-lane{lane}.log').write_text(output)
+            (OUTPUT / f'radar-ipl-boundary-{NAME}-lane{lane}.log').write_text(output)
             outputs.append(output)
             print(f'parallel-lane={lane} waitSeconds={elapsed:.3f}')
             print(output, end='')
@@ -114,7 +114,7 @@ def run(game_dir):
                 raise subprocess.CalledProcessError(process.returncode, process.args, output=output)
             summary = re.search(r'^native-pickup-feedback .*$', output, re.MULTILINE)
             assert summary and 'failures=0' in summary.group()
-            assert 'actualCommands=1207 terminal=04CE@212086 hud33=actual-GL' in summary.group()
+            assert 'actualCommands=1219 terminal=016C@212309 hud33=actual-GL' in summary.group()
             assert 'callback=1 motors=25700/25700 durationMs=120' in summary.group()
             assert 'ring=0214-true-false-negated-true' in summary.group()
             assert 'noDevice=normal unsupported=explicit virtual-only=1' in summary.group()
@@ -125,7 +125,7 @@ def run(game_dir):
             if process.poll() is None:
                 process.terminate()
         raise
-    (OUTPUT / (NAME + '.log')).write_text(''.join(
+    (OUTPUT / ('radar-ipl-boundary-' + NAME + '.log')).write_text(''.join(
         f'parallel-lane={lane}\n{output}' for lane, output in enumerate(outputs)))
     print(f'{NAME} parallel={LANES} wallSeconds={time.monotonic() - started:.3f}')
 

@@ -65,6 +65,6 @@ if __name__ == '__main__':
         for suffix, options in [('cpu', ['--cpu']), ('gl', []), ('gl-random', ['--random'])]:
             result = subprocess.run([str(OUTPUT / NAME), str(args.game_dir.resolve()), *options], text=True,
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=300)
-            (OUTPUT / (NAME + '-' + suffix + '.log')).write_text(result.stdout)
+            (OUTPUT / ('radar-ipl-boundary-' + NAME + '-' + suffix + '.log')).write_text(result.stdout)
             print(result.stdout, end='')
             result.check_returncode()

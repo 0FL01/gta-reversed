@@ -111,6 +111,13 @@ struct NativeScriptContactBlipRequest {
     // its registered radar consumer reports the numeric sprite ready now.
     bool RadarSpriteReady = false;
 };
+// Original04CE: BLIP_COORD, SHORT_RANGE, BOTH; not a contact-point alias.
+// Readiness belongs to the host's registered live renderer, never this DTO.
+struct NativeScriptCoordinateBlipRequest {
+    NativeScriptRequestId Id;
+    NativeScriptPosition Position;
+    std::int32_t Sprite = 0;
+};
 struct NativeScriptBlipDisplayRequest {
     NativeScriptRequestId Id;
     NativeScriptBlipRef Blip;
@@ -157,6 +164,7 @@ public:
     // has no free/reclaimable slot. This is not an allocated pickup reference.
     virtual NativeScriptReferenceResult<NativeScriptPickupRef> CreatePickup(const NativeScriptPickupRequest&) { return {}; }
     virtual NativeScriptReferenceResult<NativeScriptBlipRef> CreateContactBlip(const NativeScriptContactBlipRequest&) { return {}; }
+    virtual NativeScriptReferenceResult<NativeScriptBlipRef> CreateCoordinateBlip(const NativeScriptCoordinateBlipRequest&) { return {}; }
     virtual NativeScriptServiceResult SetBlipDisplay(const NativeScriptBlipDisplayRequest&) { return {}; }
     virtual NativeScriptServiceResult SetEntryExitFlag(const NativeScriptEntryExitFlagRequest&) { return {}; }
     virtual NativeScriptServiceResult DeactivateGarage(const NativeScriptGarageRequest&) { return {}; }

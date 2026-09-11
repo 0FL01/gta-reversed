@@ -29,7 +29,9 @@ static void Near(float a,float b,const char* message,float epsilon=0.0002f) { Re
 static NativeCollisionSnapshot Fixture(std::shared_ptr<const NativeCollisionModel> model,float angle=0) {
     NativeCollisionInstance inst; inst.Model=std::move(model);
     inst.Basis={NativeCollisionVector{std::cos(angle),std::sin(angle),0},NativeCollisionVector{-std::sin(angle),std::cos(angle),0},NativeCollisionVector{0,0,1}};
-    return {{inst},0,0,0,0,{}};
+    NativeCollisionSnapshot snapshot;
+    snapshot.Instances.push_back(std::move(inst));
+    return snapshot;
 }
 static void Volumes() {
     RealtimeGameplayWorld world; std::string error; float f; RealtimeVec3 n; NativeCollisionHit hit;

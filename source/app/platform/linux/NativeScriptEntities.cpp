@@ -292,7 +292,11 @@ bool NativeScriptEntities_LoadRadar(const char* gameDir, WorldShotImage& image, 
     return NativeScriptEntities_LoadRadar(gameDir, image, error, 32);
 }
 bool NativeScriptRadarVisible(const NativeScriptRadarBlip& b, float distance, bool onMission, unsigned zoom, bool exterior) {
-    return b.Active && (b.Sprite == 32 || b.Sprite == 31) && exterior && !(b.Contact && onMission) &&
+    // Live radar: HasThisBlipBeenRevealed always succeeds outside frontend map.
+    // DisplayThisBlip interior whitelist, with source default category toggles.
+    const bool scope = exterior || (b.Sprite >= 1 && b.Sprite <= 4) || b.Sprite == 25 ||
+        b.Sprite == 36 || b.Sprite == 41 || b.Sprite == 44 || b.Sprite == 52;
+    return b.Active && b.Sprite > 0 && b.Sprite < 64 && scope && !(b.Kind == NativeScriptBlipKind::Contact && onMission) &&
         (b.Display == 2 || b.Display == 3) && (!b.ShortRange || (!zoom && distance <= 1.0f));
 }
 NativeScriptEntities::NativeScriptEntities(std::size_t pickups, std::size_t blips): m_Pickups(pickups), m_Blips(blips) {
@@ -483,6 +487,35 @@ NativeScriptReferenceResult<NativeScriptBlipRef> NativeScriptEntities::CreateCon
     m_Events.push_back({r.Id, 0x0570, r.Position, {}, r.Sprite, blip.Reference.Value});
     *free = blip; ++m_Revision; return {Ready(), blip.Reference};
 }
+NativeScriptReferenceResult<NativeScriptBlipRef> NativeScriptEntities::CreateCoordinateBlip(
+    const NativeScriptCoordinateBlipRequest& r, const std::function<bool(std::int32_t)>& radarSpriteReady) {
+    if (FindPickupOperation(r.Id)) return {Error("coordinate blip request ID already owns a pickup operation"), {}};
+    if (const auto* old = FindEvent(r.Id)) {
+        if (old->Opcode != 0x04CE || old->Position != r.Position || old->Argument != r.Sprite || !ResolveBlip({old->Reference}))
+            return {Error("mismatched/stale coordinate blip replay"), {}};
+        return {Ready(), {old->Reference}};
+    }
+    if (!Finite(r.Position)) return {Error("nonfinite coordinate blip position"), {}};
+    // Original04CE queries FindGroundZForCoord for the <=-100 sentinel. This
+    // service must not turn a missing source world query into an authored Z.
+    if (r.Position.Z <= -100.0f) return {Unsupported("coordinate blip requires source FindGroundZForCoord"), {}};
+    if (r.Sprite <= 0 || r.Sprite >= 64) return {Unsupported("coordinate blip requires supported source sprite presentation"), {}};
+    if (!m_Loaded || !radarSpriteReady) return {Unsupported("coordinate sprite has no registered radar consumer"), {}};
+    const auto free = std::find_if(m_Blips.begin(), m_Blips.end(), [](const auto& b) {
+        return !b.Active && (b.Reference.Value == -1 || (uint32(b.Reference.Value) >> 16) < 0xfffe);
+    });
+    if (free == m_Blips.end()) return {Error("radar pool capacity exhausted"), {}};
+    try {
+        if (!radarSpriteReady(r.Sprite)) return {Unsupported("coordinate sprite is not ready in the registered radar consumer"), {}};
+    } catch (const std::exception& e) { return {Error(("radar sprite readiness exception: " + std::string(e.what())).c_str()), {}}; }
+    catch (...) { return {Error("unknown radar sprite readiness exception"), {}}; }
+    NativeScriptRadarBlip blip;
+    blip.Reference = {NextRef(free->Reference.Value, std::size_t(free - m_Blips.begin()))};
+    blip.Position = r.Position; blip.Sprite = r.Sprite; blip.Active = true;
+    blip.Kind = NativeScriptBlipKind::Coordinate; blip.Contact = false;
+    m_Events.push_back({r.Id, 0x04CE, r.Position, {}, r.Sprite, blip.Reference.Value});
+    *free = blip; ++m_Revision; return {Ready(), blip.Reference};
+}
 NativeScriptServiceResult NativeScriptEntities::SetBlipDisplay(const NativeScriptBlipDisplayRequest& r) {
     if (FindPickupOperation(r.Id)) return Error("display request ID already owns a pickup query/removal");
     if (const auto* old = FindEvent(r.Id)) {
@@ -491,7 +524,8 @@ NativeScriptServiceResult NativeScriptEntities::SetBlipDisplay(const NativeScrip
     }
     if (!ResolveBlip(r.Blip)) return Error("stale or unallocated blip");
     if (r.Display < 0 || r.Display > 3) return Error("invalid radar display");
-    if (r.Display == 1 || r.Display == 3) return Unsupported("3D coordinate markers are outside this bounded radar-only service");
+    if ((r.Display == 1 || r.Display == 3) && ResolveBlip(r.Blip)->Kind == NativeScriptBlipKind::Contact)
+        return Unsupported("3D contact markers are outside this bounded radar-only service");
     m_Events.push_back({r.Id, 0x018B, {}, {}, r.Display, r.Blip.Value});
     m_Blips[uint32(r.Blip.Value) & 0xffff].Display = r.Display; ++m_Revision; return Ready();
 }

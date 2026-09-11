@@ -185,7 +185,9 @@ int main(int argc, char** argv) {
         "independent exact owned radar_race image/filter");
     Require(prepared->rgba != hud.PreparedRadarSprite(31)->rgba && prepared->rgba != hud.PreparedRadarSprite(32)->rgba,
         "sprite33 is not a property sprite fallback");
-    Require(!hud.PreparedRadarSprite(35) && !hud.IsRadarSpriteUploaded(actualSprite), "only prepared numeric IDs report ready");
+    Require(hud.PreparedRadarSprite(35) && !hud.PreparedRadarSprite(64) &&
+        !hud.IsRadarSpriteUploaded(actualSprite) && !hud.IsRadarSpriteUploaded(35),
+        "source table prepares saveGame too, but no sprite is GPU-ready before upload");
     RadarMapAssets radar;
     MenuHudFont font;
     Require(RadarMap_LoadAssets(game, radar, error, sizeof(error)), error);
@@ -256,7 +258,7 @@ int main(int argc, char** argv) {
     auto missionState = state; missionState.playerOnMission = true;
     Require(Difference(DrawBlip(hud, view, missionState, nonContact, 640, 448), base1x) > 30,
         "mission gate applies to contact kind, not arbitrary coordinate blips");
-    auto unsupported = blip; unsupported.Sprite = 35;
+    auto unsupported = blip; unsupported.Sprite = 64; // enum-only TORENO, no source texture-table entry
     Require(DrawBlip(hud, view, state, unsupported, 640, 448) == base1x, "unprepared sprite cannot fall back to property texture");
     auto property = blip; property.Sprite = 32;
     Require(DrawBlip(hud, view, state, property, 640, 448) != DrawBlip(hud, view, state, blip, 640, 448),

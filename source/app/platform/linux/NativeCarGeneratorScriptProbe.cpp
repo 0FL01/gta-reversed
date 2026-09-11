@@ -140,7 +140,7 @@ int main(int argc, char** argv) try {
         Require(terminal.Status == NativeScriptStatus::Unsupported && creates && switches &&
             host.Session().Threads()[1].Commands > 679 && terminal.Opcode != 0x014B && terminal.Opcode != 0x014C,
             "actual mission crosses679/create/switch and stops at next strict unsupported");
-        Require(host.Session().Threads()[1].Commands == 1207 && terminal.Opcode == 0x04CE && terminal.IP == 212086 &&
+        Require(host.Session().Threads()[1].Commands == 1219 && terminal.Opcode == 0x016C && terminal.IP == 212309 &&
             creates == 10 && switches == 10, "measured legal mission0 strict frontier");
         const auto first = host.CarGenerators().Events().front();
         Require(first.Create.ModelId == 476 && first.Id.IP == 207007 && first.Generator.Value == 88 &&

@@ -6,6 +6,7 @@
 #include "app/platform/linux/WorldShot.h"
 #include <string_view>
 #include <optional>
+#include <functional>
 
 struct NativeScriptPropertyGeometry {
     std::array<float, 3> ColMin{}, ColMax{};
@@ -125,15 +126,25 @@ struct NativeScriptPropertyLabel {
     std::uint8_t Alpha = 0;
 };
 
+// CRadar BLIP_CONTACT_POINT versus BLIP_COORD. Draw3dMarkers has no COORD case.
+enum class NativeScriptBlipKind { Contact, Coordinate };
 struct NativeScriptRadarBlip {
     NativeScriptBlipRef Reference;
     NativeScriptPosition Position;
     int Sprite = 32, Display = 3; // propertyR, source BOTH at creation
     bool Active = false, ShortRange = true, Contact = true;
+    NativeScriptBlipKind Kind = NativeScriptBlipKind::Contact;
+    // SetCoordBlip defaults; Position includes authored height. Sprite rendering
+    // uses white/255; these trace properties apply to source non-sprite markers.
+    std::uint32_t Colour = 8; // BLIP_COLOUR_DESTINATION (input color5 is unused)
+    float SphereRadius = 1.0f;
+    std::uint16_t Size = 1;
+    bool Bright = true, Friendly = false, Fade = false;
 };
 
-// For exterior live radar (not frontend full map): CRadar::DrawCoordBlip,
-// DisplayThisBlip and HasThisBlipBeenRevealed. Real distance BEFORE rim clamp.
+// Live radar (not frontend full map): CRadar::DrawCoordBlip, DisplayThisBlip
+// and HasThisBlipBeenRevealed; default category toggles. Real distance BEFORE
+// rim clamp. Exterior means CanSeeOutSideFromCurrArea AND player area==0.
 bool NativeScriptRadarVisible(const NativeScriptRadarBlip& blip, float distance,
     bool playerOnMission, unsigned radarZoom, bool exterior);
 // Shared startup loader used by the host AND the real HUD.Load. Engine must
@@ -157,6 +168,10 @@ public:
     NativeScriptReferenceResult<NativeScriptPickupRef> CreatePickup(const NativeScriptPickupRequest&,
         NativeScriptPosition camera, std::uint32_t gameMs);
     NativeScriptReferenceResult<NativeScriptBlipRef> CreateContactBlip(const NativeScriptContactBlipRequest&);
+    // Exact host-owned live GPU callback; no CPU-image/property fallback. Replays
+    // resolve the original generation before querying later renderer readiness.
+    NativeScriptReferenceResult<NativeScriptBlipRef> CreateCoordinateBlip(const NativeScriptCoordinateBlipRequest&,
+        const std::function<bool(std::int32_t)>& radarSpriteReady);
     NativeScriptServiceResult SetBlipDisplay(const NativeScriptBlipDisplayRequest&);
     const NativeScriptPickup* ResolvePickup(NativeScriptPickupRef ref) const;
     const NativeScriptRadarBlip* ResolveBlip(NativeScriptBlipRef ref) const;

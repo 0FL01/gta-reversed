@@ -60,7 +60,7 @@ if __name__ == '__main__':
         command = [str(OUTPUT / name), '--play', '--new-game', '--game-dir', str(args.game_dir.resolve()), '--seconds', '5']
         result = subprocess.run(command, cwd=WORKSPACE, env=env, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True, timeout=180)
-        (OUTPUT / 'cargens-boot-runtime.log').write_text(result.stdout + f'runner-exit={result.returncode}\n')
+        (OUTPUT / 'radar-ipl-boundary-boot-runtime.log').write_text(result.stdout + f'runner-exit={result.returncode}\n')
         print(result.stdout, end='')
         assert result.returncode == 1, f'Expected runtime terminal exit 1, got {result.returncode}'
         captures = re.findall(r'^boot-capture .*$', result.stdout, re.MULTILINE)
@@ -80,9 +80,9 @@ if __name__ == '__main__':
         assert len(set(seeds)) == 1, seeds  # one platform capture; no fixed seed oracle
         assert 'boot-runtime PASS exit=1 swaps=5 fullboot=0' in result.stdout
         terminals = re.findall(r'^play-.*terminal .*$', result.stdout, re.MULTILINE)
-        assert len(terminals) == 1 and terminals[0].startswith('play-script-terminal status=Unsupported thread=1 generation=1 ip=212086 opcode=04CE executed=183 '), terminals
+        assert len(terminals) == 1 and terminals[0].startswith('play-script-terminal status=Unsupported thread=1 generation=1 ip=212309 opcode=016C executed=195 '), terminals
         assert 'play-ok' not in result.stdout and 'play-fail' not in result.stdout and 'FAIL' not in result.stdout
-        print('boot-probe PASS actual-captures=5 mission-quanta=0/256/512/768/1024+183 mission-prefix=1207 terminal=04CE@212086 '
+        print('boot-probe PASS actual-captures=5 mission-quanta=0/256/512/768/1024+195 mission-prefix=1219 terminal=016C@212309 '
             'worldRevision=3 sourceCOL-overrides=14/13-disabled garage-ready=50-each-frame camera-unchanged=1 '
             'actual-source-body=1 real-physics=1 quarters=1/2/3/0/1 sources=22 initial=88 creates=10 switches=10 '
             'no-demand=1 pool-created=0 rng-draws=0 borrowed-generation=3 clothes-not-reached=1 runtime-exit=1 fullboot=0')

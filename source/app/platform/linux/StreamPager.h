@@ -23,7 +23,10 @@ struct E2ELoadInfo {
 };
 
 struct StreamPagerOptions {
-    // Offline fixtures deliberately retain their original small text-IPL slice.
+    // Offline fixtures deliberately retain their original small text-IPL slice,
+    // unmasked text Interior/zero Flags, and historical transform convention.
+    // Runtime true preserves the authored text type word in Flags and exports
+    // Interior = Flags & 255, matching the binary IPL/source loader contract.
     bool includeStreamed = false;
     float radius = 300.0f;
     int maxInstances = 80;
@@ -60,5 +63,7 @@ bool StreamPager_Update(float camX, float camY, float camZ, WorldShotScene& scen
 void StreamPager_Counters(int& sectorsLoaded, int& sectorsEvicted, int& modelsPeak, int& trisPeak);
 void StreamPager_Shutdown();
 // COPY of the actual pre-render-filter IPL population, including binary source
-// and record provenance. Call under pager ownership; result survives shutdown.
+// and record provenance. Requires includeStreamed=true: full text/binary Flags
+// and low-byte Interior. Legacy offline mode deliberately rejects this export.
+// Call under pager ownership; result survives shutdown.
 bool StreamPager_CollisionPopulation(NativeCollisionPopulation& out, std::string& error);

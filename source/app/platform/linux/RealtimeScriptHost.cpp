@@ -374,6 +374,12 @@ NativeScriptReferenceResult<NativeScriptBlipRef> RealtimeScriptHost::CreateConta
     if (readiness.Status != NativeScriptServiceStatus::Ready) return {readiness, {}};
     return m_Entities.CreateContactBlip(prepared);
 }
+NativeScriptReferenceResult<NativeScriptBlipRef> RealtimeScriptHost::CreateCoordinateBlip(const NativeScriptCoordinateBlipRequest& request) {
+    if (!m_Initialized) return {Error("radar service requires initialized host"), {}};
+    if (m_PendingLoad) return {Error("entity service cannot cross pending world request"), {}};
+    for (const auto& event : m_Events) if (event.Id == request.Id) return {Error("entity request ID already owned by player/world service"), {}};
+    return m_Entities.CreateCoordinateBlip(request, m_RadarSpriteReady);
+}
 NativeScriptServiceResult RealtimeScriptHost::SetBlipDisplay(const NativeScriptBlipDisplayRequest& request) {
     if (!m_Initialized) return Error("radar service requires initialized host");
     if (m_PendingLoad) return Error("entity service cannot cross pending world request");

@@ -63,11 +63,11 @@ if __name__ == '__main__':
     else:
         result = subprocess.run([str(OUTPUT / NAME), str(args.game_dir.resolve())], cwd=WORKSPACE,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=240)
-        (OUTPUT / (NAME + '.log')).write_text(result.stdout)
+        (OUTPUT / ('radar-ipl-boundary-' + NAME + '.log')).write_text(result.stdout)
         print(result.stdout, end='')
         result.check_returncode()
         summary = re.search(r'^native-pickup-script .*$', result.stdout, re.MULTILINE)
         assert summary and 'failures=0' in summary.group() and 'hud33=actual-GL' in summary.group()
-        assert 'actualCommands=1207 terminal=04CE@212086' in summary.group()
+        assert 'actualCommands=1219 terminal=016C@212309' in summary.group()
         assert 'collection=controller-owned ring=20 staleRef=safe' in summary.group()
         assert 'fullboot=0' in summary.group() and 'FAIL' not in result.stdout

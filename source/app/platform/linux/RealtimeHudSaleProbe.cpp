@@ -10,6 +10,33 @@
 #undef main
 #pragma GCC diagnostic pop
 
+static WorldShotImage PropertyReferenceImage(const char* name) {
+    // The legacy LoadRadar helper decodes texels only (filter remains zero).
+    // Read sampler metadata independently from the original named TXD texture.
+    HudFile file;
+    Require(OS_FileOpen(FILE_DATA_AREA_DEFAULT, &file.Handle, "models/hud.txd", FILE_ACCESS_READ) == 0 && file.Handle,
+        "property reference HUD open");
+    const auto size = OS_FileSize(file.Handle);
+    Require(size > 0, "property reference HUD size");
+    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
+    Require(OS_FileRead(file.Handle, bytes.data(), size) == 0, "property reference HUD read");
+    auto* previous = rw::TexDictionary::getCurrent();
+    rw::StreamMemory stream;
+    stream.open(bytes.data(), static_cast<uint32>(bytes.size()));
+    Require(rw::findChunk(&stream, rw::ID_TEXDICTIONARY, nullptr, nullptr), "property reference dictionary chunk");
+    auto* dictionary = rw::TexDictionary::streamRead(&stream);
+    stream.close();
+    Require(dictionary, "property reference dictionary");
+    auto* texture = dictionary->find(name);
+    WorldShotImage image{};
+    Require(texture && !std::strcmp(texture->name, name) && TexSample_Decode(texture, image),
+        "independent exact property texture name/decode");
+    image.filter = texture->filterAddressing;
+    rw::TexDictionary::setCurrent(previous);
+    dictionary->destroy();
+    return image;
+}
+
 static void Camera(int width, int height) {
     glMatrixMode(GL_MODELVIEW); glLoadIdentity();
     glMatrixMode(GL_PROJECTION); glLoadIdentity();
@@ -125,9 +152,12 @@ static void RadarOracle(const RealtimeHud& hud, const WorldShotImage& image, int
     blip.Position = {2585, -1685, 0}; blip.Sprite = sprite; blip.Active = true;
     const std::array blips{blip}; state.scriptBlips = blips;
     const auto actual = Render(hud, view, state, 640, 448);
+    Require((image.filter & 0xff) == 1, "owned property sprites use source nearest filtering");
     int bad = 0, ink = 0;
     for (int y = 374; y < 390; ++y) for (int x = 103; x < 118; ++x) {
-        const auto texel = Sample(image.rgba, image.w, image.h, (x + .5 - 102.5) / 16, (y + .5 - 374) / 16);
+        const int tx = int(std::floor((x + .5 - 102.5) / 16 * image.w));
+        const int ty = int(std::floor((y + .5 - 374) / 16 * image.h));
+        const auto* texel = &image.rgba[(ty * image.w + tx) * 4];
         const auto offset = ((448 - 1 - y) * 640 + x) * 4;
         const double a = texel[3] / 255.;
         for (int c = 0; c < 4; ++c) {
@@ -150,6 +180,20 @@ int main(int argc, char** argv) {
     Require(MenuShot_LoadPricedownFont(game, font, error, sizeof(error)), error);
     Require(NativeScriptEntities_LoadRadar(game, green, message, 31), message.c_str());
     Require(NativeScriptEntities_LoadRadar(game, red, message, 32), message.c_str());
+    const auto greenReference = PropertyReferenceImage("radar_propertyG");
+    const auto redReference = PropertyReferenceImage("radar_propertyR");
+    Require(green.w == greenReference.w && green.h == greenReference.h && green.rgba == greenReference.rgba &&
+        red.w == redReference.w && red.h == redReference.h && red.rgba == redReference.rgba,
+        "legacy property texels match independently named source textures");
+    green = greenReference; red = redReference;
+    for (const auto sprite : {31, 32}) {
+        const auto& reference = sprite == 31 ? green : red;
+        const auto* prepared = hud.PreparedRadarSprite(sprite);
+        Require(prepared && prepared->w == reference.w && prepared->h == reference.h &&
+            prepared->rgba == reference.rgba && prepared->filter == reference.filter &&
+            !std::strcmp(prepared->name, reference.name), "HUD property source identity/texels/sampler");
+        std::printf("sale-radar-source sprite=%d image=%s filter=0x%04x\n", sprite, reference.name, reference.filter);
+    }
     Require(green.rgba != red.rgba, "green and red are distinct owned sprites");
     for (unsigned char ch : std::string("$0123456789Buy")) {
         const auto glyph = OracleGlyph(ch);

@@ -11,6 +11,7 @@ struct RealtimeHudView {
     float cameraYaw = 0.0f;
     bool radar = true;
     bool clock = true;
+    bool locationsBlips = true, contactsBlips = true, otherBlips = true;
 };
 
 struct RealtimeHudState {
@@ -44,6 +45,12 @@ struct RealtimeHudProjectedPrice {
 
 class RealtimeHud {
 public:
+    // Radar.cpp 0x8D0720 has 64 entries, although eRadarSprite also declares
+    // TORENO=64. NONE/WHITE (0/1) are intentionally textureless.
+    static constexpr std::size_t RadarSpriteCount = 64;
+    enum class RadarSpriteState { Unloaded, NoTexture, Missing, Unsupported, Prepared, Uploaded, InvalidId };
+    static const char* RadarSpriteName(int sprite);
+    RadarSpriteState GetRadarSpriteState(int sprite) const;
     RealtimeHud() = default;
     ~RealtimeHud();
     RealtimeHud(const RealtimeHud&) = delete;
@@ -58,6 +65,9 @@ public:
     void ReleaseGpu();
     // Numeric IDs are the source eRadarSprite values. A non-null prepared
     // image is owned CPU data; IsRadarSpriteUploaded is the readiness gate.
+    // NONE's untextured colour/height trace is not represented by a fake image.
+    // Contact Display 1/3 also needs the parent's world-cylinder renderer;
+    // coordinate Display 1/3 has no source Draw3dMarkers case.
     const WorldShotImage* PreparedRadarSprite(int sprite) const;
     bool IsRadarSpriteUploaded(int sprite) const;
     // After world/water, before swap. Width/height are drawable PIXELS, not SDL
@@ -82,7 +92,12 @@ public:
 private:
     RadarMapAssets m_Radar;
     MenuHudFont m_Font;
-    WorldShotImage m_PropertyRadar{}, m_ForSaleRadar{}, m_Radar33{};
-    std::array<unsigned int, 151> m_Textures{}; // tiles, centre/north/disc/font1/propertyR/G/radar_race
+    std::array<WorldShotImage, RadarSpriteCount> m_RadarSprites{};
+    std::array<RadarSpriteState, RadarSpriteCount> m_RadarSpriteStates{};
+    struct Textures {
+        std::array<unsigned int, 144> Tiles{};
+        unsigned int Centre{}, North{}, Disc{}, Font{};
+        std::array<unsigned int, RadarSpriteCount> Sprites{};
+    } m_Textures;
     bool m_Loaded = false;
 };
