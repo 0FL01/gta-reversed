@@ -23,13 +23,12 @@ def build():
             i += 1
         else:
             flags.append(template[i]); i += 1
-    line = next(c for c in commands if ' -o mad-sa-linux ' in c)
-    link = shlex.split(next(p for p in line.split('&&') if ' -o mad-sa-linux ' in p))
-    units = ['StreamPager', 'NativeCollisionAssets', 'RealtimeGameplay', 'NativeGarages', 'NativeGaragesRuntime',
-             'NativeScriptSession', 'NativeScriptEntities', 'RealtimeScriptHost', NAME]
-    link = [a for a in link if not any(a.endswith('/'+n+'.cpp.o') for n in units+['MainLinux', 'Realtime'])]
+    units = ['StreamPager', 'NativeCollisionAssets', 'RealtimeGameplay', 'NativePlayerAssets', 'TexSample', 'Handling',
+             'Collide', 'IfpAnim', 'CarPose', 'GxtText', 'MenuShot',
+             'NativePlayerActivity', 'NativeGarages', 'NativeVehiclePool', 'NativeGaragesRuntime', 'NativeScriptSession',
+             'NativeScriptEntities', 'NativeEntryExits', 'RealtimeScriptHost', NAME]
     OUTPUT.mkdir(parents=True, exist_ok=True)
-    link[link.index('-o')+1] = str(OUTPUT / NAME)
+    objects = []
     with (OUTPUT / (NAME+'-build.log')).open('w') as log:
         for unit in units:
             obj = OUTPUT / ('garage-runtime-'+unit+'.o')
@@ -37,8 +36,15 @@ def build():
                                '-c', str(SOURCE / (unit+'.cpp')), '-o', str(obj)]
             log.write(shlex.join(command)+'\n'); log.flush()
             subprocess.run(command, cwd=directory, stdout=log, stderr=subprocess.STDOUT, check=True)
-            link.insert(1, str(obj))
-        link.insert(1, '-Wl,--gc-sections')
+            objects.append(str(obj))
+        oswrapper = OUTPUT / 'garage-runtime-oswrapper_linux.o'
+        command = flags + ['-UNDEBUG', '-Wall', '-Wextra', '-ffunction-sections', '-fdata-sections',
+                           '-c', str(SOURCE.parents[2] / 'oswrapper/oswrapper_linux.cpp'), '-o', str(oswrapper)]
+        log.write(shlex.join(command)+'\n'); log.flush()
+        subprocess.run(command, cwd=directory, stdout=log, stderr=subprocess.STDOUT, check=True)
+        objects.append(str(oswrapper))
+        link = [flags[0], '-Wl,--gc-sections', *objects, 'vendor/librw/src/librw.a',
+                '-lpthread', '-lm', '-o', str(OUTPUT / NAME)]
         log.write(shlex.join(link)+'\n'); log.flush()
         subprocess.run(link, cwd=directory, stdout=log, stderr=subprocess.STDOUT, check=True)
 

@@ -1,5 +1,5 @@
 // Test-only mock services. This probe proves VM behavior, NOT world/player boot.
-#include "app/platform/linux/NativeScriptSession.h"
+#include "app/platform/linux/NativeScriptEntities.h"
 
 #include <algorithm>
 #include <bit>
@@ -105,6 +105,26 @@ struct MockServices final : NativeScriptServices {
     ServiceStatus PickupMode = ServiceStatus::Unsupported;
     unsigned PickupCalls = 0;
     std::int32_t PickupReference = 0x00010020;
+    NativeScriptPickupReferenceRequest PickupOperation;
+    std::array<ServiceStatus, 2> PickupOperationMode{ServiceStatus::Unsupported, ServiceStatus::Unsupported};
+    std::array<unsigned, 2> PickupOperationCalls{}, PickupOperationCompletions{};
+    std::array<NativeScriptRequestId, 2> PickupOperationIds{};
+    bool PickupCollected = false;
+    NativeScriptServiceResult PickupOperationRespond(unsigned kind, const NativeScriptPickupReferenceRequest& r) {
+        PickupOperation = r; ++PickupOperationCalls[kind]; PickupOperationIds[kind] = r.Id;
+        if (Throw) throw std::runtime_error("TEST-ONLY pickup operation exception");
+        if (PickupOperationMode[kind] == ServiceStatus::Ready &&
+            std::find(ReadyIds.begin(), ReadyIds.end(), r.Id) == ReadyIds.end()) {
+            ReadyIds.push_back(r.Id); ++PickupOperationCompletions[kind];
+        }
+        return {PickupOperationMode[kind], "TEST-ONLY pickup operation service"};
+    }
+    NativeScriptPickupCollectedResult HasPickupBeenCollected(const NativeScriptPickupReferenceRequest& r) override {
+        return {PickupOperationRespond(0, r), PickupCollected};
+    }
+    NativeScriptServiceResult RemoveScriptPickup(const NativeScriptPickupReferenceRequest& r) override {
+        return PickupOperationRespond(1, r);
+    }
     NativeScriptReferenceResult<NativeScriptPickupRef> CreatePickup(const NativeScriptPickupRequest& r) override {
         Pickup = r; ++PickupCalls;
         if (Throw) throw std::runtime_error("TEST-ONLY pickup service exception");
@@ -405,7 +425,8 @@ void RejectCode(const Bytes& code, Status expected = Status::Error) {
     Check(session.ReadGlobal(8, oldGlobal), "read before rejected instruction");
     const auto result = session.Step(services);
     Check(result.Status == expected && result.Executed == 0 && result.IP == FixtureCode && !result.Message.empty(), "explicit malformed/unknown fault at same IP");
-    Check(session.State() == before && services.Calls == std::array<unsigned, 3>{} && services.NewCalls == std::array<unsigned, 4>{}, "decode fault before services or state effects");
+    Check(session.State() == before && services.Calls == std::array<unsigned, 3>{} && services.NewCalls == std::array<unsigned, 4>{} &&
+        services.PickupOperationCalls == std::array<unsigned, 2>{}, "decode fault before services or state effects");
     Check(session.ReadGlobal(8, newGlobal) && newGlobal == oldGlobal, "decode fault does not write output");
 }
 
@@ -1106,6 +1127,105 @@ void PickupBarriers() {
     const auto oversized=Fixture(code,{},std::vector<std::array<char,24>>(395)); const auto state=session.State();
     Check(!session.LoadMainBytes(oversized,oversized.size(),error) && session.State()==state,"used-object source395 capacity rejected before replacing live session");
 }
+void PickupOperationsAndFloatCopy() {
+    constexpr auto ref = std::int32_t(0x81230020u);
+    NativeScriptSession session; MockServices services; Bytes code;
+    Op(code, 4); Var(code, 8); I32(code, ref);
+    Op(code, 6); Var(code, 0, false); Var(code, 8);
+    Op(code, 0x00D6); I8(code, 1); // two AND predicates
+    Op(code, 0x0214); Var(code, 8);
+    Op(code, 0x8214); Var(code, 0, false);
+    Op(code, 0x0215); Var(code, 8);
+    LoadFixture(session, services, code);
+    Check(session.Run(services, 3).Status == Status::BudgetYield, "pickup operation full-reference/IF setup");
+    services.PickupOperationMode[0] = ServiceStatus::Pending;
+    services.PickupCollected = true;
+    const auto before = session.State();
+    Check(session.Step(services).Status == Status::Pending && session.State() == before &&
+        services.PickupOperation.Pickup.Value == ref, "0214 Pending preserves full generation-bearing pickup reference");
+    const auto firstId = services.PickupOperation.Id;
+    Check(session.Step(services).Status == Status::Pending && services.PickupOperation.Id == firstId &&
+        session.State() == before, "0214 Pending polls one stable request without compare mutation");
+    services.PickupOperationMode[0] = ServiceStatus::Ready;
+    Check(session.Step(services).Status == Status::Advanced && session.State().Condition &&
+        session.State().AndOrState == 1 && services.PickupOperationCompletions[0] == 1,
+        "0214 Ready applies first source AND condition exactly once");
+    services.PickupCollected = false;
+    Check(session.Step(services).Status == Status::Advanced && session.State().Condition &&
+        session.State().AndOrState == 0 && session.State().LastOpcode == 0x8214,
+        "NOT 0214 inverts the consumed false result and completes source AND aggregation");
+    services.PickupOperationMode[1] = ServiceStatus::Ready;
+    const auto writes = session.State().LastOutputWrite;
+    Check(session.Step(services).Status == Status::Advanced && services.PickupOperation.Pickup.Value == ref &&
+        services.PickupOperationCompletions[1] == 1 && session.State().LastOutputWrite == writes && session.State().Condition,
+        "0215 passes the full reference without output or condition mutation");
+
+    for (bool global : {false, true}) for (bool globalIndex : {false, true}) {
+        NativeScriptSession arraySession; MockServices arrayServices; Bytes array;
+        Op(array, globalIndex ? 4 : 6); Var(array, globalIndex ? 8 : 0, globalIndex); I8(array, 1);
+        Op(array, global ? 4 : 6); Var(array, global ? 16 : 2, global); I32(array, ref);
+        Op(array, 0x0214); Array(array, global, global ? 12 : 1, globalIndex,
+            globalIndex ? 8 : 0, 2);
+        LoadFixture(arraySession, arrayServices, array);
+        arrayServices.PickupOperationMode[0] = ServiceStatus::Ready;
+        Check(arraySession.Run(arrayServices, 3).Status == Status::BudgetYield &&
+            arrayServices.PickupOperation.Pickup.Value == ref && !arraySession.State().Condition,
+            "0214 reads source integer arrays across independent array/index banks");
+    }
+    for (auto opcode : {std::uint16_t(0x0214), std::uint16_t(0x0215)}) {
+        Bytes complete; Op(complete, opcode); I32(complete, ref);
+        for (std::size_t n = 2; n < complete.size(); ++n) RejectCode(Bytes(complete.begin(), complete.begin() + n));
+    }
+    Bytes bad; Op(bad, 0x8215); I32(bad, ref); RejectCode(bad, Status::Unsupported);
+    bad.clear(); Op(bad, 0x0214); Array(bad, true, 12, false, 0, 1, true); RejectCode(bad);
+
+    struct MissingPickupServices final : NativeScriptServices {
+        NativeScriptServiceResult RequestCollision(const NativeScriptCollisionRequest&) override { return {}; }
+        NativeScriptServiceResult LoadScene(const NativeScriptSceneRequest&) override { return {}; }
+        NativeScriptServiceResult CreatePlayer(const NativeScriptPlayerRequest&) override { return {}; }
+    } missing;
+    for (auto opcode : {std::uint16_t(0x0214), std::uint16_t(0x0215)}) {
+        NativeScriptSession absent; Bytes operation; Op(operation, opcode); I32(operation, ref);
+        const auto fixture = Fixture(operation); std::string error;
+        Check(absent.LoadMainBytes(fixture, fixture.size(), error), "missing pickup-service fixture load");
+        Check(absent.Run(missing, 6).Status == Status::BudgetYield, "missing pickup-service header traversal");
+        const auto unsupported = absent.Step(missing);
+        Check(unsupported.Status == Status::Unsupported && unsupported.IP == FixtureCode &&
+            unsupported.Opcode == opcode && unsupported.Executed == 0,
+            "missing 0214/0215 service is explicit Unsupported without advancement");
+    }
+    {
+        NativeScriptSession absent; Bytes operation; Op(operation, 0x8214); I32(operation, ref);
+        const auto fixture = Fixture(operation); std::string error;
+        Check(absent.LoadMainBytes(fixture, fixture.size(), error) && absent.Run(missing, 6).Status == Status::BudgetYield,
+            "missing negated pickup-service fixture setup");
+        const auto unsupported = absent.Step(missing);
+        Check(unsupported.Status == Status::Unsupported && unsupported.Opcode == 0x8214 && unsupported.IP == FixtureCode,
+            "missing negated 0214 preserves exact source opcode on explicit Unsupported");
+    }
+
+    for (bool globalIndex : {false, true}) {
+        NativeScriptSession copySession; MockServices copyServices; Bytes copy;
+        Op(copy, globalIndex ? 4 : 6); Var(copy, globalIndex ? 8 : 0, globalIndex); I8(copy, 1);
+        Op(copy, 5); Var(copy, 16); F(copy, -7.25f);
+        const auto copyIp = FixtureCode + copy.size();
+        Op(copy, 0x0086);
+        Array(copy, true, 8, globalIndex, globalIndex ? 8 : 0, 2, true);
+        Array(copy, true, 12, globalIndex, globalIndex ? 8 : 0, 2, true);
+        LoadFixture(copySession, copyServices, copy);
+        Check(copySession.Run(copyServices, 3).Status == Status::BudgetYield, "0086 global float array copy executes");
+        std::int32_t value = 0;
+        Check(copySession.ReadGlobal(12, value) && std::bit_cast<float>(value) == -7.25f &&
+            copySession.State().LastOutputWrite.IP == copyIp && copySession.State().LastOutputWrite.Variable == 12 &&
+            copySession.State().LastOutputWrite.Global && copySession.State().LastOutputWrite.Value == value,
+            "0086 bit-preserving global float copy records resolved destination");
+    }
+    bad.clear(); Op(bad, 0x0086); Var(bad, 0, false); Var(bad, 8); RejectCode(bad);
+    bad.clear(); Op(bad, 0x0086); Var(bad, 8); Var(bad, 0, false); RejectCode(bad);
+    bad.clear(); Op(bad, 0x0086); Var(bad, 8); F(bad, 1); RejectCode(bad);
+    Bytes complete; Op(complete, 0x0086); Var(complete, 8); Var(complete, 12);
+    for (std::size_t n = 2; n < complete.size(); ++n) RejectCode(Bytes(complete.begin(), complete.begin() + n));
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1121,5 +1241,6 @@ int main(int argc, char** argv) {
     EntryExitBarriers();
     GarageBarriers();
     PickupBarriers();
+    PickupOperationsAndFloatCopy();
     std::printf("native-script-probe PASS checks=%zu services=TEST-ONLY no-worldboot-claim\n", s_Checks);
 }

@@ -92,6 +92,9 @@ struct NativeScriptContactBlipRequest {
     NativeScriptRequestId Id;
     NativeScriptPosition Position;
     std::int32_t Sprite = 0;
+    // Raw VM requests leave this false. The realtime host sets it only after
+    // its registered radar consumer reports the numeric sprite ready now.
+    bool RadarSpriteReady = false;
 };
 struct NativeScriptBlipDisplayRequest {
     NativeScriptRequestId Id;
@@ -109,6 +112,11 @@ struct NativeScriptGarageRequest {
     NativeScriptRequestId Id;
     std::array<char, 8> Name{};
 };
+
+// Defined by NativeScriptEntities, which owns the source pickup collection ring.
+// Keep this VM interface non-owning rather than duplicating the shared types.
+struct NativeScriptPickupReferenceRequest;
+struct NativeScriptPickupCollectedResult;
 
 class NativeScriptServices {
 public:
@@ -137,6 +145,8 @@ public:
     virtual NativeScriptServiceResult SetBlipDisplay(const NativeScriptBlipDisplayRequest&) { return {}; }
     virtual NativeScriptServiceResult SetEntryExitFlag(const NativeScriptEntryExitFlagRequest&) { return {}; }
     virtual NativeScriptServiceResult DeactivateGarage(const NativeScriptGarageRequest&) { return {}; }
+    virtual NativeScriptPickupCollectedResult HasPickupBeenCollected(const NativeScriptPickupReferenceRequest&);
+    virtual NativeScriptServiceResult RemoveScriptPickup(const NativeScriptPickupReferenceRequest&);
 };
 
 enum class NativeScriptStatus { Advanced, BudgetYield, Waiting, Pending, Unsupported, Error };
@@ -276,6 +286,7 @@ private:
         std::array<std::uint32_t, 6> Values{};
         std::uint32_t OutputValue = 0; // decoded old cell for checked in-place arithmetic
         std::array<char, 8> Text{};
+        std::array<std::uint8_t, 6> Tags{}; // normalized scalar/array operand bank
         bool OutputGlobal = true;
         bool Negated = false;
         std::int32_t Int(unsigned i) const;

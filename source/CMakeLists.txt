@@ -31,6 +31,9 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
         app/platform/linux/RealtimeGameplay.cpp
         app/platform/linux/RealtimeHud.cpp
         app/platform/linux/NativePlayerAssets.cpp
+        app/platform/linux/NativePlayerActivity.cpp
+        app/platform/linux/NativePadFeedback.cpp
+        app/platform/linux/NativeVehiclePool.cpp
         app/platform/linux/NativeCollisionAssets.cpp
         app/platform/linux/NativeScriptSession.cpp
         app/platform/linux/NativeScriptEntities.cpp

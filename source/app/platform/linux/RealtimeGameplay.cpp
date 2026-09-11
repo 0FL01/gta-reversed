@@ -528,12 +528,16 @@ uint64_t RealtimeGameplayWorld::TriangleTests() const { return m_Impl->Tests; }
 uint64_t RealtimeGameplayWorld::VolumeTests() const { return m_Impl->VolumeTests; }
 
 struct RealtimeGameplay::Impl {
+    enum class AirActivity { None, Jump, Fall };
+    enum class PublishedActivity { Unsupported, Ground, Drive, JumpAir, FallAir, JumpLand, FallLand };
+    static constexpr size_t JumpLandClip=4, FallLandClip=5;
     struct Clip {
         const char* Name;
         std::vector<WorldShotScene> Frames;
         float Duration=1.0f,Stride=1.0f;
     };
-    std::array<Clip,4> Clips{{{"IDLE_stance",{}},{"WALK_civi",{}},{"run_player",{}},{"JUMP_glide",{}}}};
+    std::array<Clip,6> Clips{{{"IDLE_stance",{}},{"WALK_civi",{}},{"run_player",{}},{"JUMP_glide",{}},
+                              {"JUMP_land",{}},{"FALL_land",{}}}};
     WorldShotScene CarBind,Actors;
     CarPoseStats CarStats{};
     CarPoseMeasure Measure{};
@@ -552,7 +556,113 @@ struct RealtimeGameplay::Impl {
     bool BasePlayer=false;
     IfpAnimStats PlayerStats{};
     RealtimeGameplayState State;
+    NativePlayerActivitySnapshot Activity;
     RealtimeGameplayCamera Camera;
+    AirActivity AirSource=AirActivity::None;
+    PublishedActivity Published=PublishedActivity::Unsupported;
+    uint64_t ActivityRevision=0;
+    double LandingTime=0;
+    float LandingSpeed=1;
+    size_t LandingClip=FallLandClip;
+    bool LandingFinished=false;
+
+    void PublishActivity() {
+        Activity.Authority=NativePlayerActivityAuthority::SourceBacked;
+        Activity.Revision=++ActivityRevision;
+    }
+
+    void ActivityPedState(NativePlayerPedState state) {
+        Activity.PedState=state;
+        Activity.Alive=state!=NativePlayerPedState::Die && state!=NativePlayerPedState::Dead;
+    }
+    void ResetActivityTasks() {
+        for (auto& chain:Activity.PrimaryTasks) chain.clear();
+        for (auto& chain:Activity.SecondaryTasks) chain.clear();
+        // This is only the controller-owned task projection. Typed events are
+        // cleared by owner reset or an explicit source consumption, never here.
+        Activity.PrimaryTasks[static_cast<size_t>(NativePlayerPrimarySlot::Default)]={NativePlayerTaskType::PlayerOnFoot};
+        Activity.SecondaryTasks[static_cast<size_t>(NativePlayerSecondarySlot::Facial)]={NativePlayerTaskType::Facial};
+        ActivityPedState(NativePlayerPedState::Idle);
+        Activity.InAir=false; Activity.Landing=false;
+    }
+    void SpawnActivity() {
+        Activity={};
+        Activity.GamePlaying=true; Activity.CoopGame=false;
+        for (auto& weapon:Activity.WeaponSlots) {
+            weapon.Type=NativePlayerWeaponType::Unarmed;
+            weapon.State=NativePlayerWeaponState::Ready;
+            weapon.AmmoInClip=weapon.TotalAmmo=0;
+        }
+        Activity.ActiveWeaponSlot=0;
+        AirSource=AirActivity::None;
+        Published=PublishedActivity::Ground;
+        LandingTime=0; LandingSpeed=1; LandingClip=FallLandClip; LandingFinished=false;
+        ResetActivityTasks();
+        PublishActivity();
+    }
+    void GroundActivity() {
+        if (Published==PublishedActivity::Ground) return;
+        ResetActivityTasks();
+        AirSource=AirActivity::None;
+        Published=PublishedActivity::Ground;
+        LandingTime=0; LandingFinished=false;
+        PublishActivity();
+    }
+    void DriveActivity() {
+        if (Published==PublishedActivity::Drive) return;
+        ResetActivityTasks();
+        Activity.PrimaryTasks[static_cast<size_t>(NativePlayerPrimarySlot::Primary)]={NativePlayerTaskType::CarDrive};
+        ActivityPedState(NativePlayerPedState::Driving);
+        AirSource=AirActivity::None;
+        Published=PublishedActivity::Drive;
+        LandingTime=0; LandingFinished=false;
+        PublishActivity();
+    }
+    void AirborneActivity() {
+        const auto next=AirSource==AirActivity::Jump ? PublishedActivity::JumpAir:PublishedActivity::FallAir;
+        if (Published==next) return;
+        ResetActivityTasks();
+        Activity.InAir=true;
+        if (AirSource==AirActivity::Jump) {
+            Activity.PrimaryTasks[static_cast<size_t>(NativePlayerPrimarySlot::Primary)]={
+                NativePlayerTaskType::Jump,NativePlayerTaskType::InAirAndLand,NativePlayerTaskType::InAir
+            };
+        } else {
+            Activity.PrimaryTasks[static_cast<size_t>(NativePlayerPrimarySlot::EventResponseTemp)]={
+                NativePlayerTaskType::InAirAndLand,NativePlayerTaskType::InAir
+            };
+        }
+        Published=next;
+        PublishActivity();
+    }
+    void LandingActivity(bool jumpLand) {
+        ResetActivityTasks();
+        Activity.Landing=true;
+        if (AirSource==AirActivity::Jump) {
+            Activity.PrimaryTasks[static_cast<size_t>(NativePlayerPrimarySlot::Primary)]={
+                NativePlayerTaskType::Jump,NativePlayerTaskType::InAirAndLand,NativePlayerTaskType::Land
+            };
+        } else {
+            Activity.PrimaryTasks[static_cast<size_t>(NativePlayerPrimarySlot::EventResponseTemp)]={
+                NativePlayerTaskType::InAirAndLand,NativePlayerTaskType::Land
+            };
+        }
+        LandingClip=jumpLand ? JumpLandClip:FallLandClip;
+        // The current native player profile has source-initial fat/muscle, so
+        // STAT_MOD_2 is 1. Sprint JUMP_land has the source 2x speed override.
+        LandingSpeed=jumpLand ? 2.0f:1.0f;
+        LandingTime=0; LandingFinished=false;
+        Published=AirSource==AirActivity::Jump ? PublishedActivity::JumpLand:PublishedActivity::FallLand;
+        PublishActivity();
+    }
+    void AdvanceLanding(double dt) {
+        if (LandingFinished) return;
+        LandingTime=std::min(LandingTime+dt*LandingSpeed,static_cast<double>(Clips[LandingClip].Duration));
+        LandingFinished=LandingTime>=Clips[LandingClip].Duration;
+    }
+    float LandingPhase() const {
+        return std::clamp(static_cast<float>(LandingTime/Clips[LandingClip].Duration),0.0f,1.0f);
+    }
 
     bool PedBlocked(const RealtimeGameplayWorld& world,V feet,bool car=true) const {
         for (float z:PedCenters) {
@@ -605,6 +715,7 @@ struct RealtimeGameplay::Impl {
                                 Mul(Forward(State.CarHeading),static_cast<float>(Measure.frontY)*0.3f)));
     }
     void Interact(const RealtimeGameplayWorld& world) {
+        if (Activity.Landing) return;
         if (!State.CarPresent) return;
         if (std::abs(State.Speed)>0.8f) return;
         if (!State.InVehicle) {
@@ -798,14 +909,20 @@ struct RealtimeGameplay::Impl {
         // long fall and rewind only after the grounded crossfade has completed.
         if (!State.Grounded) AirPhase=std::min(AirPhase+dt/Clips[3].Duration,1.0f);
         else if (AirBlend==0) AirPhase=0;
-        State.Animation=Clips[AirBlend>0.5f ? 3:MoveBlend<0.5f ? 0:RunBlend>0.5f ? 2:1].Name;
+        State.Animation=Activity.Landing ? Clips[LandingClip].Name:
+            Clips[AirBlend>0.5f ? 3:MoveBlend<0.5f ? 0:RunBlend>0.5f ? 2:1].Name;
         State.LocomotionPhase=Phase; State.LocomotionBlend=MoveBlend;
         State.RunBlend=RunBlend; State.AirBlend=AirBlend;
-        const std::array<float,4> weights{(1-AirBlend)*(1-MoveBlend),(1-AirBlend)*MoveBlend*(1-RunBlend),
-                                          (1-AirBlend)*MoveBlend*RunBlend,AirBlend};
-        const std::array<float,4> phases{IdlePhase,Phase,Phase,AirPhase};
-        std::array<size_t,4> frames{}; std::array<float,4> blends{};
-        for (size_t k=0;k<4;++k) {
+        std::array<float,6> weights{},phases{IdlePhase,Phase,Phase,AirPhase,0,0};
+        if (Activity.Landing) {
+            weights[LandingClip]=1;
+            phases[LandingClip]=LandingPhase();
+        } else {
+            weights={ (1-AirBlend)*(1-MoveBlend),(1-AirBlend)*MoveBlend*(1-RunBlend),
+                      (1-AirBlend)*MoveBlend*RunBlend,AirBlend,0,0 };
+        }
+        std::array<size_t,6> frames{}; std::array<float,6> blends{};
+        for (size_t k=0;k<Clips.size();++k) {
             const float sample=phases[k]*static_cast<float>(Clips[k].Frames.size()-1);
             frames[k]=static_cast<size_t>(sample); blends[k]=sample-static_cast<float>(frames[k]);
         }
@@ -817,7 +934,7 @@ struct RealtimeGameplay::Impl {
             out.pos.resize(State.InVehicle ? 0 : ma.pos.size()); out.nrm.resize(out.pos.size());
             for (size_t v=0;v<out.pos.size();v+=3) {
                 V p{},n{};
-                for (size_t k=0;k<4;++k) {
+                for (size_t k=0;k<Clips.size();++k) {
                     if (weights[k]<=0) continue;
                     const auto& a=Clips[k].Frames[frames[k]].meshes[i];
                     const auto& b=Clips[k].Frames[std::min(frames[k]+1,Clips[k].Frames.size()-1)].meshes[i];
@@ -935,14 +1052,18 @@ bool RealtimeGameplay::InitializeModel(const char* gameDir,std::string& error,co
                     frame.scene,frame.stats,err,sizeof(err),next->Actors.images.empty() && i==0)) {
                     error=err; return false;
                 }
-                const int tracks=std::string(clip.Name)=="JUMP_glide" ? 26:32;
+                const bool partial=std::string(clip.Name)=="JUMP_glide" || std::string(clip.Name)=="JUMP_land" ||
+                                   std::string(clip.Name)=="FALL_land";
+                const int tracks=partial ? 26:32;
                 if (frame.stats.bones!=32 || frame.stats.mapped!=tracks) { error="CJ clip has unexpected bone coverage"; return false; }
             }
         } else if (!IfpAnim_Seq(gameDir,next->BasePlayer ? "player":"andre",clip.Name,33,seq,err,sizeof(err))) { error=err; return false; }
         if (next->BasePlayer) {
             for (const auto& frame:seq) {
                 const auto& s=frame.stats;
-                const int tracks=std::string(clip.Name)=="JUMP_glide" ? 26:32;
+                const bool partial=std::string(clip.Name)=="JUMP_glide" || std::string(clip.Name)=="JUMP_land" ||
+                                   std::string(clip.Name)=="FALL_land";
+                const int tracks=partial ? 26:32;
                 if (std::string(s.model)!="player" || std::string(s.src)!="gta3.img:player.dff" || s.tried ||
                     s.bones!=32 || s.mapped!=tracks || s.verts!=6 || s.tris!=2 || std::abs(s.wsum-1.0)>0.001) {
                     error="MODEL_PLAYER must be direct gta3.img:player.dff (6 vertices, 2 triangles, 32 bones), no fallback"; return false;
@@ -1027,6 +1148,7 @@ bool RealtimeGameplay::Spawn(const RealtimeGameplayWorld& world,float x,float y,
     p.State={}; p.State.Ped=ped; p.State.Car=car;
     p.State.PedHeading=p.State.CarHeading=p.OrbitYaw=heading;
     p.State.Ready=p.State.Grounded=true;
+    p.SpawnActivity();
     p.CarVertical=p.CarPitch=p.CarRoll=p.Phase=p.PedSpeed=0;
     p.TransmissionState={}; p.TransmissionTime=0;
     p.IdlePhase=p.AirPhase=p.MoveBlend=p.RunBlend=p.AirBlend=0;
@@ -1051,6 +1173,7 @@ bool RealtimeGameplay::SpawnScriptPlayer(const RealtimeGameplayWorld& world,V au
     p.State.PedHeading=p.OrbitYaw=Pi*0.5f; // SetupPlayerPed orientation(0,0,0): forward +Y
     p.State.Ready=p.State.MissionCreated=p.State.PlayerOnFootTask=true;
     p.State.Grounded=std::abs(authoredBase.Z-ground)<0.05f;
+    p.SpawnActivity(); // Exact 0053 task/event/ped/weapon initial state.
     p.CarVertical=p.CarPitch=p.CarRoll=p.Phase=p.PedSpeed=0;
     p.IdlePhase=p.AirPhase=p.MoveBlend=p.RunBlend=p.AirBlend=0;
     p.Pose(0); p.UpdateCamera(0,world); error.clear(); return true;
@@ -1078,6 +1201,9 @@ bool RealtimeGameplay::SetScriptCameraBehind(const RealtimeGameplayWorld& world,
 void RealtimeGameplay::Tick(double dt,const RealtimeGameplayInput& input,const RealtimeGameplayWorld& world) {
     auto& p=*m_Impl;
     if (!p.State.Ready || !std::isfinite(dt) || dt<=0) return;
+    // FinishAnimCB marks SIMPLE_LAND finished; the following ProcessPed clears
+    // bIsLanding and completes the task.
+    if (p.Activity.Landing && p.LandingFinished && p.State.Grounded && !p.State.InVehicle) p.GroundActivity();
     RealtimeGameplayInput controls=input;
     auto axis=[](float v) { return std::isfinite(v) ? std::clamp(v,-1.0f,1.0f):0.0f; };
     controls.Forward=axis(controls.Forward); controls.Side=axis(controls.Side);
@@ -1085,9 +1211,11 @@ void RealtimeGameplay::Tick(double dt,const RealtimeGameplayInput& input,const R
     p.OrbitPitch=std::clamp(p.OrbitPitch+(std::isfinite(input.LookPitch) ? input.LookPitch:0.0f),-0.1f,1.0f);
     const double bounded=std::min(dt,0.1);
     p.State.DroppedSeconds+=dt-bounded;
+    const auto landingsBefore=p.State.Landings;
     if (controls.Interact) p.Interact(world);
-    if (controls.Jump && !p.State.InVehicle && p.State.Grounded) {
+    if (controls.Jump && !p.State.InVehicle && p.State.Grounded && !p.Activity.Landing) {
         p.State.VerticalSpeed=5.0f; p.State.Grounded=false; ++p.State.Jumps;
+        p.AirSource=Impl::AirActivity::Jump;
     }
     const int steps=std::max(1,static_cast<int>(std::ceil(bounded*120.0)));
     const float h=static_cast<float>(bounded/steps);
@@ -1107,9 +1235,20 @@ void RealtimeGameplay::Tick(double dt,const RealtimeGameplayInput& input,const R
     const float run=std::clamp((p.PedSpeed-2.0f)/3.5f,0.0f,1.0f);
     p.Phase+=distance/(p.Clips[1].Stride*(1-run)+p.Clips[2].Stride*run);
     p.Phase-=std::floor(p.Phase);
+    if (p.State.InVehicle) p.DriveActivity();
+    else if (p.State.Landings!=landingsBefore) {
+        const bool jumpLand=controls.Sprint && (std::abs(controls.Forward)>0.0f || std::abs(controls.Side)>0.0f);
+        p.LandingActivity(jumpLand);
+    }
+    else if (p.Activity.Landing) p.AdvanceLanding(bounded);
+    else if (!p.State.Grounded) {
+        if (p.AirSource==Impl::AirActivity::None) p.AirSource=Impl::AirActivity::Fall;
+        p.AirborneActivity();
+    } else p.GroundActivity();
     ++p.State.Ticks; p.State.SimulatedSeconds+=bounded;
     p.Pose(static_cast<float>(bounded)); p.UpdateCamera(static_cast<float>(bounded),world);
 }
 const RealtimeGameplayState& RealtimeGameplay::State() const { return m_Impl->State; }
+const NativePlayerActivitySnapshot& RealtimeGameplay::Activity() const { return m_Impl->Activity; }
 const RealtimeGameplayCamera& RealtimeGameplay::Camera() const { return m_Impl->Camera; }
 const WorldShotScene& RealtimeGameplay::Actors() const { return m_Impl->Actors; }

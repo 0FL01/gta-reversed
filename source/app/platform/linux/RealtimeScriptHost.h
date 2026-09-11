@@ -6,6 +6,7 @@
 #include "app/platform/linux/NativeScriptEntities.h"
 #include "app/platform/linux/NativeEntryExits.h"
 #include "app/platform/linux/NativeGarages.h"
+#include "app/platform/linux/NativeVehiclePool.h"
 #include "app/platform/linux/RealtimeGameplay.h"
 #include "app/platform/linux/StreamPager.h"
 #include <functional>
@@ -48,6 +49,7 @@ class RealtimeScriptHost final : public NativeScriptServices {
 public:
     using WorldLoader = std::function<NativeScriptServiceResult(const NativeScriptSceneRequest&, RealtimeScriptWorldPublication&)>;
     using CancelLoad = std::function<void(const NativeScriptRequestId&)>;
+    using RadarSpriteReady = std::function<bool(std::int32_t)>;
     explicit RealtimeScriptHost(RealtimeGameplay& gameplay);
     ~RealtimeScriptHost() override;
     RealtimeScriptHost(const RealtimeScriptHost&) = delete;
@@ -94,7 +96,15 @@ public:
     const NativeEntryExits& EntryExits() const { return m_EntryExits; }
     NativeGarages& Garages() { return m_Garages; }
     const NativeGarages& Garages() const { return m_Garages; }
+    NativeVehiclePool& Vehicles() { return m_Vehicles; }
+    const NativeVehiclePool& Vehicles() const { return m_Vehicles; }
+    std::shared_ptr<const NativeVehiclePoolSnapshot> PublishVehicles(std::uint64_t frame, std::string& error);
     const RealtimeScriptPlayerInfo& PlayerInfo() const { return m_PlayerInfo; }
+    // Register the main-thread presentation consumer. Production wiring must
+    // query live GPU ownership (RealtimeHud::IsRadarSpriteUploaded), not merely
+    // the presence of prepared CPU RGBA. The callback is queried per new request.
+    void SetRadarSpriteReady(RadarSpriteReady ready);
+    NativeScriptServiceResult PrepareContactBlipRequest(NativeScriptContactBlipRequest& request) const;
     // Parent supplies real collect-key edge/target/busy/global suppression and
     // unpaused frame counter. Balance/mission inputs are overwritten from owned
     // player/SCM state. Tick stages only; Entities().AdvanceTime publishes atomically.
@@ -102,6 +112,8 @@ public:
     // non-None Entities().PickupRequirement() is explicit Unsupported source
     // task/event work, with the real pickup reference; never acknowledge collect.
     bool TickProperties(NativeScriptPosition camera, bool alive, NativeScriptPropertyInput input, std::string& error);
+    // Production authority comes from the controller, not caller alive/busy flags.
+    bool TickPlayerEntities(NativeScriptPosition camera, NativeScriptPropertyInput input, std::string& error);
 
     NativeScriptServiceResult RequestCollision(const NativeScriptCollisionRequest&) override;
     NativeScriptServiceResult LoadScene(const NativeScriptSceneRequest&) override;
@@ -117,6 +129,8 @@ public:
     NativeScriptServiceResult SetBlipDisplay(const NativeScriptBlipDisplayRequest&) override;
     NativeScriptServiceResult SetEntryExitFlag(const NativeScriptEntryExitFlagRequest&) override;
     NativeScriptServiceResult DeactivateGarage(const NativeScriptGarageRequest&) override;
+    NativeScriptPickupCollectedResult HasPickupBeenCollected(const NativeScriptPickupReferenceRequest&) override;
+    NativeScriptServiceResult RemoveScriptPickup(const NativeScriptPickupReferenceRequest&) override;
 
 private:
     NativeScriptServiceResult PublishWorld(const NativeScriptSceneRequest& request, bool requireGround = false);
@@ -131,12 +145,14 @@ private:
     RealtimeScriptPlayerInfo m_PlayerInfo;
     NativeEntryExits m_EntryExits;
     NativeGarages m_Garages;
+    NativeVehiclePool m_Vehicles;
     std::shared_ptr<const NativeCollisionContext> m_CollisionContext;
     std::shared_ptr<const NativePlacementOverrides> m_InitialPlacementOverrides;
     std::shared_ptr<const RealtimeGameplayWorld> m_World;
     RealtimeScriptWorldPublication m_Publication;
     WorldLoader m_Loader;
     CancelLoad m_Cancel;
+    RadarSpriteReady m_RadarSpriteReady;
     std::optional<NativeScriptRequestId> m_PendingLoad;
     NativeScriptPosition m_PendingPosition;
     bool m_PendingGround = false;

@@ -8,6 +8,7 @@
 #include <limits>
 #include <string>
 
+#include "app/platform/linux/NativePlayerActivity.h"
 #include "app/platform/linux/WorldShot.h"
 
 struct NativePlayerClothes;
@@ -130,6 +131,9 @@ public:
                float heading, std::string& error);
     void Tick(double dt, const RealtimeGameplayInput& input, const RealtimeGameplayWorld& world);
     const RealtimeGameplayState& State() const;
+    // Immutable view of the controller's sole mutable activity snapshot. Use
+    // Activity().Revision as its owner revision; State().Ticks resets on Spawn.
+    const NativePlayerActivitySnapshot& Activity() const;
     const RealtimeGameplayCamera& Camera() const;
     // Persistent owned scene. Images/UV/material topology stay fixed after init;
     // update only dynamic positions/normals on the GPU. Ped meshes are hidden

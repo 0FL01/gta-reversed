@@ -9,6 +9,7 @@
 #include "app/platform/linux/NativePlayerAssets.h"
 #include "app/platform/linux/RealtimeScriptHost.h"
 #include "app/platform/linux/NativeGaragesRuntime.h"
+#include "app/platform/linux/NativePadFeedback.h"
 
 #ifndef GL_GLEXT_PROTOTYPES
 #define GL_GLEXT_PROTOTYPES
@@ -710,7 +711,7 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             stats.Empty, stats.Unsupported, collisionContext->Population.Instances.size(), collisionContext->Radius);
     }
     RealtimeScriptHost scriptHost(gameplay);
-    NativeGaragesRuntime garageRuntime(scriptHost.Garages(), gameplay);
+    NativeGaragesRuntime garageRuntime(scriptHost.Garages(), gameplay, scriptHost.Vehicles());
     constexpr std::size_t scriptQuota = 256; // one bounded scheduler pass per presented frame
     if (newGame) {
         if (!scriptHost.InitializeBeforeWorker(gameDir, gameplayError, collisionContext)) {
@@ -810,7 +811,14 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
         return 1;
     }
     std::printf("play-hud radar=144-tiles clock=game-time player=%s\n", gameplayEnabled ? "gameplay" : "hidden-freecam");
+    NativePadFeedback padFeedback;
+    const auto reportPad = [](const NativePadFeedbackResult& result) {
+        if (result.Status == NativePadFeedbackStatus::Error || result.Status == NativePadFeedbackStatus::Unsupported)
+            std::printf("play-pad-feedback status=%d message=%s\n", static_cast<int>(result.Status), result.Message.c_str());
+    };
+    reportPad(padFeedback.Initialize());
     if (newGame) {
+        scriptHost.SetRadarSpriteReady([&hud](std::int32_t sprite) { return hud.IsRadarSpriteUploaded(sprite); });
         scriptHost.SealStartup(); // no live LOAD_SCENE callback yet: explicitly Unsupported
     }
     world.Start(gameplayEnabled); // final startup parser has returned; transfer exclusive pager ownership
@@ -844,6 +852,7 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
         RealtimeGameplayInput input{};
         bool collectJustDown = false;
         while (SDL_PollEvent(&event)) {
+            reportPad(padFeedback.HandleEvent(event));
             if (event.type == SDL_EVENT_QUIT || event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED ||
                 (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE)) {
                 running = false;
@@ -866,6 +875,7 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             return 1;
         }
         if (width <= 0 || height <= 0 || (SDL_GetWindowFlags(window.window) & SDL_WINDOW_MINIMIZED)) {
+            reportPad(padFeedback.Update(true));
             paused = true;
             SDL_Delay(50);
             continue;
@@ -884,6 +894,7 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             }
         }
         paused = false;
+        reportPad(padFeedback.Update(false));
         const bool* keys = SDL_GetKeyboardState(nullptr);
         if (freecam) {
             camera.Update(dt, keys, demo);
@@ -955,28 +966,39 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             }
         }
         if (newGame) {
-            const auto garageResult = garageRuntime.Tick(*world.active->cpu, {frames});
+            const auto vehicleSnapshot = scriptHost.PublishVehicles(frames, gameplayError);
+            if (!vehicleSnapshot) {
+                std::printf("play-vehicle-terminal status=Unsupported message=%s\n", gameplayError.c_str());
+                return 1;
+            }
+            const auto garageResult = garageRuntime.Tick(*world.active->cpu, {frames}, vehicleSnapshot);
             if (garageResult.Status != NativeScriptServiceStatus::Ready) {
                 std::printf("play-garage-terminal status=%s frame=%llu message=%s\n",
                     garageResult.Status == NativeScriptServiceStatus::Unsupported ? "Unsupported" : "Error",
                     static_cast<unsigned long long>(frames), garageResult.Message.c_str());
                 return 1;
             }
-            const auto& state = gameplay.State();
             auto& entities = scriptHost.Entities();
             NativeScriptPropertyInput propertyInput;
             propertyInput.FrameCounter = static_cast<std::uint32_t>(frames);
             propertyInput.CollectJustDown = collectJustDown;
-            if (!scriptHost.TickProperties({camera.x, camera.y, camera.z}, state.Ready, propertyInput, gameplayError) ||
+            if (!scriptHost.TickPlayerEntities({camera.x, camera.y, camera.z}, propertyInput, gameplayError) ||
                 !entities.AdvanceTime(static_cast<std::uint32_t>(gameNs / 1'000'000), gameplayError)) {
                 const auto& requirement = entities.PickupRequirement();
-                if (requirement.Kind == NativeScriptPickupRequirementKind::PlayerTaskEligibility) {
+                if (requirement.Kind != NativeScriptPickupRequirementKind::None) {
                     std::printf("play-pickup-terminal status=Unsupported frame=%u model=%d type=%d collection-completed=0 message=%s\n",
                         requirement.FrameCounter, requirement.Model, requirement.Type, gameplayError.c_str());
                     return 1;
                 }
                 std::printf("play-fail script entity clock: %s\n", gameplayError.c_str());
                 return 1;
+            }
+            while (const auto shake = entities.ConsumePadShake()) {
+                // MenuManager constructor defaults vibration on; no settings UI yet.
+                const auto feedback = padFeedback.Submit(*shake, true);
+                reportPad(feedback);
+                std::printf("play-pickup-feedback frame=%u status=%d devices=%zu applied=%zu\n",
+                    shake->FrameCounter, static_cast<int>(feedback.Status), feedback.Devices, feedback.AppliedDevices);
             }
             // Each unpaused frame is published once here. Type18 does not debit
             // cash or remove the pickup: the remaining purchase belongs to SCM.

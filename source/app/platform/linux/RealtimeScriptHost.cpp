@@ -53,6 +53,11 @@ bool RealtimeScriptHost::InitializeBeforeWorker(const char* gameDir, std::string
                               door.SourcePose.Basis, garage ? bool(garage->Flags & 0x40) : door.CollisionEnabled});
     }
     m_InitialPlacementOverrides = std::make_shared<const NativePlacementOverrides>(std::move(placements));
+    // These are the only vehicle producers implemented in this native mode.
+    // Missing original traffic/generators are NOT declared source-empty.
+    if (!m_Vehicles.BindProducer(NativeVehicleProducer::NativeScm, error) ||
+        !m_Vehicles.BindProducer(NativeVehicleProducer::NativeGameplayController, error) ||
+        !m_Vehicles.SealProducerExtent(error)) return false;
     m_Initialized = true;
     error.clear(); return true;
 }
@@ -114,6 +119,22 @@ void RealtimeScriptHost::SetLiveWorldLoader(WorldLoader loader, CancelLoad cance
     assert(!m_PendingLoad);
     assert(!loader || cancel); // every asynchronous owner has cancellation
     m_Loader = std::move(loader); m_Cancel = std::move(cancel);
+}
+void RealtimeScriptHost::SetRadarSpriteReady(RadarSpriteReady ready) { m_RadarSpriteReady = std::move(ready); }
+NativeScriptServiceResult RealtimeScriptHost::PrepareContactBlipRequest(NativeScriptContactBlipRequest& request) const {
+    request.RadarSpriteReady = false;
+    // Property sprites are prepared and owned by NativeScriptEntities itself.
+    if (request.Sprite == 31 || request.Sprite == 32) return Ready();
+    if (!m_RadarSpriteReady) return Unsupported("contact sprite has no registered radar consumer");
+    try {
+        if (!m_RadarSpriteReady(request.Sprite)) return Unsupported("contact sprite is not ready in the registered radar consumer");
+    } catch (const std::exception& exception) {
+        return Error("radar sprite readiness exception: " + std::string(exception.what()));
+    } catch (...) {
+        return Error("unknown radar sprite readiness exception");
+    }
+    request.RadarSpriteReady = true;
+    return Ready();
 }
 void RealtimeScriptHost::SealStartup() { m_Sealed = true; m_EntryExits.SealStartup(); m_Garages.SealStartup(); }
 NativeScriptResult RealtimeScriptHost::RunPass(std::size_t quota) {
@@ -279,6 +300,22 @@ bool RealtimeScriptHost::TickProperties(NativeScriptPosition camera, bool alive,
     m_Entities.Tick({player.PedRoot.X, player.PedRoot.Y, player.PedRoot.Z}, camera, alive, player.InVehicle, input);
     error.clear(); return true;
 }
+bool RealtimeScriptHost::TickPlayerEntities(NativeScriptPosition camera, NativeScriptPropertyInput input, std::string& error) {
+    const auto& activity = m_Gameplay.Activity();
+    input.Busy = NativePlayerPickupBusy(activity);
+    input.Coop = activity.CoopGame;
+    if (!TickProperties(camera, activity.Alive, input, error)) return false;
+    return m_Entities.UpdatePlayerActivity(input.FrameCounter, activity.Revision, activity, error);
+}
+std::shared_ptr<const NativeVehiclePoolSnapshot> RealtimeScriptHost::PublishVehicles(std::uint64_t frame, std::string& error) {
+    if (!m_Initialized || m_Gameplay.State().CarPresent) {
+        error = "vehicle census requires initialized host; controller car needs a registered source lifecycle";
+        return {};
+    }
+    // Base-player startup creates no controller car. New SCM vehicle services
+    // must allocate from m_Vehicles before publishing a rendered vehicle.
+    return m_Vehicles.Publish(frame, error);
+}
 NativeScriptReferenceResult<NativeScriptPickupRef> RealtimeScriptHost::CreatePickup(const NativeScriptPickupRequest& request) {
     if (!m_Initialized) return {Error("pickup service requires initialized host"), {}};
     if (m_PendingLoad) return {Error("entity service cannot cross pending world request"), {}};
@@ -290,7 +327,12 @@ NativeScriptReferenceResult<NativeScriptBlipRef> RealtimeScriptHost::CreateConta
     if (!m_Initialized) return {Error("radar service requires initialized host"), {}};
     if (m_PendingLoad) return {Error("entity service cannot cross pending world request"), {}};
     for (const auto& event : m_Events) if (event.Id == request.Id) return {Error("entity request ID already owned by player/world service"), {}};
-    return m_Entities.CreateContactBlip(request);
+    // Entity-owned replays must not become dependent on later GPU/context state.
+    if (m_Entities.OwnsRequest(request.Id)) return m_Entities.CreateContactBlip(request);
+    auto prepared = request;
+    const auto readiness = PrepareContactBlipRequest(prepared);
+    if (readiness.Status != NativeScriptServiceStatus::Ready) return {readiness, {}};
+    return m_Entities.CreateContactBlip(prepared);
 }
 NativeScriptServiceResult RealtimeScriptHost::SetBlipDisplay(const NativeScriptBlipDisplayRequest& request) {
     if (!m_Initialized) return Error("radar service requires initialized host");
@@ -318,4 +360,19 @@ NativeScriptServiceResult RealtimeScriptHost::DeactivateGarage(const NativeScrip
     const auto result=m_Garages.Deactivate(request.Name);
     if (result.Status==NativeScriptServiceStatus::Ready) Commit(event);
     return result;
+}
+NativeScriptPickupCollectedResult RealtimeScriptHost::HasPickupBeenCollected(const NativeScriptPickupReferenceRequest& request) {
+    if (!m_Initialized) return {Error("pickup query service requires initialized host"), false};
+    if (m_PendingLoad) return {Error("pickup query service cannot cross pending world request"), false};
+    for (const auto& event : m_Events) if (event.Id == request.Id)
+        return {Error("pickup query request ID already owned by player/world service"), false};
+    // The source ring survives pickup removal, so this must not use ResolvePickup.
+    return m_Entities.HasPickupBeenCollected(request);
+}
+NativeScriptServiceResult RealtimeScriptHost::RemoveScriptPickup(const NativeScriptPickupReferenceRequest& request) {
+    if (!m_Initialized) return Error("pickup removal service requires initialized host");
+    if (m_PendingLoad) return Error("pickup removal service cannot cross pending world request");
+    for (const auto& event : m_Events) if (event.Id == request.Id)
+        return Error("pickup removal request ID already owned by player/world service");
+    return m_Entities.RemoveScriptPickup(request);
 }

@@ -1,4 +1,5 @@
 #include "app/platform/linux/NativeScriptSession.h"
+#include "app/platform/linux/NativeScriptEntities.h"
 
 #include <algorithm>
 #include <atomic>
@@ -60,6 +61,7 @@ constexpr Signature Signatures[] = {
     {0x0001, {O::Integer}, 1}, {0x0002, {O::Integer}, 1},
     {0x0004, {O::Output, O::Integer}, 2}, {0x0005, {O::FloatOutput, O::Float}, 2},
     {0x0006, {O::Output, O::Integer}, 2}, {0x0007, {O::FloatOutput, O::Float}, 2},
+    {0x0086, {O::FloatOutput, O::Float}, 2},
     // BasicCommands.cpp::{Add,Sub,Mult,Div}InPlace<T>. The opcode selects
     // global/local destination and int/float; addresses remain byte/cell based.
     {0x0008, {O::InOutInteger, O::Integer}, 2}, {0x0009, {O::InOutFloat, O::Float}, 2},
@@ -94,6 +96,7 @@ constexpr Signature Signatures[] = {
     {0x09B4, {O::Float, O::Float, O::Float, O::Integer, O::Integer}, 5},
     {0x02B9, {O::String}, 1},
     {0x0213, {O::Integer, O::Integer, O::Float, O::Float, O::Float, O::Output}, 6},
+    {0x0214, {O::Integer}, 1}, {0x0215, {O::Integer}, 1},
 };
 
 const Signature* FindSignature(uint16 opcode) {
@@ -107,6 +110,9 @@ bool FitsInt(float value) {
         && double(value) <= std::numeric_limits<int32>::max();
 }
 } // namespace
+
+NativeScriptPickupCollectedResult NativeScriptServices::HasPickupBeenCollected(const NativeScriptPickupReferenceRequest&) { return {}; }
+NativeScriptServiceResult NativeScriptServices::RemoveScriptPickup(const NativeScriptPickupReferenceRequest&) { return {}; }
 
 int32 NativeScriptSession::Instruction::Int(unsigned i) const { return std::bit_cast<int32>(Values[i]); }
 float NativeScriptSession::Instruction::Float(unsigned i) const { return std::bit_cast<float>(Values[i]); }
@@ -263,7 +269,7 @@ bool NativeScriptSession::Decode(std::size_t thread, uint32 ip, Instruction& d, 
     if (!reader.Read(2, opcode)) { error = "truncated opcode"; return false; }
     d.Opcode = uint16(opcode);
     d.Negated = (opcode & 0x8000) != 0;
-    if (d.Negated && (opcode & 0x7FFF) == 0x001A) d.Opcode &= 0x7FFF;
+    if (d.Negated && ((opcode & 0x7FFF) == 0x001A || (opcode & 0x7FFF) == 0x0214)) d.Opcode &= 0x7FFF;
     const auto* signature = FindSignature(d.Opcode);
     if (!signature) { error = "unsupported opcode (including NOT forms)"; return false; }
     for (unsigned i = 0; i < signature->Count; ++i) {
@@ -274,6 +280,7 @@ bool NativeScriptSession::Decode(std::size_t thread, uint32 ip, Instruction& d, 
         const bool floating = type == O::Float || type == O::FloatOutput || type == O::InOutFloat;
         if (type == O::String) {
             if (tag != 9) { error = "unsupported string operand type"; return false; }
+            d.Tags[i] = uint8(tag);
             for (auto& c : d.Text) {
                 if (!reader.Read(1, bits)) { error = "truncated short string"; return false; }
                 c = char(bits);
@@ -312,6 +319,7 @@ bool NativeScriptSession::Decode(std::size_t thread, uint32 ip, Instruction& d, 
                 error = "script variable out of bounds";
                 return false;
             }
+            d.Tags[i] = uint8(tag);
             if (output) {
                 d.Values[i] = bits;
                 d.OutputGlobal = tag == 2;
@@ -334,6 +342,7 @@ bool NativeScriptSession::Decode(std::size_t thread, uint32 ip, Instruction& d, 
             error = "wrong/unsupported typed operand";
             return false;
         }
+        d.Tags[i] = uint8(tag);
         d.Values[i] = bits;
         if (type == O::Float && !std::isfinite(d.Float(i))) { error = "nonfinite float operand"; return false; }
     }
@@ -393,7 +402,8 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         return Fail(thread, FindSignature(d.Opcode) ? NativeScriptStatus::Error : NativeScriptStatus::Unsupported, uint16(d.Opcode | (d.Negated ? 0x8000 : 0)), error);
     }
     const int32 a = d.Int(0), b = d.Int(1);
-    auto invalid = [&](const char* message) { return Fail(thread, NativeScriptStatus::Error, d.Opcode, message); };
+    const auto rawOpcode = uint16(d.Opcode | (d.Negated ? 0x8000 : 0));
+    auto invalid = [&](const char* message) { return Fail(thread, NativeScriptStatus::Error, rawOpcode, message); };
     std::vector<uint8> mission;
     std::optional<NativeScriptThreadState> newThread;
     uint32 arithmeticResult = 0;
@@ -455,6 +465,11 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
     case 0x0004: case 0x0005: case 0x0006: case 0x0007:
         if (d.OutputGlobal != (d.Opcode <= 0x0005)) return invalid("assignment variable bank mismatch");
         break;
+    case 0x0086:
+        // The pinned SA schema and BasicCommands::AssignTo<float,float> both
+        // require global float variables. Global arrays retain the same bank.
+        if (d.Tags[0] != 2 || d.Tags[1] != 2) return invalid("0086 global float variable bank mismatch");
+        break;
     case 0x00D6:
         if (a < 0 || (a > 7 && (a < 21 || a > 27))) return invalid("invalid IF condition count");
         break;
@@ -481,7 +496,8 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
     }
 
     int32 reference = -1;
-    if (d.Opcode == 0x04E4 || d.Opcode == 0x03CB || d.Opcode == 0x0053 || d.Opcode == 0x07AF || d.Opcode == 0x01F5 || d.Opcode == 0x0373 || d.Opcode == 0x0173 || d.Opcode == 0x0517 || d.Opcode == 0x0518 || d.Opcode == 0x0570 || d.Opcode == 0x018B || d.Opcode == 0x09B4 || d.Opcode == 0x02B9 || d.Opcode == 0x0213) {
+    bool pickupCollected = false;
+    if (d.Opcode == 0x04E4 || d.Opcode == 0x03CB || d.Opcode == 0x0053 || d.Opcode == 0x07AF || d.Opcode == 0x01F5 || d.Opcode == 0x0373 || d.Opcode == 0x0173 || d.Opcode == 0x0517 || d.Opcode == 0x0518 || d.Opcode == 0x0570 || d.Opcode == 0x018B || d.Opcode == 0x09B4 || d.Opcode == 0x02B9 || d.Opcode == 0x0213 || d.Opcode == 0x0214 || d.Opcode == 0x0215) {
         const NativeScriptRequestId id{m_SessionId, m_CommandSequence + 1, state.IP};
         NativeScriptServiceResult result;
         // All operands/output bounds have been checked before ANY host call.
@@ -497,6 +513,11 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
                 auto created = services.CreatePickup(request);
                 result = std::move(created.Result); reference = created.Reference.Value;
             }
+            if (d.Opcode == 0x0214) {
+                auto queried = services.HasPickupBeenCollected({id, {a}});
+                result = std::move(queried.Result); pickupCollected = queried.Collected;
+            }
+            if (d.Opcode == 0x0215) result = services.RemoveScriptPickup({id, {a}});
             if (d.Opcode == 0x09B4) result = services.SetEntryExitFlag({id, d.Float(0), d.Float(1), d.Float(2), d.Int(3), d.Int(4)});
             if (d.Opcode == 0x02B9) result = services.DeactivateGarage({id, d.Text});
             if (d.Opcode == 0x0517) {
@@ -542,11 +563,11 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
             m_Pending = true;
             m_PendingInstruction = d;
             m_PendingThread = thread;
-            return {NativeScriptStatus::Pending, state.IP, d.Opcode, 0, std::move(result.Message), thread};
+            return {NativeScriptStatus::Pending, state.IP, rawOpcode, 0, std::move(result.Message), thread};
         case NativeScriptServiceStatus::Unsupported:
-            return Fail(thread, NativeScriptStatus::Unsupported, d.Opcode, "service unsupported: " + result.Message);
+            return Fail(thread, NativeScriptStatus::Unsupported, rawOpcode, "service unsupported: " + result.Message);
         case NativeScriptServiceStatus::Error:
-            return Fail(thread, NativeScriptStatus::Error, d.Opcode, "service failed: " + result.Message);
+            return Fail(thread, NativeScriptStatus::Error, rawOpcode, "service failed: " + result.Message);
         case NativeScriptServiceStatus::Ready: break;
         default: return invalid("invalid service result");
         }
@@ -569,6 +590,14 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         } else state.Locals[offset] = value;
         state.LastOutputWrite = {state.LastOutputWrite.Sequence + 1, state.IP, offset, d.OutputGlobal, std::bit_cast<int32>(value)};
     };
+    auto updateCondition = [&](bool condition) {
+        condition = condition != d.Negated;
+        if (!state.AndOrState) state.Condition = condition;
+        else if (state.AndOrState < 21) state.Condition &= condition;
+        else state.Condition |= condition;
+        if (state.AndOrState == 1 || state.AndOrState == 21) state.AndOrState = 0;
+        else if (state.AndOrState) --state.AndOrState;
+    };
     state.Waiting = false;
     m_Pending = false;
     m_PendingInstruction.reset();
@@ -578,7 +607,7 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         state.Waiting = true;
         break;
     case 0x0002: d.Next = Target(thread, a); break;
-    case 0x0004: case 0x0005: case 0x0006: case 0x0007: write(0, d.Values[1]); break;
+    case 0x0004: case 0x0005: case 0x0006: case 0x0007: case 0x0086: write(0, d.Values[1]); break;
     case 0x0008: case 0x0009: case 0x000A: case 0x000B:
     case 0x000C: case 0x000D: case 0x000E: case 0x000F:
     case 0x0010: case 0x0011: case 0x0012: case 0x0013:
@@ -597,15 +626,8 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         state.AndOrState = a ? uint8(a + 1) : 0;
         state.Condition = a > 0 && a < 21;
         break;
-    case 0x001A: {
-        const bool condition = (a > b) != d.Negated;
-        if (!state.AndOrState) state.Condition = condition;
-        else if (state.AndOrState < 21) state.Condition &= condition;
-        else state.Condition |= condition;
-        if (state.AndOrState == 1 || state.AndOrState == 21) state.AndOrState = 0;
-        else if (state.AndOrState) --state.AndOrState;
-        break;
-    }
+    case 0x001A: updateCondition(a > b); break;
+    case 0x0214: updateCondition(pickupCollected); break;
     case 0x004D: if (!state.Condition) d.Next = Target(thread, a); break;
     case 0x004E:
         // Owned VM lifecycle only. ShutdownThisScript's original-address world
@@ -680,7 +702,7 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
     default: break; // service commands committed their effects on Ready
     }
     state.LastInstructionIP = state.IP;
-    state.LastOpcode = d.Opcode | (d.Negated ? 0x8000 : 0);
+    state.LastOpcode = rawOpcode;
     state.IP = d.Next;
     ++state.Commands;
     ++m_CommandSequence;

@@ -29,12 +29,43 @@ static_assert(std::is_nothrow_move_assignable_v<NativeScriptPickup>);
 static_assert(std::is_nothrow_copy_assignable_v<NativeScriptRadarBlip>);
 static_assert(std::is_nothrow_move_assignable_v<WorldShotScene>);
 static_assert(std::is_nothrow_move_assignable_v<NativeScriptHelpPresentation>);
+static_assert(std::is_nothrow_move_assignable_v<NativePlayerActivitySnapshot>);
 void Require(bool ok, const std::string& error) { if (!ok) throw std::runtime_error(error); }
 NativeScriptServiceResult Ready() { return {NativeScriptServiceStatus::Ready, {}}; }
 NativeScriptServiceResult Error(const char* error) { return {NativeScriptServiceStatus::Error, error}; }
 NativeScriptServiceResult Unsupported(const char* error) { return {NativeScriptServiceStatus::Unsupported, error}; }
 uint32 Word(const std::uint8_t* p) { return uint32(p[0]) | uint32(p[1]) << 8 | uint32(p[2]) << 16 | uint32(p[3]) << 24; }
 bool Finite(NativeScriptPosition p) { return std::isfinite(p.X) && std::isfinite(p.Y) && std::isfinite(p.Z); }
+template<typename T> bool ValidEnum(T value, T last) {
+    return static_cast<std::underlying_type_t<T>>(value) <= static_cast<std::underlying_type_t<T>>(last);
+}
+bool ValidActivity(const NativePlayerActivitySnapshot& activity) {
+    if (!ValidEnum(activity.Authority, NativePlayerActivityAuthority::SourceBacked) ||
+        !ValidEnum(activity.PedState, NativePlayerPedState::Unsupported) ||
+        activity.ActiveWeaponSlot >= activity.WeaponSlots.size()) return false;
+    for (const auto& chain : activity.PrimaryTasks) for (const auto task : chain)
+        if (!ValidEnum(task, NativePlayerTaskType::Unsupported)) return false;
+    for (const auto& chain : activity.SecondaryTasks) for (const auto task : chain)
+        if (!ValidEnum(task, NativePlayerTaskType::Unsupported)) return false;
+    for (const auto event : activity.TypedEvents)
+        if (!ValidEnum(event, NativePlayerEventType::Unsupported)) return false;
+    for (const auto& weapon : activity.WeaponSlots) {
+        if (!ValidEnum(weapon.Type, NativePlayerWeaponType::Unsupported) ||
+            !ValidEnum(weapon.State, NativePlayerWeaponState::Unsupported)) return false;
+    }
+    return true;
+}
+bool SameActivity(const NativePlayerActivitySnapshot& a, const NativePlayerActivitySnapshot& b) {
+    if (a.Authority != b.Authority || a.PrimaryTasks != b.PrimaryTasks || a.SecondaryTasks != b.SecondaryTasks ||
+        a.TypedEvents != b.TypedEvents || a.PedState != b.PedState || a.InAir != b.InAir ||
+        a.Landing != b.Landing || a.Alive != b.Alive || a.GamePlaying != b.GamePlaying ||
+        a.CoopGame != b.CoopGame || a.ActiveWeaponSlot != b.ActiveWeaponSlot) return false;
+    for (std::size_t i = 0; i < a.WeaponSlots.size(); ++i) {
+        const auto& x = a.WeaponSlots[i]; const auto& y = b.WeaponSlots[i];
+        if (x.Type != y.Type || x.State != y.State || x.AmmoInClip != y.AmmoInClip || x.TotalAmmo != y.TotalAmmo) return false;
+    }
+    return true;
+}
 struct File {
     void* Handle = nullptr;
     explicit File(const char* path) {
@@ -266,6 +297,7 @@ bool NativeScriptRadarVisible(const NativeScriptRadarBlip& b, float distance, bo
 }
 NativeScriptEntities::NativeScriptEntities(std::size_t pickups, std::size_t blips): m_Pickups(pickups), m_Blips(blips) {
     Require(pickups <= 620 && blips <= 175, "native entity capacity exceeds source pools");
+    for (auto& ref : m_CollectedPickups) ref.Value = 0; // CPickups::Init
 }
 bool NativeScriptEntities::LoadBeforeWorker(const char* gameDir, std::string& error) {
     if (m_Loaded) { error = "property assets already initialized"; return false; }
@@ -320,6 +352,13 @@ const NativeScriptEntities::Event* NativeScriptEntities::FindEvent(NativeScriptR
     for (const auto& event : m_Events) if (event.Id == id) return &event;
     return nullptr;
 }
+const NativeScriptEntities::PickupOperation* NativeScriptEntities::FindPickupOperation(NativeScriptRequestId id) const {
+    for (const auto& operation : m_PickupOperations) if (operation.Id == id) return &operation;
+    return nullptr;
+}
+bool NativeScriptEntities::OwnsRequest(NativeScriptRequestId id) const {
+    return FindEvent(id) || FindPickupOperation(id);
+}
 const NativeScriptPickup* NativeScriptEntities::ResolvePickup(NativeScriptPickupRef ref) const {
     const auto slot = uint32(ref.Value) & 0xffff;
     return slot < m_Pickups.size() && m_Pickups[slot].Active && m_Pickups[slot].Reference.Value == ref.Value ? &m_Pickups[slot] : nullptr;
@@ -336,6 +375,7 @@ NativeScriptReferenceResult<NativeScriptPickupRef> NativeScriptEntities::CreateF
 }
 NativeScriptReferenceResult<NativeScriptPickupRef> NativeScriptEntities::CreatePickup(const NativeScriptPickupRequest& r,
     NativeScriptPosition camera, std::uint32_t gameMs) {
+    if (FindPickupOperation(r.Id)) return {Error("pickup request ID already owns a pickup query/removal"), {}};
     if (const auto* old = FindEvent(r.Id)) {
         if (old->Opcode != 0x0213 || old->Position != r.Position || old->Argument != r.Type || old->Model != r.Model ||
             old->ModelName != r.UsedObjectName || (old->Reference != -1 && !ResolvePickup({old->Reference}))) return {Error("mismatched/stale ordinary pickup replay"), {}};
@@ -387,6 +427,7 @@ NativeScriptReferenceResult<NativeScriptPickupRef> NativeScriptEntities::CreateP
 }
 NativeScriptReferenceResult<NativeScriptPickupRef> NativeScriptEntities::CreateProperty(const NativeScriptForSalePropertyRequest& r, bool forSale) {
     const std::uint16_t opcode = forSale ? 0x0518 : 0x0517;
+    if (FindPickupOperation(r.Id)) return {Error("property request ID already owns a pickup query/removal"), {}};
     if (const auto* old = FindEvent(r.Id)) {
         if (old->Opcode != opcode || old->Position != r.Position || old->Text != r.Text || old->Argument != r.Price || !ResolvePickup({old->Reference})) return {Error("mismatched/stale property replay"), {}};
         return {Ready(), {old->Reference}};
@@ -427,11 +468,12 @@ NativeScriptReferenceResult<NativeScriptPickupRef> NativeScriptEntities::CreateP
     *free = std::move(pickup); ++m_Revision; return {Ready(), free->Reference};
 }
 NativeScriptReferenceResult<NativeScriptBlipRef> NativeScriptEntities::CreateContactBlip(const NativeScriptContactBlipRequest& r) {
+    if (FindPickupOperation(r.Id)) return {Error("blip request ID already owns a pickup query/removal"), {}};
     if (const auto* old = FindEvent(r.Id)) {
         if (old->Opcode != 0x0570 || old->Position != r.Position || old->Argument != r.Sprite || !ResolveBlip({old->Reference})) return {Error("mismatched/stale blip replay"), {}};
         return {Ready(), {old->Reference}};
     }
-    if (!m_Loaded || (r.Sprite != 32 && r.Sprite != 31)) return {Unsupported("contact sprite is not prepared by this bounded host"), {}};
+    if (!m_Loaded || (r.Sprite != 32 && r.Sprite != 31 && !r.RadarSpriteReady)) return {Unsupported("contact sprite is not prepared by this bounded host"), {}};
     if (!Finite(r.Position)) return {Error("nonfinite blip position"), {}};
     const auto free = std::find_if(m_Blips.begin(), m_Blips.end(), [](const auto& b) { return !b.Active && (b.Reference.Value == -1 || (uint32(b.Reference.Value) >> 16) < 0xfffe); });
     if (free == m_Blips.end()) return {Error("radar pool capacity exhausted"), {}};
@@ -442,6 +484,7 @@ NativeScriptReferenceResult<NativeScriptBlipRef> NativeScriptEntities::CreateCon
     *free = blip; ++m_Revision; return {Ready(), blip.Reference};
 }
 NativeScriptServiceResult NativeScriptEntities::SetBlipDisplay(const NativeScriptBlipDisplayRequest& r) {
+    if (FindPickupOperation(r.Id)) return Error("display request ID already owns a pickup query/removal");
     if (const auto* old = FindEvent(r.Id)) {
         if (old->Opcode != 0x018B || old->Reference != r.Blip.Value || old->Argument != r.Display || !ResolveBlip(r.Blip)) return Error("mismatched/stale display replay");
         return Ready();
@@ -454,7 +497,9 @@ NativeScriptServiceResult NativeScriptEntities::SetBlipDisplay(const NativeScrip
 }
 bool NativeScriptEntities::RemovePickup(NativeScriptPickupRef ref) {
     if (!ResolvePickup(ref)) return false;
-    auto& p = m_Pickups[uint32(ref.Value) & 0xffff]; p.Active = false; p.Actor = {}; m_Actors = {}; m_Labels.clear();
+    auto& p = m_Pickups[uint32(ref.Value) & 0xffff];
+    p.Active = false; p.Type = 0; p.Visible = false; p.ObjectPresent = false; p.Actor = {};
+    m_Actors = {}; m_Labels.clear();
     if (m_Interaction.Pickup.Value == ref.Value) m_Interaction = {};
     if (m_PickupRequirement.Pickup.Value == ref.Value) m_PickupRequirement = {};
     ++m_Revision; return true;
@@ -471,6 +516,65 @@ void NativeScriptEntities::Tick(NativeScriptPosition ped, NativeScriptPosition c
     Require(Finite(ped) && Finite(camera), "nonfinite property frame input");
     m_Frame = FrameInput{ped, camera, alive, inVehicle, input};
 }
+bool NativeScriptEntities::UpdatePlayerActivity(std::uint32_t frameCounter, std::uint64_t ownerRevision,
+    const NativePlayerActivitySnapshot& snapshot, std::string& error) try {
+    if (!ValidActivity(snapshot)) { error = "invalid player activity snapshot"; return false; }
+    if (m_PlayerActivity) {
+        const auto elapsed = frameCounter - m_PlayerActivity->FrameCounter;
+        if (elapsed > 0x7fffffff) { error = "player activity frame counter moved backwards"; return false; }
+        if (ownerRevision < m_PlayerActivity->OwnerRevision) { error = "player activity owner revision moved backwards"; return false; }
+        const auto same = SameActivity(snapshot, m_PlayerActivity->Snapshot);
+        if (!elapsed && (ownerRevision != m_PlayerActivity->OwnerRevision || !same)) {
+            error = "player activity changed within a frame"; return false;
+        }
+        if (ownerRevision == m_PlayerActivity->OwnerRevision && !same) {
+            error = "player activity changed without an owner revision"; return false;
+        }
+        if (!elapsed) { error.clear(); return true; }
+    }
+    NativePlayerActivitySnapshot owned = snapshot;
+    PlayerActivityFrame next{frameCounter, ownerRevision, std::move(owned)};
+    m_PlayerActivity = std::move(next); m_UsesPlayerActivity = true;
+    error.clear(); return true;
+} catch (const std::exception& e) { error = e.what(); return false; }
+NativeScriptPickupCollectedResult NativeScriptEntities::HasPickupBeenCollected(const NativeScriptPickupReferenceRequest& r) {
+    if (FindEvent(r.Id)) return {Error("pickup query request ID already owns an entity creation/update"), false};
+    if (const auto* old = FindPickupOperation(r.Id)) {
+        if (old->Kind != PickupOperationKind::HasBeenCollected || old->Pickup.Value != r.Pickup.Value)
+            return {Error("mismatched pickup collected-query replay"), false};
+        return {Ready(), old->Collected};
+    }
+    const auto found = std::find_if(m_CollectedPickups.begin(), m_CollectedPickups.end(), [&](const auto ref) {
+        return ref.Value == r.Pickup.Value;
+    });
+    const bool collected = found != m_CollectedPickups.end();
+    try {
+        m_PickupOperations.push_back({r.Id, r.Pickup, PickupOperationKind::HasBeenCollected, collected});
+    } catch (const std::exception& e) { return {Error(e.what()), false}; }
+    if (collected) { found->Value = 0; ++m_Revision; }
+    return {Ready(), collected};
+}
+NativeScriptServiceResult NativeScriptEntities::RemoveScriptPickup(const NativeScriptPickupReferenceRequest& r) {
+    if (FindEvent(r.Id)) return Error("pickup removal request ID already owns an entity creation/update");
+    if (const auto* old = FindPickupOperation(r.Id)) {
+        if (old->Kind != PickupOperationKind::Remove || old->Pickup.Value != r.Pickup.Value)
+            return Error("mismatched pickup removal replay");
+        return Ready();
+    }
+    try {
+        m_PickupOperations.push_back({r.Id, r.Pickup, PickupOperationKind::Remove, false});
+    } catch (const std::exception& e) { return Error(e.what()); }
+    const auto slot = uint32(r.Pickup.Value) & 0xffff;
+    if (r.Pickup.Value != -1 && slot < m_Pickups.size() && m_Pickups[slot].Reference.Value == r.Pickup.Value)
+        RemovePickup(r.Pickup); // Current-generation type NONE is a source-valid no-op.
+    return Ready();
+}
+std::optional<NativeScriptPadShakeEvent> NativeScriptEntities::ConsumePadShake() {
+    if (m_PadShakeCursor == m_PadShakes.size()) return {};
+    const auto event = m_PadShakes[m_PadShakeCursor++];
+    if (m_PadShakeCursor == m_PadShakes.size()) { m_PadShakes.clear(); m_PadShakeCursor = 0; }
+    return event;
+}
 NativeScriptPropertyInteractionStatus NativeScriptPropertyCollect(std::int32_t price,
     const NativeScriptPropertyInput& input, std::uint8_t buffer) {
     if (!buffer) return NativeScriptPropertyInteractionStatus::None;
@@ -480,7 +584,7 @@ NativeScriptPropertyInteractionStatus NativeScriptPropertyCollect(std::int32_t p
 }
 bool NativeScriptEntities::AdvanceTime(std::uint32_t now, std::string& error) try {
     if (m_HasTime && now - m_GameMs > 0x7fffffff) { error = "property game time moved backwards or exceeded half-range"; return false; }
-    if (m_PickupRequirement.Kind != NativeScriptPickupRequirementKind::None) {
+    if (!m_UsesPlayerActivity && m_PickupRequirement.Kind != NativeScriptPickupRequirementKind::None) {
         error = "ordinary pickup requires live CanPlayerStartMission task/event eligibility before collection"; return false;
     }
     if (m_HasTime && now == m_GameMs && m_Frame == m_PublishedFrame && m_PresentationRevision == m_Revision) {
@@ -491,6 +595,9 @@ bool NativeScriptEntities::AdvanceTime(std::uint32_t now, std::string& error) tr
     auto buffer = m_CollectBuffer;
     auto collectFrame = m_CollectFrame;
     auto interaction = m_Interaction;
+    auto collectedPickups = m_CollectedPickups;
+    auto collectedPickupCursor = m_CollectedPickupCursor;
+    auto padShakes = m_PadShakes;
     bool newCollectFrame = false;
     if (m_Frame && m_Frame->Property) {
         const auto& input = *m_Frame->Property;
@@ -511,6 +618,7 @@ bool NativeScriptEntities::AdvanceTime(std::uint32_t now, std::string& error) tr
     std::vector<NativeScriptPropertyLabel> labels;
     std::vector<std::size_t> latches;
     std::vector<std::pair<std::size_t, WorldShotScene>> poses;
+    std::vector<std::pair<std::size_t, NativeScriptPickupRef>> collections;
     struct Visibility { std::size_t Slot; bool Visible, Present; };
     std::vector<Visibility> visibility;
     WorldShotScene actors{}; actors.images = m_Images;
@@ -518,6 +626,7 @@ bool NativeScriptEntities::AdvanceTime(std::uint32_t now, std::string& error) tr
         const auto& p = m_Pickups[i]; if (!p.Active) continue;
         const bool sale = p.Type == 18;
         const bool ordinary = p.Type == 3;
+        bool collected = false;
         auto actor = NativeScriptPropertyActor(ordinary ? m_SaveModel : sale ? m_ForSaleModel : m_Model, p.Position,
             ordinary ? m_SaveGeometry.Scale : sale ? m_ForSaleGeometry.Scale : m_PropertyGeometry.Scale, now);
         if (m_Frame) {
@@ -535,16 +644,55 @@ bool NativeScriptEntities::AdvanceTime(std::uint32_t now, std::string& error) tr
                         if (!sourceVisible) present = false;
                         else if (!present && !input.CutsceneLoaded) present = true;
                     }
-                    if (sourceVisible && !input.Busy && i >= 620 * (input.FrameCounter % 6) / 6 && i < 620 * (input.FrameCounter % 6 + 1) / 6) {
+                    if (sourceVisible && i >= 620 * (input.FrameCounter % 6) / 6 && i < 620 * (input.FrameCounter % 6 + 1) / 6) {
                         if (!present && !input.CutsceneLoaded) present = true;
-                        if (present && !input.Cutscene && !input.Widescreen && !input.Coop && f.Alive && !f.InVehicle &&
-                            dx*dx + dy*dy < 1.8f && std::abs(f.Ped.Z - p.Position.Z) < 2.0f) {
-                            // Pickup.cpp:629 calls CanPlayerStartMission. Its task
-                            // slots/event group are not inferable from on-foot or
-                            // SCM mission-thread booleans. Stop BEFORE shake/remove/
-                            // collected-ring writes; never invent permission.
+                        if (m_UsesPlayerActivity) {
+                            if (!m_PlayerActivity || m_PlayerActivity->FrameCounter != input.FrameCounter) {
+                                m_PickupRequirement = {NativeScriptPickupRequirementKind::PlayerActivityAuthority,
+                                    p.Reference, p.Position, input.FrameCounter, p.Model, p.Type, 0,
+                                    {NativeMissionStartOutcome::Unsupported, NativeMissionStartReason::ActivityUnsupported}};
+                                error = "ordinary pickup requires an activity snapshot for the same source frame"; return false;
+                            }
+                            const auto& activity = m_PlayerActivity->Snapshot;
+                            if (activity.Authority != NativePlayerActivityAuthority::SourceBacked) {
+                                m_PickupRequirement = {NativeScriptPickupRequirementKind::PlayerActivityAuthority,
+                                    p.Reference, p.Position, input.FrameCounter, p.Model, p.Type, m_PlayerActivity->OwnerRevision,
+                                    {NativeMissionStartOutcome::Unsupported, NativeMissionStartReason::ActivityUnsupported}};
+                                error = "ordinary pickup activity authority is unsupported"; return false;
+                            }
+                            if (!NativePlayerPickupBusy(activity) && present && !input.Cutscene && !input.Widescreen && !input.Coop) {
+                                // Pickup.cpp evaluates CanPlayerStartMission before
+                                // vehicle/alive/proximity and unarmed pickup desire.
+                                const auto decision = NativePlayerCanStartMission(activity);
+                                if (decision.Outcome == NativeMissionStartOutcome::Unsupported) {
+                                    m_PickupRequirement = {NativeScriptPickupRequirementKind::PlayerTaskEligibility,
+                                        p.Reference, p.Position, input.FrameCounter, p.Model, p.Type, m_PlayerActivity->OwnerRevision, decision};
+                                    error = "ordinary pickup mission-start activity is unsupported"; return false;
+                                }
+                                if (decision.Outcome == NativeMissionStartOutcome::Allowed && f.Alive && !f.InVehicle &&
+                                    dx*dx + dy*dy < 1.8f && std::abs(f.Ped.Z - p.Position.Z) < 2.0f) {
+                                    if (activity.WeaponSlots[0].Type == NativePlayerWeaponType::Unsupported) {
+                                        m_PickupRequirement = {NativeScriptPickupRequirementKind::PlayerPickupDesire,
+                                            p.Reference, p.Position, input.FrameCounter, p.Model, p.Type, m_PlayerActivity->OwnerRevision, decision};
+                                        error = "ordinary pickup unarmed weapon-slot activity is unsupported"; return false;
+                                    }
+                                    if (NativePlayerWantsUnarmedPickup(activity)) {
+                                        // Save model 1277 takes the default unarmed
+                                        // path: shake, SetRemoved, then ring publish.
+                                        padShakes.push_back({p.Reference, input.FrameCounter, 120, 100, 0});
+                                        collections.emplace_back(i, p.Reference);
+                                        present = false; sourceVisible = false; collected = true;
+                                        collectedPickups[collectedPickupCursor] = p.Reference;
+                                        collectedPickupCursor = (collectedPickupCursor + 1) % collectedPickups.size();
+                                    }
+                                }
+                            }
+                        } else if (!input.Busy && present && !input.Cutscene && !input.Widescreen && !input.Coop &&
+                            f.Alive && !f.InVehicle && dx*dx + dy*dy < 1.8f && std::abs(f.Ped.Z - p.Position.Z) < 2.0f) {
+                            // Legacy callers have no owned task/event authority.
                             m_PickupRequirement = {NativeScriptPickupRequirementKind::PlayerTaskEligibility,
-                                p.Reference, p.Position, input.FrameCounter, p.Model, p.Type};
+                                p.Reference, p.Position, input.FrameCounter, p.Model, p.Type, 0,
+                                {NativeMissionStartOutcome::Unsupported, NativeMissionStartReason::ActivityUnsupported}};
                             error = "ordinary pickup requires live CanPlayerStartMission task/event eligibility before collection";
                             return false;
                         }
@@ -574,7 +722,7 @@ bool NativeScriptEntities::AdvanceTime(std::uint32_t now, std::string& error) tr
                     }
                 }
             }
-            if (visible) { // CPickup::IsVisible, XY <100m
+            if (visible && !collected) { // CPickup::IsVisible, XY <100m
                 const auto first = actors.meshes.size();
                 actors.meshes.insert(actors.meshes.end(), actor.meshes.begin(), actor.meshes.end());
                 if (sale) for (std::size_t m = first; m < actors.meshes.size(); ++m) for (auto& image : actors.meshes[m].triImg) if (image >= 0) image += int(m_Model.images.size());
@@ -592,7 +740,7 @@ bool NativeScriptEntities::AdvanceTime(std::uint32_t now, std::string& error) tr
                 }
             }
         }
-        poses.emplace_back(i, std::move(actor));
+        if (!collected) poses.emplace_back(i, std::move(actor));
     }
     if (!help.AdvanceTime(now, error)) return false;
     Bounds(actors);
@@ -601,9 +749,17 @@ bool NativeScriptEntities::AdvanceTime(std::uint32_t now, std::string& error) tr
     for (auto& [slot, actor] : poses) m_Pickups[slot].Actor = std::move(actor);
     for (const auto& v : visibility) { m_Pickups[v.Slot].Visible = v.Visible; m_Pickups[v.Slot].ObjectPresent = v.Present; }
     for (const auto slot : latches) m_Pickups[slot].HelpMessageDisplayed = true;
+    // No throwing work remains: publish source removal before the collected
+    // ring and its corresponding pending feedback events.
+    for (const auto& [slot, ref] : collections) {
+        auto& pickup = m_Pickups[slot]; assert(pickup.Reference.Value == ref.Value);
+        pickup.Active = false; pickup.Type = 0; pickup.Visible = false; pickup.ObjectPresent = false; pickup.Actor = {};
+    }
+    m_CollectedPickups = collectedPickups; m_CollectedPickupCursor = collectedPickupCursor;
+    m_PadShakes = std::move(padShakes); m_Revision += collections.size();
     m_Help = std::move(help); m_HelpMessage = std::move(helpMessage); m_HelpRevision += helpChanges;
     m_CollectBuffer = buffer; m_CollectFrame = collectFrame; m_Interaction = interaction; m_Labels = std::move(labels);
-    m_Actors = std::move(actors); m_PublishedFrame = m_Frame;
+    m_PickupRequirement = {}; m_Actors = std::move(actors); m_PublishedFrame = m_Frame;
     m_GameMs = now; m_HasTime = true; m_PresentationRevision = m_Revision;
     error.clear(); return true;
 } catch (const std::exception& e) { error = e.what(); return false; }
