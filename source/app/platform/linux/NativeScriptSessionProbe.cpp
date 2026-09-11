@@ -99,6 +99,14 @@ struct MockServices final : NativeScriptServices {
     std::array<NativeScriptRequestId, 6> EntityIds{};
     NativeScriptEntryExitFlagRequest EntryExit;
     NativeScriptGarageRequest Garage;
+    NativeScriptRestartRequest Restart;
+    ServiceStatus RestartMode = ServiceStatus::Unsupported;
+    unsigned RestartCalls = 0;
+    NativeScriptServiceResult AddRestart(const NativeScriptRestartRequest& r) override {
+        Restart = r; ++RestartCalls;
+        if (Throw) throw std::runtime_error("TEST-ONLY restart exception");
+        return {RestartMode,"TEST-ONLY restart service"};
+    }
     ServiceStatus GarageMode = ServiceStatus::Unsupported;
     unsigned GarageCalls = 0;
     NativeScriptPickupRequest Pickup;
@@ -1092,6 +1100,37 @@ void GarageBarriers() {
     for (std::size_t n=2;n<code.size();++n) RejectCode(Bytes(code.begin(),code.begin()+n));
     auto bad=code; bad[2]=6; RejectCode(bad);
 }
+void RestartBarriers() {
+    for (const auto opcode : {0x016C,0x016D}) {
+        Bytes code; Op(code,opcode); F(code,1.25f); F(code,-2.5f); F(code,10); F(code,725); I32(code,-123456);
+        NativeScriptSession session; MockServices services;
+        LoadFixture(session,services,code); const auto before = session.State();
+        services.RestartMode = ServiceStatus::Pending;
+        Check(session.Step(services).Status == Status::Pending && session.State() == before,"restart Pending atomic");
+        const auto request = services.Restart;
+        Check(request.Kind == (opcode == 0x016C ? NativeRestartKind::Hospital : NativeRestartKind::Police) &&
+            request.Position == NativeScriptPosition{1.25f,-2.5f,10} && request.HeadingDegrees == 725 && request.WhenToUse == -123456,
+            "restart exact F,F,F,F,I raw angle and signed threshold");
+        Check(session.Step(services).Status == Status::Pending && services.Restart == request && session.State() == before,"restart retry ID and operands stable");
+        services.RestartMode = ServiceStatus::Ready;
+        Check(session.Step(services).Status == Status::Advanced && session.State().IP == FixtureCode+code.size() &&
+            session.State().Commands == before.Commands+1 && session.State().LastOutputWrite == before.LastOutputWrite &&
+            session.State().Condition == before.Condition,"restart commits once, no write/condition");
+        for (const auto mode : {ServiceStatus::Unsupported,ServiceStatus::Error}) {
+            LoadFixture(session,services,code); const auto old = session.State(); services.RestartMode = mode;
+            Check(session.Step(services).Status == (mode == ServiceStatus::Error ? Status::Error : Status::Unsupported) && session.State() == old,"restart failed service unadvanced");
+            const auto calls = services.RestartCalls;
+            Check(session.Step(services).Executed == 0 && services.RestartCalls == calls,"restart terminal never retries");
+        }
+        LoadFixture(session,services,code); const auto old = session.State(); services.Throw = true;
+        Check(session.Step(services).Status == Status::Error && session.State() == old,"restart throwing service atomic");
+        for (std::size_t n = 2; n < code.size(); ++n) RejectCode(Bytes(code.begin(),code.begin()+n));
+        auto bad = code; bad[2] = 9; RejectCode(bad);
+        bad = code; bad[22] = 6; RejectCode(bad); // float supplied to final integer
+        Bytes nonfinite; Op(nonfinite,opcode); F(nonfinite,0); F(nonfinite,0); F(nonfinite,10);
+        F(nonfinite,std::numeric_limits<float>::infinity()); I8(nonfinite,0); RejectCode(nonfinite);
+    }
+}
 void PickupBarriers() {
     Bytes code; Op(code,0x0213); I16(code,1277); I32(code,259); F(code,1.25f); F(code,-2.5f); F(code,10); Var(code,8);
     NativeScriptSession session; MockServices services;
@@ -1244,6 +1283,7 @@ int main(int argc, char** argv) {
     EntityBarriers();
     EntryExitBarriers();
     GarageBarriers();
+    RestartBarriers();
     PickupBarriers();
     PickupOperationsAndFloatCopy();
     std::printf("native-script-probe PASS checks=%zu services=TEST-ONLY no-worldboot-claim\n", s_Checks);

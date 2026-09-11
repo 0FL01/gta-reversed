@@ -73,7 +73,7 @@ else:
     # Exactly the native launcher configuration, including continuous logging.
     env['MANGOHUD_CONFIG'] = ('fps,frametime,gpu_name,gpu_stats,cpu_stats,autostart_log=1,'
         f'log_duration=0,log_interval=100,output_folder={output}')
-    command = ['mangohud', str(binary), '--play', '--game-dir', str(game), '--seconds', str(args.seconds)]
+    command = ['mangohud', '--dlsym', str(binary), '--play', '--game-dir', str(game), '--seconds', str(args.seconds)]
     if args.clouds:
         command += ['--freecam', '--cam', '1600,-1700,30', '--weather', 'SUNNY_LA', '--freeze-time']
     else:

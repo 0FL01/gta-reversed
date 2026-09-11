@@ -79,6 +79,14 @@ struct NativeVehicleProducerExtent {
     bool SourceParityComplete = false;
 };
 
+// Optional model-info COL ownership, distinct from instance collision below.
+// Car-generator broadphase reads GetModelInfo()->GetColModel(). Missing this
+// binding means Unknown, not source NULL and not permission to use render bounds.
+struct NativeVehicleModelCollision {
+    std::int32_t ModelId = -1;
+    std::shared_ptr<const NativeCollisionModel> Collision;
+};
+
 struct NativeVehicleState {
     std::int32_t ModelId = -1;
     NativeVehicleType Type = NativeVehicleType::Unsupported;
@@ -91,6 +99,7 @@ struct NativeVehicleState {
     NativeGarageMatrix Matrix;
     // Required before InWorld=true. Far TidyUpGarage deliberately does not read it.
     std::shared_ptr<const NativeCollisionModel> Collision;
+    std::shared_ptr<const NativeVehicleModelCollision> ModelCollision;
     bool operator==(const NativeVehicleState&) const = default;
 };
 

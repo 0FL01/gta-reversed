@@ -549,6 +549,13 @@ static bool ScriptFault(const RealtimeScriptHost& host, const NativeScriptResult
     std::printf("play-script-terminal status=%s thread=%zu generation=%llu ip=%u opcode=%04X executed=%zu message=%s\n",
         result.Status == NativeScriptStatus::Unsupported ? "Unsupported" : "Error", result.ThreadIndex,
         static_cast<unsigned long long>(generation), result.IP, result.Opcode, result.Executed, result.Message.c_str());
+    if (result.ThreadIndex < threads.size()) {
+        const auto& thread = threads[result.ThreadIndex];
+        std::printf("play-script-state main=%llu threadCommands=%llu ip=%u previous=%04X@%u hospitals=%zu police=%zu\n",
+            static_cast<unsigned long long>(host.State().Commands), static_cast<unsigned long long>(thread.Commands),
+            thread.IP, thread.LastOpcode, thread.LastInstructionIP,
+            host.Restarts().Points(NativeRestartKind::Hospital).size(), host.Restarts().Points(NativeRestartKind::Police).size());
+    }
     std::fflush(stdout);
     return true;
 }
@@ -864,7 +871,7 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
     double reportMaxFrameMs = 0, reportMaxStreamMs = 0;
     bool running = true;
     bool demoJumped = false;
-    bool demoEntered = false;
+    double demoNextEntryAttempt = 2.0;
     double demoNextExitAttempt = 9.0;
     Uint64 gameNs = 0;
     Uint64 waterTicks = 0, waterPreviousNs = 0;
@@ -955,11 +962,15 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
                     if (!demoJumped && time >= 0.5) {
                         input.Jump = demoJumped = true;
                     }
-                    if (!demoEntered && time >= 2.0) {
-                        input.Interact = demoEntered = true;
-                    }
                     const auto& state = gameplay.State();
-                    input.Forward = (time >= 2.2 && time < 6.0) ||
+                    // A low-FPS frame can reach the first attempt while the
+                    // landing task still rejects interaction. Retry normal
+                    // input without walking away or bypassing that task.
+                    if (!state.Entries && time >= demoNextEntryAttempt) {
+                        input.Interact = true;
+                        demoNextEntryAttempt = time + 0.5;
+                    }
+                    input.Forward = (time >= 2.2 && time < 6.0 && state.InVehicle) ||
                         (time >= 10.0 && state.Exits > 0 && !state.InVehicle) ? 1.0f : 0.0f;
                     // Brake until stopped, not until an assumed stopping time.
                     // Retry a rejected exit via input; never bypass speed or

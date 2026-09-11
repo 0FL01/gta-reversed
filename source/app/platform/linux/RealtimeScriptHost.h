@@ -6,6 +6,7 @@
 #include "app/platform/linux/NativeScriptEntities.h"
 #include "app/platform/linux/NativeEntryExits.h"
 #include "app/platform/linux/NativeGarages.h"
+#include "app/platform/linux/NativeRestarts.h"
 #include "app/platform/linux/NativeVehiclePool.h"
 #include "app/platform/linux/NativeCarGeneratorResidency.h"
 #include "app/platform/linux/NativeSourceRng.h"
@@ -109,6 +110,10 @@ public:
     const NativeEntryExits& EntryExits() const { return m_EntryExits; }
     NativeGarages& Garages() { return m_Garages; }
     const NativeGarages& Garages() const { return m_Garages; }
+    const NativeRestarts& Restarts() const { return m_Restarts; }
+    // Explicit query inputs carry source area/ENEX authority; city unlock is
+    // always read from this host's SCM stats. Returns reset work, never teleport.
+    NativeRestartSelection QueryRestart(NativeRestartQuery query) const;
     NativeVehiclePool& Vehicles() { return m_Vehicles; }
     const NativeVehiclePool& Vehicles() const { return m_Vehicles; }
     NativeCarGenerators& CarGenerators() { return m_CarGenerators; }
@@ -153,6 +158,7 @@ public:
     NativeScriptServiceResult SetBlipDisplay(const NativeScriptBlipDisplayRequest&) override;
     NativeScriptServiceResult SetEntryExitFlag(const NativeScriptEntryExitFlagRequest&) override;
     NativeScriptServiceResult DeactivateGarage(const NativeScriptGarageRequest&) override;
+    NativeScriptServiceResult AddRestart(const NativeScriptRestartRequest&) override;
     NativeScriptReferenceResult<NativeScriptCarGeneratorRef> CreateCarGenerator(const NativeScriptCarGeneratorRequest&) override;
     NativeScriptServiceResult SwitchCarGenerator(const NativeScriptCarGeneratorSwitchRequest&) override;
     NativeScriptPickupCollectedResult HasPickupBeenCollected(const NativeScriptPickupReferenceRequest&) override;
@@ -171,6 +177,7 @@ private:
     RealtimeScriptPlayerInfo m_PlayerInfo;
     NativeEntryExits m_EntryExits;
     NativeGarages m_Garages;
+    NativeRestarts m_Restarts;
     NativeVehiclePool m_Vehicles;
     NativeSourceRng m_SourceRng;
     NativeCarGenerators m_CarGenerators;

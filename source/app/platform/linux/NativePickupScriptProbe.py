@@ -68,6 +68,6 @@ if __name__ == '__main__':
         result.check_returncode()
         summary = re.search(r'^native-pickup-script .*$', result.stdout, re.MULTILINE)
         assert summary and 'failures=0' in summary.group() and 'hud33=actual-GL' in summary.group()
-        assert 'actualCommands=1219 terminal=016C@212309' in summary.group()
+        assert 'actualCommands=1234 terminal=0814@212669' in summary.group()
         assert 'collection=controller-owned ring=20 staleRef=safe' in summary.group()
         assert 'fullboot=0' in summary.group() and 'FAIL' not in result.stdout

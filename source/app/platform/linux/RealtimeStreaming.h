@@ -3,6 +3,7 @@
 
 #include "app/platform/linux/StreamPager.h"
 #include "app/platform/linux/RealtimeGameplay.h"
+#include "app/platform/linux/NativeVehicleAssetQueue.h"
 
 #include <cassert>
 #include <chrono>
@@ -76,15 +77,17 @@ struct CpuWorld {
 
 // Start ONLY after all startup parsers (including gameplay/CarPose/IfpAnim)
 // have returned. Until Stop joins, ONLY this thread may call StreamPager,
-// TexSample/librw parsers or touch their globals. Freeze OS_SetFilePathOffset.
+// TexSample/librw parsers or touch their globals. Freeze the startup file-path
+// offset value (CarPose repeats its setter on the worker with that same path).
 // Actor Tick/Draw use owned CPU snapshots, not librw. Even separate TXDs are
 // not independent: librw current dictionary, plugins, frame lists are global.
 class Worker {
 public:
     explicit Worker(bool collision, std::shared_ptr<const NativeCollisionContext> context = {},
-                    std::shared_ptr<const NativePlacementOverrides> overrides = {}, uint64_t initialGeneration = 1)
+                    std::shared_ptr<const NativePlacementOverrides> overrides = {}, uint64_t initialGeneration = 1,
+                    std::shared_ptr<const NativeVehicleAssetSource> vehicleSource = {})
         : m_Collision(collision), m_Context(std::move(context)), m_Overrides(std::move(overrides)),
-          m_Generation(initialGeneration), m_Thread([this] { Run(); }) {}
+          m_Generation(initialGeneration), m_VehicleSource(std::move(vehicleSource)), m_Thread([this] { Run(); }) {}
     ~Worker() { Stop({}, {}); }
     Worker(const Worker&) = delete;
     Worker& operator=(const Worker&) = delete;
@@ -93,9 +96,36 @@ public:
     // cancels unstarted requests; an in-flight result is allowed to finish.
     void Request(Center center, bool wanted) {
         std::lock_guard lock(m_Mutex);
+        if (m_Stop) return;
         m_Center = center;
         m_Wanted = wanted;
         m_Wake.notify_one();
+    }
+
+    NativeVehicleAssetSubmission RequestVehicle(const NativeVehicleAssetRequest& request) {
+        std::lock_guard lock(m_Mutex);
+        if (m_Stop) return {NativeVehicleAssetAdmission::Stopped, {}};
+        auto result = m_Vehicles.Submit(request, bool(m_VehicleSource));
+        m_Wake.notify_one();
+        return result;
+    }
+
+    NativeVehicleAssetPhase VehiclePhase(const NativeVehicleAssetTicket& ticket) {
+        std::lock_guard lock(m_Mutex);
+        return m_Stop ? NativeVehicleAssetPhase::Stopped : m_Vehicles.Phase(ticket);
+    }
+
+    bool CancelVehicle(const NativeVehicleAssetTicket& ticket) {
+        std::lock_guard lock(m_Mutex);
+        if (m_Stop) return false;
+        const bool result = m_Vehicles.Cancel(ticket);
+        m_Wake.notify_one();
+        return result;
+    }
+
+    std::shared_ptr<const NativeVehicleAssetCompletion> TakeVehicleReady(const NativeVehicleAssetTicket& ticket) {
+        std::lock_guard lock(m_Mutex);
+        return m_Stop ? nullptr : m_Vehicles.Take(ticket);
     }
 
     std::unique_ptr<CpuWorld> TakeReady() {
@@ -145,12 +175,14 @@ private:
     void Run() {
         std::unique_lock lock(m_Mutex);
         for (;;) {
-            m_Wake.wait(lock, [&] { return m_Stop || m_Retired || (!m_Busy && m_Wanted); });
+            m_Wake.wait(lock, [&] { return m_Stop || m_Retired || m_Vehicles.Retiring() ||
+                m_Vehicles.Waiting() || (!m_Busy && m_Wanted); });
             if (m_Stop) {
                 auto ready = std::move(m_Ready);
                 auto retired = std::move(m_Retired);
                 auto active = std::move(m_StopActive);
                 auto pending = std::move(m_StopPending);
+                auto vehicle = m_Vehicles.Stop();
                 lock.unlock();
                 return;
             }
@@ -161,6 +193,48 @@ private:
                 lock.lock();
                 continue;
             }
+            if (m_Vehicles.Retiring()) {
+                auto vehicle = m_Vehicles.Retire();
+                lock.unlock();
+                vehicle.reset();
+                lock.lock();
+                continue;
+            }
+            // Alternate eligible parser jobs, without waiting for world GPU
+            // upload/retirement. Neither queue can starve the other; world CPU
+            // retirement above retains its original priority and memory bound.
+            if (m_Vehicles.Waiting() && (m_Busy || !m_Wanted || !m_LastWasVehicle)) {
+                const auto ticket = m_Vehicles.Begin();
+                const auto generation = m_Generation;
+                m_LastWasVehicle = true;
+                lock.unlock();
+                auto next = std::make_shared<NativeVehicleAssetCompletion>();
+                next->Ticket = ticket;
+                next->WorkerGeneration = generation;
+                try {
+                    next->Result = m_VehicleSource->Load(ticket.Identity->Definition, next->Asset);
+                } catch (const std::exception& error) {
+                    next->Result = {NativeGeneratedVehicleAssetStatus::Error, error.what()};
+                } catch (...) {
+                    next->Result = {NativeGeneratedVehicleAssetStatus::Error, "unknown vehicle parser exception"};
+                }
+                if (next->Result && !next->Asset) {
+                    next->Result = {NativeGeneratedVehicleAssetStatus::Error,
+                        "vehicle asset source returned Ready without a CPU packet"};
+                } else if (!next->Result) {
+                    next->Asset.reset();
+                }
+                std::shared_ptr<const NativeVehicleAssetCompletion> result = std::move(next);
+                lock.lock();
+                // Stop rejects new requests immediately, then this loop drains
+                // all results on the worker before join permits RW shutdown.
+                m_Vehicles.Finish(result);
+                lock.unlock();
+                result.reset();
+                lock.lock();
+                continue;
+            }
+            m_LastWasVehicle = false;
             const auto center = m_Center;
             m_Wanted = false;
             m_Busy = true;
@@ -189,6 +263,9 @@ private:
     bool m_Stop = false, m_Wanted = false, m_Busy = false, m_Building = false;
     Center m_Center;
     uint64_t m_Generation = 1;
+    const std::shared_ptr<const NativeVehicleAssetSource> m_VehicleSource;
+    NativeVehicleAssetQueue m_Vehicles;
+    bool m_LastWasVehicle = false;
     std::unique_ptr<CpuWorld> m_Ready, m_Retired, m_StopActive, m_StopPending;
     // Last: every field above is initialized before Run can observe it.
     std::thread m_Thread;

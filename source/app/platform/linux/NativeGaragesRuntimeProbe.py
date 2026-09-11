@@ -26,7 +26,8 @@ def build():
     units = ['StreamPager', 'NativeCollisionAssets', 'RealtimeGameplay', 'NativePlayerAssets', 'TexSample', 'Handling',
              'Collide', 'IfpAnim', 'CarPose', 'GxtText', 'MenuShot',
              'NativePlayerActivity', 'NativeGarages', 'NativeVehiclePool', 'NativeGaragesRuntime', 'NativeScriptSession',
-             'NativeScriptEntities', 'NativeEntryExits', 'RealtimeScriptHost', NAME]
+             'NativeScriptEntities', 'NativeEntryExits', 'RealtimeScriptHost', 'NativeRestarts',
+             'NativeSourceRng', 'NativeCarGenerators', 'NativeCarGeneratorResidency', NAME]
     OUTPUT.mkdir(parents=True, exist_ok=True)
     objects = []
     with (OUTPUT / (NAME+'-build.log')).open('w') as log:

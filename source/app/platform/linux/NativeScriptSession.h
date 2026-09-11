@@ -135,6 +135,16 @@ struct NativeScriptGarageRequest {
     std::array<char, 8> Name{};
 };
 
+enum class NativeRestartKind { Hospital, Police };
+struct NativeScriptRestartRequest {
+    NativeScriptRequestId Id;
+    NativeRestartKind Kind = NativeRestartKind::Hospital;
+    NativeScriptPosition Position;
+    float HeadingDegrees = 0; // source stores raw heading, without FixAngle
+    std::int32_t WhenToUse = 0; // compared against STAT_CITY_UNLOCKED, not a zone ID
+    bool operator==(const NativeScriptRestartRequest&) const = default;
+};
+
 // Defined by NativeScriptEntities, which owns the source pickup collection ring.
 // Keep this VM interface non-owning rather than duplicating the shared types.
 struct NativeScriptPickupReferenceRequest;
@@ -168,6 +178,7 @@ public:
     virtual NativeScriptServiceResult SetBlipDisplay(const NativeScriptBlipDisplayRequest&) { return {}; }
     virtual NativeScriptServiceResult SetEntryExitFlag(const NativeScriptEntryExitFlagRequest&) { return {}; }
     virtual NativeScriptServiceResult DeactivateGarage(const NativeScriptGarageRequest&) { return {}; }
+    virtual NativeScriptServiceResult AddRestart(const NativeScriptRestartRequest&) { return {}; }
     virtual NativeScriptReferenceResult<NativeScriptCarGeneratorRef> CreateCarGenerator(const NativeScriptCarGeneratorRequest&) { return {}; }
     virtual NativeScriptServiceResult SwitchCarGenerator(const NativeScriptCarGeneratorSwitchRequest&) { return {}; }
     virtual NativeScriptPickupCollectedResult HasPickupBeenCollected(const NativeScriptPickupReferenceRequest&);

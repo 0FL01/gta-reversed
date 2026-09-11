@@ -96,6 +96,8 @@ constexpr Signature Signatures[] = {
     {0x018B, {O::Integer, O::Integer}, 2},
     {0x09B4, {O::Float, O::Float, O::Float, O::Integer, O::Integer}, 5},
     {0x02B9, {O::String}, 1},
+    {0x016C, {O::Float, O::Float, O::Float, O::Float, O::Integer}, 5},
+    {0x016D, {O::Float, O::Float, O::Float, O::Float, O::Integer}, 5},
     {0x0213, {O::Integer, O::Integer, O::Float, O::Float, O::Float, O::Output}, 6},
     {0x0214, {O::Integer}, 1}, {0x0215, {O::Integer}, 1},
     {0x014B, {O::Float, O::Float, O::Float, O::Float, O::Integer, O::Integer, O::Integer,
@@ -501,7 +503,7 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
 
     int32 reference = -1;
     bool pickupCollected = false;
-    if (d.Opcode == 0x04E4 || d.Opcode == 0x03CB || d.Opcode == 0x0053 || d.Opcode == 0x07AF || d.Opcode == 0x01F5 || d.Opcode == 0x0373 || d.Opcode == 0x0173 || d.Opcode == 0x0517 || d.Opcode == 0x0518 || d.Opcode == 0x0570 || d.Opcode == 0x04CE || d.Opcode == 0x018B || d.Opcode == 0x09B4 || d.Opcode == 0x02B9 || d.Opcode == 0x0213 || d.Opcode == 0x0214 || d.Opcode == 0x0215 || d.Opcode == 0x014B || d.Opcode == 0x014C) {
+    if (d.Opcode == 0x04E4 || d.Opcode == 0x03CB || d.Opcode == 0x0053 || d.Opcode == 0x07AF || d.Opcode == 0x01F5 || d.Opcode == 0x0373 || d.Opcode == 0x0173 || d.Opcode == 0x0517 || d.Opcode == 0x0518 || d.Opcode == 0x0570 || d.Opcode == 0x04CE || d.Opcode == 0x018B || d.Opcode == 0x09B4 || d.Opcode == 0x02B9 || d.Opcode == 0x016C || d.Opcode == 0x016D || d.Opcode == 0x0213 || d.Opcode == 0x0214 || d.Opcode == 0x0215 || d.Opcode == 0x014B || d.Opcode == 0x014C) {
         const NativeScriptRequestId id{m_SessionId, m_CommandSequence + 1, state.IP};
         NativeScriptServiceResult result;
         // All operands/output bounds have been checked before ANY host call.
@@ -539,6 +541,9 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
             if (d.Opcode == 0x0215) result = services.RemoveScriptPickup({id, {a}});
             if (d.Opcode == 0x09B4) result = services.SetEntryExitFlag({id, d.Float(0), d.Float(1), d.Float(2), d.Int(3), d.Int(4)});
             if (d.Opcode == 0x02B9) result = services.DeactivateGarage({id, d.Text});
+            if (d.Opcode == 0x016C || d.Opcode == 0x016D) result = services.AddRestart({id,
+                d.Opcode == 0x016C ? NativeRestartKind::Hospital : NativeRestartKind::Police,
+                {d.Float(0), d.Float(1), d.Float(2)}, d.Float(3), d.Int(4)});
             if (d.Opcode == 0x0517) {
                 auto created = services.CreateLockedProperty({id, {d.Float(0), d.Float(1), d.Float(2)}, d.Text});
                 result = std::move(created.Result); reference = created.Reference.Value;

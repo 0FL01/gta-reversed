@@ -43,6 +43,7 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
         app/platform/linux/NativeScriptSession.cpp
         app/platform/linux/NativeScriptEntities.cpp
         app/platform/linux/NativeEntryExits.cpp
+        app/platform/linux/NativeRestarts.cpp
         app/platform/linux/NativeGarages.cpp
         app/platform/linux/NativeGaragesRuntime.cpp
         app/platform/linux/RealtimeScriptHost.cpp

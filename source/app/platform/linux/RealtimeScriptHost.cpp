@@ -61,6 +61,7 @@ bool RealtimeScriptHost::InitializeBeforeWorker(const char* gameDir, std::string
     if (!m_Gameplay.Initialize(gameDir, error, RealtimeGameplayModel::BasePlayer)) return false;
     if (!m_Entities.LoadBeforeWorker(gameDir, error)) return false;
     if (!m_EntryExits.LoadBeforeWorker(gameDir, error)) return false;
+    if (!m_Restarts.LoadBeforeWorker(gameDir, error)) return false;
     if (!m_Garages.LoadBeforeWorker(gameDir, *m_CollisionContext, error)) return false;
     if (!m_CarGenerators.LoadBeforeWorker(gameDir, State().TimeMs, error) ||
         !m_CarGeneratorResidency.Initialize(m_CarGenerators, m_CollisionContext->Population, error)) return false;
@@ -162,12 +163,30 @@ NativeScriptServiceResult RealtimeScriptHost::PrepareContactBlipRequest(NativeSc
 }
 void RealtimeScriptHost::SealStartup() {
     m_Sealed = true; m_EntryExits.SealStartup(); m_Garages.SealStartup(); m_CarGenerators.SealStartup();
+    m_Restarts.SealStartup();
 }
 NativeScriptResult RealtimeScriptHost::RunPass(std::size_t quota) {
     if (!m_Initialized) return {NativeScriptStatus::Error, 0, 0, 0, "script host not initialized"};
     return m_Session.RunPass(*this, quota);
 }
 bool RealtimeScriptHost::AdvanceTime(std::uint32_t nowMs, std::string& error) { return m_Session.AdvanceTime(nowMs, error); }
+
+NativeRestartSelection RealtimeScriptHost::QueryRestart(NativeRestartQuery query) const {
+    if (!m_Initialized) return {NativeRestartStatus::Error,{},"restart query requires initialized host"};
+    query.CityUnlocked = float(State().IntStats[181-120]); // STAT_CITY_UNLOCKED
+    return m_Restarts.Query(query);
+}
+NativeScriptServiceResult RealtimeScriptHost::AddRestart(const NativeScriptRestartRequest& request) {
+    if (!m_Initialized) return Error("restart registration requires initialized host");
+    if (request.Kind != NativeRestartKind::Hospital && request.Kind != NativeRestartKind::Police) return Error("invalid restart kind");
+    if (m_PendingLoad && *m_PendingLoad == request.Id) return Error("restart ID already owns pending world request");
+    RealtimeScriptHostEvent event{request.Id, std::uint16_t(request.Kind == NativeRestartKind::Hospital ? 0x016C : 0x016D),
+        {request.Position.X,request.Position.Y,request.Position.Z,request.HeadingDegrees},request.WhenToUse};
+    if (auto old = Replay(event)) return *old;
+    auto result = m_Restarts.Add(request);
+    if (result.Status == NativeScriptServiceStatus::Ready) Commit(event);
+    return result;
+}
 
 NativeScriptPedRef RealtimeScriptHost::PedRef() const { return {static_cast<std::int32_t>((0u << 8) | m_PedGeneration)}; }
 NativeScriptGroupRef RealtimeScriptHost::GroupRef() const { return {static_cast<std::int32_t>(0u | (std::uint32_t{m_Group.Generation} << 16))}; }

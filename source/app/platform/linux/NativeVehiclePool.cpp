@@ -52,6 +52,10 @@ bool ValidState(const NativeVehicleState& state, std::string& error) {
         error = "world vehicle requires source collision";
         return false;
     }
+    if (state.ModelCollision && state.ModelCollision->ModelId != state.ModelId) {
+        error = "vehicle model-info COL binding belongs to another model";
+        return false;
+    }
     error.clear();
     return true;
 }

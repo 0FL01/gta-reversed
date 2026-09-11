@@ -80,9 +80,10 @@ if __name__ == '__main__':
         assert len(set(seeds)) == 1, seeds  # one platform capture; no fixed seed oracle
         assert 'boot-runtime PASS exit=1 swaps=5 fullboot=0' in result.stdout
         terminals = re.findall(r'^play-.*terminal .*$', result.stdout, re.MULTILINE)
-        assert len(terminals) == 1 and terminals[0].startswith('play-script-terminal status=Unsupported thread=1 generation=1 ip=212309 opcode=016C executed=195 '), terminals
+        assert len(terminals) == 1 and terminals[0].startswith('play-script-terminal status=Unsupported thread=1 generation=1 ip=212669 opcode=0814 executed=210 '), terminals
+        assert 'play-script-state main=53 threadCommands=1234 ip=212669 previous=016D@212645 hospitals=8 police=7' in result.stdout
         assert 'play-ok' not in result.stdout and 'play-fail' not in result.stdout and 'FAIL' not in result.stdout
-        print('boot-probe PASS actual-captures=5 mission-quanta=0/256/512/768/1024+195 mission-prefix=1219 terminal=016C@212309 '
+        print('boot-probe PASS actual-captures=5 mission-quanta=0/256/512/768/1024+210 mission-prefix=1234 terminal=0814@212669 '
             'worldRevision=3 sourceCOL-overrides=14/13-disabled garage-ready=50-each-frame camera-unchanged=1 '
             'actual-source-body=1 real-physics=1 quarters=1/2/3/0/1 sources=22 initial=88 creates=10 switches=10 '
             'no-demand=1 pool-created=0 rng-draws=0 borrowed-generation=3 clothes-not-reached=1 runtime-exit=1 fullboot=0')
