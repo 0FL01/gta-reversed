@@ -63,6 +63,10 @@ int main(int argc,char** argv) try {
         constructed->PercentSubmerged==float(handling.percentSubmerged)&&constructed->TractionMult==float(handling.tractionMult)&&
         constructed->TractionLoss==float(handling.tractionLoss)&&constructed->TractionBias==float(handling.tractionBias),
         "source constructor centre/buoyancy/traction handling");
+    Check(constructed->BrakeDeceleration==float(handling.brakeDeceleration)&&
+        constructed->BrakeBias==float(handling.brakeBias)&&constructed->Abs==handling.Abs&&
+        constructed->SteeringLockDegrees==float(handling.steeringLockDegrees)&&
+        constructed->HandlingFlags==handling.HandlingFlags,"source brake/steering/flag handling");
     Check(constructed->Elasticity==0.05f&&constructed->BrakeCount==20&&constructed->TireTemperature==1,
         "source automobile literal initial state");
     Check(constructed->WheelRotation==std::array<float,4>{}&&constructed->WheelSpeed==std::array<float,4>{}&&
@@ -94,6 +98,21 @@ int main(int argc,char** argv) try {
     Check(driver->Revision==2&&driver->Occupants.Driver==1001,"exact driver identity attached");
     Check(automobile.SetDriver(1002,error)==NativeSourceAutomobileStatus::Occupied,"second driver rejected");
     Check(automobile.LastCommitted()==driver,"driver collision atomic");
+    Check(automobile.ProcessPlayerControls(255,0,128,false,false,0,1,error)==NativeSourceAutomobileStatus::Ready,error);
+    auto controls=automobile.LastCommitted();
+    Check(controls->GasPedal==1&&controls->BrakePedal==0&&controls->RawSteerAngle==-0.2f&&
+        controls->SteerAngle<0&&!controls->Handbrake&&!controls->DoingBurnout,"source accelerate/steer input");
+    Check(automobile.ProcessPlayerControls(0,255,0,false,false,1,1,error)==NativeSourceAutomobileStatus::Ready,error);
+    Check(automobile.LastCommitted()->GasPedal==0&&automobile.LastCommitted()->BrakePedal==1,"source reverse input brakes forward motion");
+    Check(automobile.ProcessPlayerControls(255,255,0,false,false,0,1,error)==NativeSourceAutomobileStatus::Ready,error);
+    Check(automobile.LastCommitted()->DoingBurnout&&automobile.LastCommitted()->GasPedal==1&&
+        automobile.LastCommitted()->BrakePedal==1,"source stationary burnout controls");
+    Check(automobile.ProcessPlayerControls(255,0,0,false,true,0,1,error)==NativeSourceAutomobileStatus::Ready,error);
+    Check(automobile.LastCommitted()->Handbrake&&automobile.LastCommitted()->GasPedal==0&&
+        automobile.LastCommitted()->BrakePedal==1,"source automatic handbrake controls");
+    const auto beforeBadControl=automobile.LastCommitted();
+    Check(automobile.ProcessPlayerControls(1,2,129,false,false,0,1,error)==NativeSourceAutomobileStatus::InvalidInput&&
+        automobile.LastCommitted()==beforeBadControl,"invalid controls retain publication");
     Check(automobile.AddPassenger(2001,0,error)==NativeSourceAutomobileStatus::Ready,error);
     Check(automobile.AddPassenger(2002,2,error)==NativeSourceAutomobileStatus::Ready,error);
     auto occupied=automobile.LastCommitted();

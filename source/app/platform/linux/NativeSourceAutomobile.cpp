@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstring>
 #include <exception>
+#include <numbers>
 #include <ranges>
 
 namespace {
@@ -69,6 +70,9 @@ NativeSourceAutomobileStatus NativeSourceAutomobile::Construct(std::uint64_t ide
     std::ranges::transform(handling.centreOfMass,next.CentreOfMass.begin(),[](double value){return float(value);});
     next.PercentSubmerged=float(handling.percentSubmerged); next.TractionMult=float(handling.tractionMult);
     next.TractionLoss=float(handling.tractionLoss); next.TractionBias=float(handling.tractionBias);
+    next.BrakeDeceleration=float(handling.brakeDeceleration); next.BrakeBias=float(handling.brakeBias);
+    next.SteeringLockDegrees=float(handling.steeringLockDegrees); next.Abs=handling.Abs;
+    next.HandlingFlags=handling.HandlingFlags;
     next.MaxVelocityKmh=float(handling.vmaxFileKmh); next.EngineAcceleration=float(handling.accelFile);
     next.EngineInertia=float(handling.inertia); next.Gears=std::uint8_t(handling.gears);
     next.DriveType=handling.driveType; next.EngineType=handling.engineType;
@@ -109,5 +113,33 @@ NativeSourceAutomobileStatus NativeSourceAutomobile::RemoveOccupant(std::uint64_
         *found=0; --next.Occupants.PassengerCount;
     }
     next.Revision++;
+    return Publish(std::move(next),error);
+}
+
+NativeSourceAutomobileStatus NativeSourceAutomobile::ProcessPlayerControls(std::uint8_t accelerate,
+    std::uint8_t brake, std::int16_t steering, bool handbrake, bool automaticHandbrake,
+    float forwardVelocity, float timeStep, std::string& error) {
+    if (!m_State || !m_State->Occupants.Driver || steering < -128 || steering > 128 ||
+        !std::isfinite(forwardVelocity) || !std::isfinite(timeStep) || timeStep < 0) {
+        error="invalid automobile control input"; return Status::InvalidInput;
+    }
+    auto next=*m_State;
+    next.Revision++;
+    next.Handbrake=automaticHandbrake||handbrake;
+    const float steerDelta=(-float(steering)/128.0f-next.RawSteerAngle)/5.0f*timeStep;
+    next.RawSteerAngle=std::clamp(next.RawSteerAngle+steerDelta,-1.0f,1.0f);
+    next.SteerAngle=next.SteeringLockDegrees*std::numbers::pi_v<float>/180.0f*
+        std::copysign(next.RawSteerAngle*next.RawSteerAngle,next.RawSteerAngle);
+    if (automaticHandbrake) { next.GasPedal=0; next.BrakePedal=1; next.DoingBurnout=false; }
+    else {
+        const float gasInput=(float(accelerate)-float(brake))/255.0f;
+        next.DoingBurnout=std::abs(forwardVelocity)<0.01f&&accelerate>150&&brake>150;
+        if (next.DoingBurnout) { next.GasPedal=float(accelerate)/255; next.BrakePedal=float(brake)/255; }
+        else if (std::abs(forwardVelocity)<0.01f) { next.GasPedal=gasInput; next.BrakePedal=0; }
+        else if (forwardVelocity>=0&&gasInput<0) { next.GasPedal=0; next.BrakePedal=std::abs(gasInput); }
+        else if (forwardVelocity<0&&gasInput>=0&&(m_State->GasPedal<=0.5f||forwardVelocity<=-0.15f)) {
+            next.GasPedal=0; next.BrakePedal=gasInput;
+        } else { next.GasPedal=gasInput; next.BrakePedal=0; }
+    }
     return Publish(std::move(next),error);
 }

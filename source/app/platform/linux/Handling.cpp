@@ -192,8 +192,8 @@ bool Handling_Load(const char* gameDir, const char* model, HandlingParams& out, 
     }
     // Column map (see file header above): toks[0]=name.
     double mass = 0, turnMass = 0, drag = 0, com[3]{}, submerged = 0, traction[3]{},
-        vmax = 0, accel = 0, inertia = 0;
-    int gears = 0;
+        vmax = 0, accel = 0, inertia = 0, brake=0, brakeBias=0, steering=0;
+    int gears = 0, abs=0;
     if (!ParseDouble(matchToks[1], mass) || !ParseDouble(matchToks[2], turnMass) ||
         !ParseDouble(matchToks[3], drag) || !ParseDouble(matchToks[4],com[0]) ||
         !ParseDouble(matchToks[5],com[1]) || !ParseDouble(matchToks[6],com[2]) ||
@@ -201,7 +201,9 @@ bool Handling_Load(const char* gameDir, const char* model, HandlingParams& out, 
         !ParseDouble(matchToks[9],traction[1]) || !ParseDouble(matchToks[10],traction[2]) ||
         !ParseInt(matchToks[11], gears) ||
         !ParseDouble(matchToks[12], vmax) || !ParseDouble(matchToks[13], accel) ||
-        !ParseDouble(matchToks[14], inertia)) {
+        !ParseDouble(matchToks[14], inertia) || !ParseDouble(matchToks[17],brake) ||
+        !ParseDouble(matchToks[18],brakeBias) || !ParseInt(matchToks[19],abs) ||
+        !ParseDouble(matchToks[20],steering)) {
         SetErr(err, errSize, "bad handling numbers");
         return false;
     }
@@ -211,7 +213,8 @@ bool Handling_Load(const char* gameDir, const char* model, HandlingParams& out, 
     }
     if (!(mass > 0.0) || !(turnMass > 0.0) || drag < 0 || submerged < 0 ||
         !(traction[0] > 0) || !(traction[1] > 0) || traction[2] < 0 || traction[2] > 1 ||
-        !(vmax > 0.0) || !(accel > 0.0) || gears < 1 || gears > 6) {
+        !(vmax > 0.0) || !(accel > 0.0) || !(brake > 0) || brakeBias < 0 || brakeBias > 1 ||
+        (abs!=0 && abs!=1) || !(steering > 0) || steering > 90 || gears < 1 || gears > 6) {
         SetErr(err, errSize, "handling values out of range");
         return false;
     }
@@ -228,6 +231,8 @@ bool Handling_Load(const char* gameDir, const char* model, HandlingParams& out, 
     std::copy_n(com,3,out.centreOfMass);
     out.percentSubmerged=submerged; out.tractionMult=traction[0];
     out.tractionLoss=traction[1]; out.tractionBias=traction[2];
+    out.brakeDeceleration=brake; out.brakeBias=brakeBias; out.Abs=abs!=0;
+    out.steeringLockDegrees=steering;
     // SI: km/h -> m/s via the game's own 0.277778 (1000/3600) factor;
     // accel file is already ms-2 (handling.cfg units header).
     out.vmaxMs = vmax * (1000.0 / 3600.0);
@@ -238,9 +243,10 @@ bool Handling_Load(const char* gameDir, const char* model, HandlingParams& out, 
     (void)std::snprintf(out.accelTok, sizeof(out.accelTok), "%s", matchToks[13].c_str());
     (void)std::snprintf(out.gearsTok, sizeof(out.gearsTok), "%s", matchToks[11].c_str());
     char* end=nullptr;
-    (void)std::strtoul(matchToks[31].c_str(),&end,16);
+    const auto flags=std::strtoul(matchToks[31].c_str(),&end,16);
     if (!end || *end!='\0') { SetErr(err,errSize,"bad handling flags"); return false; }
     (void)std::snprintf(out.handlingFlagsTok, sizeof(out.handlingFlagsTok), "%s", matchToks[31].c_str());
+    out.HandlingFlags=std::uint32_t(flags);
     (void)UpperInPlace(out.model, sizeof(out.model));
     return true;
 }

@@ -27,6 +27,11 @@ struct NativeSourceAutomobileState {
     float Mass{}, TurnMass{}, Drag{}, MaxVelocityKmh{}, EngineAcceleration{}, EngineInertia{};
     std::array<float, 3> CentreOfMass{};
     float PercentSubmerged{}, TractionMult{}, TractionLoss{}, TractionBias{};
+    float BrakeDeceleration{}, BrakeBias{}, SteeringLockDegrees{};
+    bool Abs{};
+    std::uint32_t HandlingFlags{};
+    float RawSteerAngle{}, SteerAngle{}, GasPedal{}, BrakePedal{};
+    bool Handbrake{}, DoingBurnout{};
     float Elasticity = 0.05f, BrakeCount = 20, TireTemperature = 1;
     std::uint8_t Gears{};
     char DriveType{}, EngineType{};
@@ -48,6 +53,9 @@ public:
     NativeSourceAutomobileStatus SetDriver(std::uint64_t occupant, std::string& error);
     NativeSourceAutomobileStatus AddPassenger(std::uint64_t occupant, std::uint8_t seat, std::string& error);
     NativeSourceAutomobileStatus RemoveOccupant(std::uint64_t occupant, std::string& error);
+    NativeSourceAutomobileStatus ProcessPlayerControls(std::uint8_t accelerate, std::uint8_t brake,
+        std::int16_t steering, bool handbrake, bool automaticHandbrake, float forwardVelocity,
+        float timeStep, std::string& error);
     std::shared_ptr<const NativeSourceAutomobileState> LastCommitted() const noexcept { return m_State; }
 
 private:

@@ -16,6 +16,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 
 struct HandlingParams {
     char model[64] = {}; // UPPERCASE row name as matched (e.g. "LANDSTAL")
@@ -33,6 +34,10 @@ struct HandlingParams {
     double centreOfMass[3]{}; // (E/F/G)
     double percentSubmerged = 0.0; // (H)
     double tractionMult = 0.0, tractionLoss = 0.0, tractionBias = 0.0; // (I/J/K)
+    double brakeDeceleration = 0.0, brakeBias = 0.0; // (S/T)
+    bool Abs = false; // (U)
+    double steeringLockDegrees = 0.0; // (V)
+    std::uint32_t HandlingFlags = 0; // (ag)
     // SI values for the integrator (derived, formula logged by caller).
     double vmaxMs = 0.0; // vmaxFileKmh * (1000/3600)
     double accelSi = 0.0; // == accelFile (ms-2)
