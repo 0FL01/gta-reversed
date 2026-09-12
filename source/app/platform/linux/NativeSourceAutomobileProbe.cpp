@@ -154,6 +154,17 @@ int main(int argc,char** argv) try {
     const auto beforeBadWheels=wheels; contacts[0].Adhesion=-1;
     Check(automobile.ProcessWheels(contacts,1,error)==NativeSourceAutomobileStatus::InvalidInput&&
         automobile.LastCommitted()==beforeBadWheels,"invalid wheel contact retains publication");
+    const std::array collisionContacts{
+        NativeSourceAutomobileContact{NativeSourceAutomobileContactKind::Building,{1,2,3},{0,0,1},.2f,1,0},
+        NativeSourceAutomobileContact{NativeSourceAutomobileContactKind::Vehicle,{2,3,4},{1,0,0},.1f,4,1}};
+    Check(automobile.ProcessContacts(collisionContacts,error)==NativeSourceAutomobileStatus::Ready,error);
+    auto collided=automobile.LastCommitted();
+    Check(collided->ContactCount==2&&collided->HasHitWall&&collided->Contacts[0]==collisionContacts[0]&&
+        collided->Contacts[1]==collisionContacts[1],"source automobile contact provenance/order");
+    Check(!collided->VehicleCollisionProcessed,"simple status collision flag source behavior");
+    const auto beforeBadContacts=collided; auto badContacts=collisionContacts; badContacts[0].Depth=-1;
+    Check(automobile.ProcessContacts(badContacts,error)==NativeSourceAutomobileStatus::InvalidInput&&
+        automobile.LastCommitted()==beforeBadContacts,"invalid collision retains publication");
     Check(automobile.AddPassenger(2001,0,error)==NativeSourceAutomobileStatus::Ready,error);
     Check(automobile.AddPassenger(2002,2,error)==NativeSourceAutomobileStatus::Ready,error);
     auto occupied=automobile.LastCommitted();

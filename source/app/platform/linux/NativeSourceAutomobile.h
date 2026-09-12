@@ -8,6 +8,7 @@
 
 #include <array>
 #include <memory>
+#include <span>
 #include <string>
 
 enum class NativeSourceAutomobileStatus { Ready, InvalidInput, Unsupported, Error, Occupied, Full };
@@ -16,6 +17,14 @@ struct NativeSourceWheelContact {
     NativeSourcePhysicalVector Forward{},Right{},Speed{},Point{};
     float Adhesion{};
     bool OnGround{};
+};
+enum class NativeSourceAutomobileContactKind : std::uint8_t { Building, Vehicle, Object };
+struct NativeSourceAutomobileContact {
+    NativeSourceAutomobileContactKind Kind{};
+    NativeSourcePhysicalVector Point{},Normal{};
+    float Depth{};
+    std::uint8_t Surface{},Piece{};
+    bool operator==(const NativeSourceAutomobileContact&) const = default;
 };
 
 struct NativeSourceAutomobileOccupants {
@@ -48,6 +57,9 @@ struct NativeSourceAutomobileState {
     float FrontHeightAboveRoad{},RearHeightAboveRoad{};
     std::array<NativeSourceWheelState,4> WheelStates{};
     NativeSourcePhysicalVector MoveForce{},TurnForce{};
+    bool VehicleCollisionProcessed{},HasHitWall{};
+    std::array<NativeSourceAutomobileContact,32> Contacts{};
+    std::uint8_t ContactCount{};
     NativeTransmission::State Transmission;
     float ForwardSpeed{};
     float Elasticity = 0.05f, BrakeCount = 20, TireTemperature = 1;
@@ -79,6 +91,8 @@ public:
     NativeSourceAutomobileStatus SetupSuspension(const CarPoseMeasure&, std::string& error);
     NativeSourceAutomobileStatus ProcessWheels(const std::array<NativeSourceWheelContact,4>&,
         float timeStep, std::string& error);
+    NativeSourceAutomobileStatus ProcessContacts(std::span<const NativeSourceAutomobileContact>,
+        std::string& error);
     std::shared_ptr<const NativeSourceAutomobileState> LastCommitted() const noexcept { return m_State; }
 
 private:

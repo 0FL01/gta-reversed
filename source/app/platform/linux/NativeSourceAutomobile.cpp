@@ -255,3 +255,18 @@ NativeSourceAutomobileStatus NativeSourceAutomobile::ProcessWheels(
     if (!Finite(next.MoveForce)||!Finite(next.TurnForce)) { error="automobile wheel force overflow"; return Status::InvalidInput; }
     return Publish(std::move(next),error);
 }
+
+NativeSourceAutomobileStatus NativeSourceAutomobile::ProcessContacts(
+    std::span<const NativeSourceAutomobileContact> contacts,std::string& error) {
+    if (!m_State||contacts.size()>32) { error="invalid automobile contact count"; return Status::InvalidInput; }
+    for (const auto& contact:contacts) if (!Finite(contact.Point)||!Finite(contact.Normal)||
+        !std::isfinite(contact.Depth)||contact.Depth<0) {
+        error="invalid automobile contact"; return Status::InvalidInput;
+    }
+    auto next=*m_State; next.Revision++; next.VehicleCollisionProcessed=next.Status!=NativeVehicleStatus::Simple;
+    next.ContactCount=std::uint8_t(contacts.size()); next.HasHitWall=false;
+    std::ranges::copy(contacts,next.Contacts.begin());
+    if (contacts.size()<next.Contacts.size()) std::fill(next.Contacts.begin()+contacts.size(),next.Contacts.end(),NativeSourceAutomobileContact{});
+    next.HasHitWall=std::ranges::any_of(contacts,[](const auto& contact){return contact.Kind==NativeSourceAutomobileContactKind::Building;});
+    return Publish(std::move(next),error);
+}
