@@ -1,6 +1,7 @@
 #include "IfpAnim.h"
 #include "NativeSourceAnimClump.h"
 #include "NativeSourceJump.h"
+#include "NativeSourceWalkRun.h"
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -79,5 +80,20 @@ int main(int argc, char** argv) {
         Check(jump.CompleteLanding(generation) == NativeSourceJumpStatus::Ok && clump.Find(119), "finished task leaves real clump animation alive");
     }
     Check(clump.Update(0.25f, events) == NativeSourceClumpStatus::Ok && !clump.Find(119), "actual clump retires real land after task destruction");
+    NativeSourceWalkRunInput locomotion;
+    NativeSourceWalkRunResult movement;
+    Check(NativeSourceProcessWalkRun(clump, locomotion, movement) == NativeSourceWalkRunStatus::Ok && clump.Find(3), "ordinary source idle from real IFP metadata");
+    locomotion.MoveRatio = 0.5f;
+    Check(NativeSourceProcessWalkRun(clump, locomotion, movement) == NativeSourceWalkRunStatus::Ok && movement.Starting, "real walk_start association");
+    const float startStep = clump.Find(5)->State.TotalTime / 4;
+    for (int step = 0; step < 3; ++step) {
+        Check(clump.Update(startStep, events) == NativeSourceClumpStatus::Ok && NativeSourceProcessWalkRun(clump, locomotion, movement) == NativeSourceWalkRunStatus::Ok, "real start-to-walk source update");
+    }
+    Check(!movement.Starting && movement.Move == NativeSourceMoveState::Walk && !clump.Find(5), "authored start duration uses source lookahead");
+    locomotion.MoveRatio = 2;
+    Check(NativeSourceProcessWalkRun(clump, locomotion, movement) == NativeSourceWalkRunStatus::Ok && movement.RunningActivity && clump.Find(1)->State.BlendAmount == 1, "real ordinary run association");
+    locomotion.MoveRatio = 0;
+    Check(NativeSourceProcessWalkRun(clump, locomotion, movement) == NativeSourceWalkRunStatus::Ok && clump.Update(0.25f, events) == NativeSourceClumpStatus::Ok &&
+        clump.Find(3) && !clump.Find(1), "real ordinary stop retires run in favor of idle");
     std::printf("source-clump-assets-ok checks=%zu clips=%zu reader-metadata-only no-physics-or-pose-claim\n", s_Checks, clips.size());
 }
