@@ -9,6 +9,7 @@
 
 #include <cstddef>
 #include <string>
+#include <vector>
 
 #include "app/platform/linux/WorldShot.h"
 #include "app/platform/linux/NativeCollisionAssets.h"
@@ -78,3 +79,21 @@ bool StreamPager_CollisionPopulation(NativeCollisionPopulation& out, std::string
 bool StreamPager_ConfigureLodSupplement(const NativePlacementIdentity& child,
                                         const NativePlacementIdentity& parent,
                                         std::string& error);
+// P1-A07 catalog-backed selected residency (opt-in beside unchanged capped
+// diagnostics). Matches visible+hidden identities uniquely 1:1 against the
+// full population and renders exactly visible-then-hidden via the shared
+// TXD-lineage/DFF-cache/EmitPlacedMesh/eviction stages (no second loader).
+// Streamed only: no radius/cell fallback, count truncation, LOD-prefix or
+// interior skip. Unknown/duplicate identity, anim/Clump, missing, failed,
+// skinned/empty DFF or incomplete TXD chain fails the WHOLE candidate with
+// the specific identity in the message; never silently skips. A configured
+// A04 pair keeps all-or-neither when its child is selected, without
+// duplicate emission when the parent is already the expected hidden target.
+// Both lists drive exact want models/TXDs/caches/eviction; rendered (when
+// provided) is exact one-to-one visible-then-hidden with scene.meshes.
+// Failure publishes no half scene. Pure std, no Godot/escaped pointers.
+bool StreamPager_UpdateSelected(const std::vector<NativePlacementIdentity>& visible,
+                                const std::vector<NativePlacementIdentity>& hiddenTargets,
+                                WorldShotScene& scene, E2EPagerFrame& frame, char* err,
+                                std::size_t errSize,
+                                std::vector<NativePlacementIdentity>* rendered = nullptr);

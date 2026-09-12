@@ -1,6 +1,7 @@
 #include "app/platform/linux/NativeLodCatalog.h"
 #include <algorithm>
 #include <bit>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <set>
@@ -675,6 +676,157 @@ bool NativeLodCatalog::EvaluateLodRelation(const NativeLodChainDecision& chain, 
     } else {
         local.Reason = "Renderer child not visible, no marking; 640-655/1048-1065 visible parent fallback";
     }
+    out = std::move(local);
+    error.clear();
+    return true;
+} catch (const std::exception& e) { error = e.what(); return false; }
+
+bool NativeLodCatalog::SelectResidency(float x, float y, float radius, int area, NativeCatalogResidency& out,
+                                       std::string& error) const try {
+    // Pure diagnostic residency: never mutates m_Nodes/m_Sources/m_Metadata.
+    // On any rejection out is left unchanged; only a complete residency is published.
+    if (!m_DiskValidated) { error = "Error: catalog lacks disk validation"; return false; }
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(radius) || !(radius > 0.0f)) {
+        error = "Error: invalid residency window";
+        return false;
+    }
+    if (area < 0 || area > 255) { error = "Error: area out of range"; return false; }
+    if (m_Nodes.empty()) { error = "Error: empty residency selection"; return false; }
+
+    auto formatIdentity = [](const NativePlacementIdentity& id) {
+        return id.Ipl + ":" + std::to_string(id.Record) + " " + id.Model + " (" +
+            std::to_string(id.ModelId) + ")" + (id.Binary ? " binary" : " text");
+    };
+
+    // Initial window in catalog source order (m_Nodes preserves source order).
+    // Area 0: exterior XY disc (Interior low byte == 0 as well as squared
+    // distance, no Z cull). Positive area: entire interior via exact low-byte
+    // match (position ignored beyond the finite validation above). No name-prefix filters, caps or skips.
+    std::vector<char> selected(m_Nodes.size(), 0);
+    size_t initialCount = 0;
+    const double radiusDouble = static_cast<double>(radius);
+    const double radiusSquared = radiusDouble * radiusDouble;
+    for (size_t i = 0; i < m_Nodes.size(); ++i) {
+        const auto& node = m_Nodes[i];
+        bool inWindow = false;
+        if (area == 0) {
+            if ((node.Placement.Interior & 255) != 0) inWindow = false;
+            else {
+                const double dx = static_cast<double>(node.Placement.Position[0]) - static_cast<double>(x);
+                const double dy = static_cast<double>(node.Placement.Position[1]) - static_cast<double>(y);
+                if (dx * dx + dy * dy <= radiusSquared) inWindow = true;
+            }
+        } else {
+            if ((node.Placement.Interior & 255) == area) inWindow = true;
+        }
+        if (inWindow) { selected[i] = 1; ++initialCount; }
+    }
+    if (!initialCount) { error = "Error: empty residency selection"; return false; }
+
+    // Bound-parent closure recursively, even outside the initial window.
+    std::vector<size_t> work;
+    work.reserve(m_Nodes.size());
+    for (size_t i = 0; i < m_Nodes.size(); ++i) {
+        if (selected[i]) work.push_back(i);
+    }
+    size_t head = 0;
+    while (head < work.size()) {
+        const size_t idx = work[head++];
+        if (idx >= m_Nodes.size()) { error = "Error: residency index outside catalog"; return false; }
+        const auto& node = m_Nodes[idx];
+        if (node.Link != NativeLodLinkStatus::Bound) continue;
+        if (!node.Parent) { error = "Error: invalid residency link " + formatIdentity(node.Identity); return false; }
+        const size_t parent = *node.Parent;
+        if (parent >= m_Nodes.size()) {
+            error = "Error: invalid residency link " + formatIdentity(node.Identity);
+            return false;
+        }
+        if (!selected[parent]) { selected[parent] = 1; work.push_back(parent); }
+    }
+
+    // Whole-candidate validation over the closed set. Any failure rejects the
+    // whole candidate with out unchanged; nothing is silently skipped.
+    size_t timeModels = 0;
+    for (size_t i = 0; i < m_Nodes.size(); ++i) {
+        if (!selected[i]) continue;
+        const auto& node = m_Nodes[i];
+        if (node.Link != NativeLodLinkStatus::None && node.Link != NativeLodLinkStatus::Bound) {
+            error = "Error: invalid residency link " + formatIdentity(node.Identity);
+            return false;
+        }
+        if (node.Link == NativeLodLinkStatus::Bound) {
+            if (!node.Parent || *node.Parent >= m_Nodes.size()) {
+                error = "Error: invalid residency link " + formatIdentity(node.Identity);
+                return false;
+            }
+            const auto& parent = m_Nodes[*node.Parent];
+            if (!selected[*node.Parent]) {
+                error = "Error: invalid residency link " + formatIdentity(node.Identity);
+                return false;
+            }
+            // Bound Lod binding must address the parent record.
+            if (node.Placement.Lod != static_cast<int32_t>(parent.LocalIndex)) {
+                error = "Error: invalid residency link " + formatIdentity(node.Identity);
+                return false;
+            }
+            // Cross-area linkage is never admitted.
+            if ((node.Placement.Interior & 255) != (parent.Placement.Interior & 255)) {
+                error = "Error: cross-area residency link " + formatIdentity(node.Identity) + " -> " +
+                    formatIdentity(parent.Identity);
+                return false;
+            }
+        }
+        // Area queries admit only that interior (closure included); area 0 is
+        // the explicit exterior selection.
+        if ((node.Placement.Interior & 255) != area) {
+            error = "Error: cross-area residency selection " + formatIdentity(node.Identity);
+            return false;
+        }
+        const auto meta = m_Metadata.Query(node.Placement);
+        if (meta.Status != NativeWorldInfoStatus::Ready || !meta.Model || !meta.Placement) {
+            error = "Error: unknown residency model " + formatIdentity(node.Identity);
+            return false;
+        }
+        if (meta.Model->Kind != NativeWorldModelKind::Atomic &&
+            meta.Model->Kind != NativeWorldModelKind::TimeAtomic) {
+            error = std::string(meta.Model->Kind == NativeWorldModelKind::Clump ?
+                                    "Error: nonstatic residency model " : "Error: unknown residency model ") +
+                formatIdentity(node.Identity);
+            return false;
+        }
+        if (meta.Model->Kind == NativeWorldModelKind::TimeAtomic) ++timeModels;
+    }
+
+    // Diagnostic split: any selected node referenced as parent by another
+    // selected node is hidden; others are visible. Source order preserved.
+    // Hidden is an explicitly labelled lab policy, NOT source runtime LOD:
+    // Runtime* fields are never touched (this method is const).
+    std::vector<char> isParent(m_Nodes.size(), 0);
+    for (size_t i = 0; i < m_Nodes.size(); ++i) {
+        if (!selected[i]) continue;
+        const auto& node = m_Nodes[i];
+        if (node.Link == NativeLodLinkStatus::Bound && node.Parent && *node.Parent < m_Nodes.size() &&
+            selected[*node.Parent]) {
+            isParent[*node.Parent] = 1;
+        }
+    }
+    NativeCatalogResidency local;
+    local.Population = m_Nodes.size();
+    local.TimeModels = timeModels;
+    for (size_t i = 0; i < m_Nodes.size(); ++i) {
+        if (!selected[i]) continue;
+        if (isParent[i]) local.HiddenTargets.push_back(m_Nodes[i].Identity);
+        else local.Visible.push_back(m_Nodes[i].Identity);
+    }
+    if (local.Visible.empty() && local.HiddenTargets.empty()) {
+        error = "Error: empty residency selection";
+        return false;
+    }
+    if (local.Visible.size() + local.HiddenTargets.size() > local.Population) {
+        error = "Error: invalid residency census";
+        return false;
+    }
+    local.ExcludedOutside = local.Population - local.Visible.size() - local.HiddenTargets.size();
     out = std::move(local);
     error.clear();
     return true;

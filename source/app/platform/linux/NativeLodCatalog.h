@@ -3,6 +3,8 @@
 #include "app/platform/linux/NativeWorldEntityInfo.h"
 #include <cstddef>
 #include <cstdint>
+#include <string>
+#include <vector>
 
 enum class NativeLodLinkStatus {
     None, Bound, UnknownParentSource, AmbiguousParentSource, InvalidIndex, Cycle, InvalidAncestor
@@ -81,6 +83,16 @@ struct NativeLodRelationDecision {
     std::string Reason;
     bool operator==(const NativeLodRelationDecision&) const = default;
 };
+// P1-A07 catalog-backed selected resource residency. Pure diagnostic
+// residency policy: Visible are presented, HiddenTargets are authored
+// parents retained hidden (explicit lab policy, NOT source runtime LOD).
+// Population is the full catalog size, ExcludedOutside is
+// Population-Visible-HiddenTargets, TimeModels counts admitted TimeAtomic
+// resources (visibility stays unknown until P5-A02). Source order preserved.
+struct NativeCatalogResidency {
+    std::vector<NativePlacementIdentity> Visible, HiddenTargets;
+    size_t Population{}, ExcludedOutside{}, TimeModels{};
+};
 class NativeLodCatalog {
 public:
     // Full runtime population required. Raw DAT/IPL/IMG decode validates every
@@ -134,6 +146,21 @@ public:
     bool EvaluateLodRelation(const NativeLodChainDecision& chain, bool childVisible, uint8_t childAlpha,
                              bool parentVisible, NativeLodRelationDecision& out,
                              std::string& error) const;
+    // P1-A07 selected residency: area 0 selects the exterior XY disc
+    // (Placement.Interior low byte == 0 as well as squaredDistance <= radius^2,
+    // no Z cull); positive area selects the entire interior (exact
+    // position ignored beyond finite validation). Bound-parent closure is
+    // expanded recursively even outside the initial window. Catalog source
+    // order is preserved. Any selected node referenced as parent by another
+    // selected node is HiddenTargets (diagnostic, NOT source runtime LOD;
+    // Runtime* fields stay Unknown), others Visible. Atomic/TimeAtomic are
+    // admitted (TimeModels counted); invalid link, cross-area linkage,
+    // Clump or unknown model kind inside selected fails the WHOLE candidate
+    // with out unchanged. Empty selection fails. Requires DiskValidated,
+    // finite x/y, finite positive radius and area 0..255. No name-prefix
+    // filters, caps or skip buckets.
+    bool SelectResidency(float x, float y, float radius, int area, NativeCatalogResidency& out,
+                         std::string& error) const;
 private:
     using Key = std::tuple<std::string, std::string, uint32_t, int, bool>;
     static std::shared_ptr<NativeLodCatalog> AssembleMutable(

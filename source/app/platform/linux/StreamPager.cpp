@@ -1061,6 +1061,7 @@ bool s_init = false;
 std::vector<PagerInst> s_insts;
 std::map<Cell, std::vector<int>> s_grid; // cell -> IPL-ordered instance rows
 std::map<std::string, IdeEntry> s_ide;
+std::set<std::string> s_animModels; // lowercased anim (Clump) keys, retained for selected validation
 std::vector<ImgIndex> s_imgs;
 std::map<std::string, CachedModel> s_cache; // resident DFF models
 std::set<std::string> s_failed; // known-bad models (missing/skinned/anim)
@@ -1262,6 +1263,207 @@ static void EmitPlacedMesh(const CachedModel& cached, const float* worldPos, con
     }
 }
 
+// Shared wanted-resource stages for the legacy window (stages 4-6) and the
+// P1-A07 selected residency. No new loader/catalog authority: both paths use
+// the same TXD-lineage/DFF-cache/eviction implementation. Legacy mode
+// preserves missing/skinned skip behavior exactly; selected mode is explicit
+// fail-closed (strictSelected) with the specific identity in every message.
+static void PagerPageInTxds(const std::map<std::string, int>& wantTxd) {
+    for (const auto& kv : wantTxd) {
+        if (s_txds.find(kv.first) != s_txds.end()) {
+            continue;
+        }
+        std::vector<uint8> txdBytes;
+        NativeAssetIdentity::ArchiveMember sourceIdentity;
+        if (FindInImgs(kv.first + ".txd", txdBytes, nullptr, &sourceIdentity)) {
+            rw::TexDictionary* txd = ParseTxd(txdBytes);
+            if (txd && (s_options.includeStreamed || txd->count() > 0)) {
+                s_txds[kv.first] = txd;
+                s_txdSources[kv.first] = std::move(sourceIdentity);
+                s_txdOrder.push_back(txd);
+            } else {
+                if (txd) {
+                    txd->destroy();
+                }
+                s_txds[kv.first] = nil;
+                s_txdSources.erase(kv.first);
+            }
+        } else {
+            s_txds[kv.first] = nil;
+            s_txdSources.erase(kv.first);
+        }
+    }
+}
+
+static bool PagerPageInModels(const std::map<std::string, int>& wantModel, bool strictSelected,
+                              const std::map<std::string, std::string>* identityForModel,
+                              char* err, std::size_t errSize) {
+    auto identityOf = [&](const std::string& key) -> std::string {
+        if (identityForModel) {
+            const auto found = identityForModel->find(key);
+            if (found != identityForModel->end() && !found->second.empty()) return found->second;
+        }
+        return key;
+    };
+    for (const auto& kv : wantModel) {
+        if (s_cache.find(kv.first) != s_cache.end()) {
+            continue;
+        }
+        if (!strictSelected) {
+            if (s_failed.find(kv.first) != s_failed.end()) {
+                continue;
+            }
+        } else if (s_failed.find(kv.first) != s_failed.end()) {
+            SetErr(err, errSize,
+                   ("failed selected model " + kv.first + " identity " + identityOf(kv.first)).c_str());
+            return false;
+        }
+        // Resolve the TXD the IDE row names (R5 rule) before streaming.
+        std::string txdName;
+        auto iit = s_ide.find(kv.first);
+        if (iit != s_ide.end()) {
+            txdName = iit->second.txd;
+        } else if (strictSelected) {
+            SetErr(err, errSize,
+                   ("missing IDE for selected identity " + identityOf(kv.first)).c_str());
+            return false;
+        }
+        rw::TexDictionary* primary = nil;
+        std::vector<rw::TexDictionary*> fb;
+        TxdLookupChain sourceChain;
+        if (s_options.includeStreamed) {
+            sourceChain = BuildTxdLookupChain(txdName);
+            if (sourceChain.validity != TxdLineageValidity::Complete || sourceChain.dictionaries.empty()) {
+                if (!strictSelected) {
+                    const auto message = std::string{"unavailable authored TXD lineage for model "} + kv.first +
+                        " (" + txdName + ")";
+                    SetErr(err, errSize, message.c_str());
+                    return false;
+                }
+                SetErr(err, errSize,
+                       ("unavailable authored TXD lineage for model " + kv.first + " (" + txdName +
+                        ") identity " + identityOf(kv.first))
+                           .c_str());
+                return false;
+            }
+            if (sourceChain.validity == TxdLineageValidity::Complete &&
+                !sourceChain.dictionaries.empty()) {
+                primary = sourceChain.dictionaries.front();
+                fb.assign(sourceChain.dictionaries.begin() + 1, sourceChain.dictionaries.end());
+            }
+        } else {
+            if (!txdName.empty()) {
+                std::string tk = txdName;
+                ToLowerInPlace(tk);
+                auto tit = s_txds.find(tk);
+                if (tit != s_txds.end()) {
+                    primary = tit->second;
+                }
+            }
+            for (rw::TexDictionary* txd : s_txdOrder) {
+                if (txd && txd != primary) {
+                    fb.push_back(txd);
+                }
+            }
+        }
+        std::vector<uint8> dffBytes;
+        std::string sourceArchive;
+        if (!FindInImgs(kv.first + ".dff", dffBytes, &sourceArchive)) {
+            s_failed.insert(kv.first);
+            if (!strictSelected) {
+                continue;
+            }
+            SetErr(err, errSize, ("missing DFF for selected identity " + identityOf(kv.first)).c_str());
+            return false;
+        }
+        LinkedClump lc = TexSample_LinkedParse(dffBytes.data(), dffBytes.size(), primary,
+                                               fb.empty() ? nullptr : fb.data(), fb.size());
+        if (!lc.clump) {
+            TexSample_FreeLinked(lc);
+            s_failed.insert(kv.first);
+            if (!strictSelected) {
+                continue;
+            }
+            SetErr(err, errSize, ("failed DFF for selected identity " + identityOf(kv.first)).c_str());
+            return false;
+        }
+        CachedModel cached;
+        cached.sourceModelName = iit != s_ide.end() ? iit->second.model : kv.first;
+        cached.sourceTxdName = txdName;
+        cached.sourceArchiveName = sourceArchive;
+        std::map<const rw::Geometry*, std::vector<uint8>> nightColors;
+        std::map<const rw::Geometry*, int> geometryOrdinals;
+        bool ok = !s_options.includeStreamed || ReadNightColors(dffBytes, lc.clump, nightColors, geometryOrdinals);
+        const auto* identityChain = s_options.includeStreamed &&
+                sourceChain.validity == TxdLineageValidity::Complete
+            ? &sourceChain
+            : nullptr;
+        ok = ok && FlattenClumpStatic(lc.clump, lc, cached, nightColors, geometryOrdinals, identityChain);
+        TexSample_FreeLinked(lc);
+        if (!ok) {
+            s_failed.insert(kv.first); // skinned or GPU-only: honestly skipped in legacy
+            if (!strictSelected) {
+                continue;
+            }
+            SetErr(err, errSize, ("skinned/empty DFF for selected identity " + identityOf(kv.first)).c_str());
+            return false;
+        }
+        if (strictSelected && (cached.tris <= 0 || cached.pos.empty())) {
+            s_failed.insert(kv.first);
+            SetErr(err, errSize, ("empty DFF for selected identity " + identityOf(kv.first)).c_str());
+            return false;
+        }
+        s_cache[kv.first] = std::move(cached);
+    }
+    return true;
+}
+
+static void PagerEvictUnreferenced(const std::map<std::string, int>& wantModel,
+                                   const std::map<std::string, int>& wantTxd) {
+    {
+        std::vector<std::string> drop;
+        for (const auto& kv : s_cache) {
+            if (wantModel.find(kv.first) == wantModel.end()) {
+                drop.push_back(kv.first);
+            }
+        }
+        for (const std::string& k : drop) {
+            s_cache.erase(k);
+        }
+    }
+    {
+        std::vector<std::string> drop;
+        for (const auto& kv : s_txds) {
+            if (!kv.second) {
+                continue; // miss markers are free
+            }
+            if (wantTxd.find(kv.first) == wantTxd.end()) {
+                drop.push_back(kv.first);
+            }
+        }
+        for (const std::string& k : drop) {
+            rw::TexDictionary* txd = s_txds[k];
+            if (txd) {
+                txd->destroy();
+            }
+            s_txds.erase(k);
+            s_txdSources.erase(k);
+            for (auto it = s_txdOrder.begin(); it != s_txdOrder.end(); ++it) {
+                if (*it == txd) {
+                    s_txdOrder.erase(it);
+                    break;
+                }
+            }
+        }
+    }
+    s_texResident = 0;
+    for (const auto& kv : s_txds) {
+        if (kv.second) {
+            ++s_texResident;
+        }
+    }
+}
+
 } // namespace
 
 bool StreamPager_Init(const char* gameDir, E2ELoadInfo& info, char* err, std::size_t errSize,
@@ -1307,6 +1509,7 @@ bool StreamPager_Init(const char* gameDir, E2ELoadInfo& info, char* err, std::si
     }
 
     s_ide.clear();
+    s_animModels.clear();
     std::set<std::string> animModels;
     std::map<int, std::string> modelIds;
     int ideFiles = 0;
@@ -1321,6 +1524,7 @@ bool StreamPager_Init(const char* gameDir, E2ELoadInfo& info, char* err, std::si
         ParseIdeText(text, s_ide, animModels, modelIds);
         ++ideFiles;
     }
+    s_animModels = animModels;
     if (s_ide.empty()) {
         SetErr(err, errSize, "no IDE model entries parsed");
         return false;
@@ -1689,147 +1893,13 @@ bool StreamPager_Update(float camX, float camY, float camZ, WorldShotScene& scen
         }
     }
 
-    // --- 4. Page in TXDs first (DFF materials resolve against current). ---
-    for (const auto& kv : wantTxd) {
-        if (s_txds.find(kv.first) != s_txds.end()) {
-            continue;
-        }
-        std::vector<uint8> txdBytes;
-        NativeAssetIdentity::ArchiveMember sourceIdentity;
-        if (FindInImgs(kv.first + ".txd", txdBytes, nullptr, &sourceIdentity)) {
-            rw::TexDictionary* txd = ParseTxd(txdBytes);
-            if (txd && (s_options.includeStreamed || txd->count() > 0)) {
-                s_txds[kv.first] = txd;
-                s_txdSources[kv.first] = std::move(sourceIdentity);
-                s_txdOrder.push_back(txd);
-            } else {
-                if (txd) {
-                    txd->destroy();
-                }
-                s_txds[kv.first] = nil;
-                s_txdSources.erase(kv.first);
-            }
-        } else {
-            s_txds[kv.first] = nil;
-            s_txdSources.erase(kv.first);
-        }
+    // --- 4-6. Shared wanted-resource stages (TXD/DFF/eviction). Legacy mode
+    // preserves missing/skinned skip behavior exactly.
+    PagerPageInTxds(wantTxd);
+    if (!PagerPageInModels(wantModel, false, nullptr, err, errSize)) {
+        return false;
     }
-
-    // --- 5. Page in DFF models (parsed once, shared by repeats). ---
-    for (const auto& kv : wantModel) {
-        if (s_cache.find(kv.first) != s_cache.end() || s_failed.find(kv.first) != s_failed.end()) {
-            continue;
-        }
-        // Resolve the TXD the IDE row names (R5 rule) before streaming.
-        std::string txdName;
-        auto iit = s_ide.find(kv.first);
-        if (iit != s_ide.end()) {
-            txdName = iit->second.txd;
-        }
-        rw::TexDictionary* primary = nil;
-        std::vector<rw::TexDictionary*> fb;
-        TxdLookupChain sourceChain;
-        if (s_options.includeStreamed) {
-            sourceChain = BuildTxdLookupChain(txdName);
-            if (sourceChain.validity != TxdLineageValidity::Complete || sourceChain.dictionaries.empty()) {
-                const auto message = std::string{"unavailable authored TXD lineage for model "} + kv.first + " (" + txdName + ")";
-                SetErr(err, errSize, message.c_str());
-                return false;
-            }
-            if (sourceChain.validity == TxdLineageValidity::Complete &&
-                !sourceChain.dictionaries.empty()) {
-                primary = sourceChain.dictionaries.front();
-                fb.assign(sourceChain.dictionaries.begin() + 1, sourceChain.dictionaries.end());
-            }
-        } else {
-            if (!txdName.empty()) {
-                std::string tk = txdName;
-                ToLowerInPlace(tk);
-                auto tit = s_txds.find(tk);
-                if (tit != s_txds.end()) {
-                    primary = tit->second;
-                }
-            }
-            for (rw::TexDictionary* txd : s_txdOrder) {
-                if (txd && txd != primary) {
-                    fb.push_back(txd);
-                }
-            }
-        }
-        std::vector<uint8> dffBytes;
-        std::string sourceArchive;
-        if (!FindInImgs(kv.first + ".dff", dffBytes, &sourceArchive)) {
-            s_failed.insert(kv.first);
-            continue;
-        }
-        LinkedClump lc = TexSample_LinkedParse(dffBytes.data(), dffBytes.size(), primary,
-                                               fb.empty() ? nullptr : fb.data(), fb.size());
-        if (!lc.clump) {
-            TexSample_FreeLinked(lc);
-            s_failed.insert(kv.first);
-            continue;
-        }
-        CachedModel cached;
-        cached.sourceModelName = iit != s_ide.end() ? iit->second.model : kv.first;
-        cached.sourceTxdName = txdName;
-        cached.sourceArchiveName = sourceArchive;
-        std::map<const rw::Geometry*, std::vector<uint8>> nightColors;
-        std::map<const rw::Geometry*, int> geometryOrdinals;
-        bool ok = !s_options.includeStreamed || ReadNightColors(dffBytes, lc.clump, nightColors, geometryOrdinals);
-        const auto* identityChain = s_options.includeStreamed &&
-            sourceChain.validity == TxdLineageValidity::Complete ? &sourceChain : nullptr;
-        ok = ok && FlattenClumpStatic(lc.clump, lc, cached, nightColors, geometryOrdinals, identityChain);
-        TexSample_FreeLinked(lc);
-        if (!ok) {
-            s_failed.insert(kv.first); // skinned or GPU-only: honestly skipped
-            continue;
-        }
-        s_cache[kv.first] = std::move(cached);
-    }
-
-    // --- 6. Evict models/TXDs nobody references (bounded memory). ---
-    {
-        std::vector<std::string> drop;
-        for (const auto& kv : s_cache) {
-            if (wantModel.find(kv.first) == wantModel.end()) {
-                drop.push_back(kv.first);
-            }
-        }
-        for (const std::string& k : drop) {
-            s_cache.erase(k);
-        }
-    }
-    {
-        std::vector<std::string> drop;
-        for (const auto& kv : s_txds) {
-            if (!kv.second) {
-                continue; // miss markers are free
-            }
-            if (wantTxd.find(kv.first) == wantTxd.end()) {
-                drop.push_back(kv.first);
-            }
-        }
-        for (const std::string& k : drop) {
-            rw::TexDictionary* txd = s_txds[k];
-            if (txd) {
-                txd->destroy();
-            }
-            s_txds.erase(k);
-            s_txdSources.erase(k);
-            for (auto it = s_txdOrder.begin(); it != s_txdOrder.end(); ++it) {
-                if (*it == txd) {
-                    s_txdOrder.erase(it);
-                    break;
-                }
-            }
-        }
-    }
-    s_texResident = 0;
-    for (const auto& kv : s_txds) {
-        if (kv.second) {
-            ++s_texResident;
-        }
-    }
+    PagerEvictUnreferenced(wantModel, wantTxd);
 
     // Supplement pair must be fully loadable before publishing any scene:
     // never continue with a half pair. Other candidates keep honest skipping.
@@ -1981,6 +2051,7 @@ void StreamPager_Shutdown() {
     s_insts.clear();
     s_grid.clear();
     s_ide.clear();
+    s_animModels.clear();
     s_imgs.clear();
     s_active.clear();
     if (s_empty) {
@@ -2143,5 +2214,258 @@ bool StreamPager_ConfigureLodSupplement(const NativePlacementIdentity& child,
     cfg.parentQuat[3] = qw;
     s_supplement = std::move(cfg);
     error.clear();
+    return true;
+}
+
+bool StreamPager_UpdateSelected(const std::vector<NativePlacementIdentity>& visible,
+                                const std::vector<NativePlacementIdentity>& hiddenTargets,
+                                WorldShotScene& scene, E2EPagerFrame& frame, char* err,
+                                std::size_t errSize,
+                                std::vector<NativePlacementIdentity>* rendered) {
+    // Selected residency: exact catalog-backed window, no radius/cell/fallback/
+    // truncation/LOD-prefix/interior filtering. Reuses the shared TXD-lineage,
+    // DFF-cache, EmitPlacedMesh and eviction stages; strict whole-candidate
+    // failure with the specific identity, never silent skip. Old Update,
+    // non-streamed, cap and supplement semantics are untouched (this path only
+    // reads s_supplement for the all-or-neither/duplicate guard).
+    frame = E2EPagerFrame{};
+    scene.meshes.clear();
+    scene.images.clear();
+    if (rendered) rendered->clear();
+    if (!s_init) { SetErr(err, errSize, "pager not initialized"); return false; }
+    if (!s_options.includeStreamed) {
+        SetErr(err, errSize, "selected residency requires pager includeStreamed=true");
+        return false;
+    }
+    if (visible.empty() && hiddenTargets.empty()) {
+        SetErr(err, errSize, "no selected instances (empty residency)");
+        return false;
+    }
+
+    auto formatIdentity = [](const NativePlacementIdentity& id) {
+        std::string out = id.Ipl + ":" + std::to_string(id.Record) + " " + id.Model + " (" +
+            std::to_string(id.ModelId) + ")";
+        out += id.Binary ? " binary" : " text";
+        return out;
+    };
+    auto failSelected = [&](const std::string& message) {
+        SetErr(err, errSize, message.c_str());
+        scene.meshes.clear();
+        scene.images.clear();
+        if (rendered) rendered->clear();
+        frame = E2EPagerFrame{};
+        return false;
+    };
+
+    // Ordered selected identities: visible then hidden. Rendered and scene
+    // emission follow this exact order one-to-one.
+    std::vector<NativePlacementIdentity> ordered;
+    ordered.reserve(visible.size() + hiddenTargets.size());
+    for (const auto& id : visible) ordered.push_back(id);
+    for (const auto& id : hiddenTargets) ordered.push_back(id);
+
+    // Duplicate input identities (within or across lists) fail whole.
+    for (size_t i = 0; i < ordered.size(); ++i) {
+        for (size_t j = 0; j < i; ++j) {
+            if (ordered[i] == ordered[j]) {
+                return failSelected("duplicate selected identity " + formatIdentity(ordered[i]));
+            }
+        }
+    }
+
+    // Unique 1:1 match against the full population.
+    std::vector<int> popIdx;
+    popIdx.reserve(ordered.size());
+    for (const auto& id : ordered) {
+        int found = -1;
+        int matches = 0;
+        for (size_t p = 0; p < s_collisionPopulation.Instances.size(); ++p) {
+            if (id.Matches(s_collisionPopulation.Instances[p])) {
+                ++matches;
+                if (found < 0) found = static_cast<int>(p);
+            }
+        }
+        if (matches != 1 || found < 0) {
+            return failSelected(matches == 0 ? "unknown selected identity " + formatIdentity(id)
+                                             : "non-unique selected identity " + formatIdentity(id));
+        }
+        popIdx.push_back(found);
+    }
+    // Distinct population rows (input duplicates already rejected, but guard
+    // against aliased population rows).
+    for (size_t i = 0; i < popIdx.size(); ++i) {
+        for (size_t j = 0; j < i; ++j) {
+            if (popIdx[i] == popIdx[j]) {
+                return failSelected("duplicate selected identity " + formatIdentity(ordered[i]));
+            }
+        }
+    }
+
+    // Static validation: anim/Clump and missing IDE fail whole (no skip).
+    // TimeAtomic is admitted like Atomic; interior/LOD-prefix are NOT skipped.
+    for (size_t k = 0; k < ordered.size(); ++k) {
+        const auto& pl = s_collisionPopulation.Instances[static_cast<size_t>(popIdx[k])];
+        std::string key = pl.Model;
+        ToLowerInPlace(key);
+        if (s_animModels.find(key) != s_animModels.end()) {
+            return failSelected("anim selected identity " + formatIdentity(ordered[k]));
+        }
+        if (s_ide.find(key) == s_ide.end()) {
+            return failSelected("missing IDE for selected identity " + formatIdentity(ordered[k]));
+        }
+    }
+
+    // A04 supplement guard: when its child is selected, the pair stays
+    // all-or-neither without duplicate emission. The selected hidden list is
+    // already expected to carry the parent; never emit a second copy here.
+    if (s_supplement.has_value()) {
+        const auto& sup = *s_supplement;
+        bool childSelected = false;
+        for (const auto& id : ordered) {
+            if (id == sup.child) { childSelected = true; break; }
+        }
+        if (childSelected) {
+            bool parentSelected = false;
+            for (const auto& id : ordered) {
+                if (id == sup.parent) { parentSelected = true; break; }
+            }
+            if (!parentSelected) {
+                return failSelected("LOD supplement pair incomplete for selected child " +
+                    formatIdentity(sup.child) + " missing parent " + formatIdentity(sup.parent));
+            }
+        }
+    }
+
+    // Exact want sets from BOTH lists (visible + hidden drive caches/eviction).
+    std::map<std::string, int> wantModel;
+    std::map<std::string, int> wantTxd;
+    for (size_t k = 0; k < ordered.size(); ++k) {
+        const auto& pl = s_collisionPopulation.Instances[static_cast<size_t>(popIdx[k])];
+        std::string key = pl.Model;
+        ToLowerInPlace(key);
+        wantModel[key]++;
+        auto iit = s_ide.find(key);
+        if (iit == s_ide.end()) {
+            return failSelected("missing IDE for selected identity " + formatIdentity(ordered[k]));
+        }
+        if (!iit->second.txd.empty()) {
+            for (const auto& txd : BuildTxdNameChain(iit->second.txd).names) wantTxd[txd]++;
+        }
+    }
+
+    // Shared wanted-resource stages (same implementation as legacy stages 4-6).
+    // Selected mode is explicit fail-closed: any missing/failed/skinned/empty
+    // model or incomplete TXD lineage fails the whole candidate with identity.
+    // Failed selected output stays cleared with raw source geometry unchanged.
+    PagerPageInTxds(wantTxd);
+    {
+        std::map<std::string, std::string> identityForModel;
+        for (size_t k = 0; k < ordered.size(); ++k) {
+            const auto& pl = s_collisionPopulation.Instances[static_cast<size_t>(popIdx[k])];
+            std::string ck = pl.Model;
+            ToLowerInPlace(ck);
+            if (identityForModel.find(ck) == identityForModel.end()) {
+                identityForModel[ck] = formatIdentity(ordered[k]);
+            }
+        }
+        if (!PagerPageInModels(wantModel, true, &identityForModel, err, errSize)) {
+            scene.meshes.clear();
+            scene.images.clear();
+            if (rendered) rendered->clear();
+            frame = E2EPagerFrame{};
+            return false;
+        }
+    }
+    PagerEvictUnreferenced(wantModel, wantTxd);
+
+    // Supplement pair must still be fully loadable when its child is selected
+    // (all-or-neither); selected paging above already guarantees both sides or
+    // fails whole, so this is only a defensive no-half guard.
+    if (s_supplement.has_value()) {
+        const auto& sup = *s_supplement;
+        bool childSelected = false;
+        for (const auto& id : ordered) {
+            if (id == sup.child) { childSelected = true; break; }
+        }
+        if (childSelected) {
+            const auto childIt = s_cache.find(sup.childKey);
+            const auto parentIt = s_cache.find(sup.parentKey);
+            const bool childOk = childIt != s_cache.end() && childIt->second.tris > 0 &&
+                !childIt->second.pos.empty();
+            const bool parentOk = parentIt != s_cache.end() && parentIt->second.tris > 0 &&
+                !parentIt->second.pos.empty();
+            if (!childOk || !parentOk) {
+                return failSelected("LOD supplement pair not loadable for selected child " +
+                    formatIdentity(sup.child));
+            }
+        }
+    }
+
+    // Shared stage: build the world-space scene in exact visible-then-hidden
+    // order via EmitPlacedMesh (one-to-one with rendered).
+    bool haveBox = false;
+    int placed = 0;
+    int tris = 0;
+    std::set<std::string> usedModels;
+    std::map<std::string, int> globalImg;
+    std::map<NativeAssetIdentity::Texture, int> streamedGlobalImg;
+    scene.images.clear();
+    // ordered/popIdx are already visible-then-hidden; visible/hidden boundary
+    // is preserved for the one-to-one rendered contract.
+    for (size_t k = 0; k < ordered.size(); ++k) {
+        const auto& identity = ordered[k];
+        const auto& pl = s_collisionPopulation.Instances[static_cast<size_t>(popIdx[k])];
+        std::string key = pl.Model;
+        ToLowerInPlace(key);
+        auto cit = s_cache.find(key);
+        if (cit == s_cache.end()) {
+            return failSelected("selected model geometry missing " + formatIdentity(identity));
+        }
+        const CachedModel& cached = cit->second;
+        if (cached.tris <= 0 || cached.pos.empty()) {
+            return failSelected("empty DFF for selected identity " + formatIdentity(identity));
+        }
+        float q[4] = {pl.Quaternion[0], pl.Quaternion[1], pl.Quaternion[2], pl.Quaternion[3]};
+        // Streamed source stores the inverse rotation; conjugate once at binding
+        // (same convention as Init for includeStreamed).
+        q[0] = -q[0];
+        q[1] = -q[1];
+        q[2] = -q[2];
+        float right[3], fwd[3], up[3];
+        QuatToBasis(q, right, fwd, up);
+        const float worldPos[3] = {pl.Position[0], pl.Position[1], pl.Position[2]};
+        EmitPlacedMesh(cached, worldPos, right, fwd, up, pl.ModelId,
+                       static_cast<uint32_t>(static_cast<size_t>(popIdx[k]) + 1), identity, placed,
+                       scene, globalImg, streamedGlobalImg, haveBox, rendered);
+        usedModels.insert(key);
+        ++placed;
+        tris += cached.tris;
+    }
+    if (placed == 0) {
+        return failSelected("selected window has no loadable models (all failed)");
+    }
+    if (static_cast<int>(s_cache.size()) > s_modelsPeak) s_modelsPeak = static_cast<int>(s_cache.size());
+    if (tris > s_trisPeak) s_trisPeak = tris;
+    (void)std::snprintf(scene.stats.dffName, sizeof(scene.stats.dffName), "pager:%d", placed);
+    (void)std::snprintf(scene.stats.txdName, sizeof(scene.stats.txdName), "multi:%d", s_texResident);
+    scene.stats.atomics = placed;
+    scene.stats.triangles = tris;
+    scene.stats.vertices = tris * 3;
+    scene.stats.textures = 0;
+    scene.stats.firstTexture[0] = '\0';
+    scene.stats.firstTexW = 0;
+    scene.stats.firstTexH = 0;
+
+    frame.instances = placed;
+    frame.modelsUnique = static_cast<int>(usedModels.size());
+    frame.tris = tris;
+    frame.verts = tris * 3;
+    frame.activeCells = static_cast<int>(s_active.size());
+    frame.loadedCells = 0;
+    frame.evictedCells = 0;
+    frame.cacheModels = static_cast<int>(s_cache.size());
+    frame.texDicts = s_texResident;
+    frame.fallback = 0;
+    frame.evictedShown = 0;
     return true;
 }
