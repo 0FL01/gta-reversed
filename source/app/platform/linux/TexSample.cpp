@@ -7,6 +7,7 @@
 #include "app/platform/linux/TexSample.h"
 
 #include <cstdint>
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <cmath>
@@ -67,8 +68,25 @@ LinkedClump TexSample_LinkedParse(const uint8_t* bytes, std::size_t size,
     lc.scratch = rw::TexDictionary::create();
     rw::TexDictionary* prev = rw::TexDictionary::getCurrent();
     rw::TexDictionary::setCurrent(lc.scratch);
-    rw::Texture::setLoadTextures(false);
-    rw::Texture::setCreateDummies(true);
+    // Name-only parse references do not need a raster. librw's default dummy
+    // path allocates Raster(0,0) through the NULL driver, which returns nil and
+    // loses that allocation (48 leaked rasters per diagnostic car init).
+    // A scoped read callback preserves the same dictionary/refcount/name
+    // behavior without loading an image or creating a procedural texture.
+    const auto previousRead = rw::Texture::readCB;
+    rw::Texture::readCB = [](const char* name, const char* mask) -> rw::Texture* {
+        auto* texture = rw::Texture::create(nil);
+        if (!texture) return nil;
+        std::memset(texture->name, 0, sizeof(texture->name));
+        std::memcpy(texture->name, name, std::min(std::strlen(name), sizeof(texture->name)));
+        if (mask) {
+            std::memset(texture->mask, 0, sizeof(texture->mask));
+            std::memcpy(texture->mask, mask, std::min(std::strlen(mask), sizeof(texture->mask)));
+        }
+        return texture;
+    };
+    rw::Texture::setLoadTextures(true); // calls ONLY the name-only callback
+    rw::Texture::setCreateDummies(false);
     {
         rw::StreamMemory stream;
         stream.open(const_cast<uint8*>(bytes), static_cast<uint32>(size));
@@ -77,6 +95,8 @@ LinkedClump TexSample_LinkedParse(const uint8_t* bytes, std::size_t size,
         }
         stream.close();
     }
+    rw::Texture::readCB = previousRead;
+    rw::Texture::setLoadTextures(false);
     rw::Texture::setCreateDummies(false);
     rw::TexDictionary::setCurrent(prev);
     if (!lc.clump) {
