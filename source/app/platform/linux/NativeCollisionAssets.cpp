@@ -1,5 +1,4 @@
 #include "app/platform/linux/NativeCollisionAssets.h"
-#include "app/platform/linux/StreamPager.h"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -286,16 +285,6 @@ bool NativeCollisionAssets::Load(const char* gameDir, const NativeCollisionPopul
     Require(!next.m_Models.empty(),"no source COL assets");
     *this=std::move(next); error.clear(); return true;
 } catch (const std::exception& e) { error=e.what(); return false; }
-
-std::shared_ptr<const NativeCollisionContext> NativeCollisionContext::LoadBeforeWorker(
-    const char* gameDir, float radius, std::string& error) {
-    if (!std::isfinite(radius) || radius <= 0) { error="invalid source COL residency radius"; return {}; }
-    auto context=std::make_shared<NativeCollisionContext>();
-    context->Radius=radius;
-    if (!StreamPager_CollisionPopulation(context->Population,error) ||
-        !context->Assets.Load(gameDir,context->Population,error)) return {};
-    return context;
-}
 
 std::pair<NativeCollisionAssets::ModelMap::const_iterator, bool>
 NativeCollisionAssets::ResolveModel(const std::string& lowerKey) const {

@@ -2070,6 +2070,16 @@ bool StreamPager_CollisionPopulation(NativeCollisionPopulation& out, std::string
     error.clear(); return true;
 }
 
+std::shared_ptr<const NativeCollisionContext> NativeCollisionContext::LoadBeforeWorker(
+    const char* gameDir, float radius, std::string& error) {
+    if (!std::isfinite(radius) || radius <= 0) { error="invalid source COL residency radius"; return {}; }
+    auto context=std::make_shared<NativeCollisionContext>();
+    context->Radius=radius;
+    if (!StreamPager_CollisionPopulation(context->Population,error) ||
+        !context->Assets.Load(gameDir,context->Population,error)) return {};
+    return context;
+}
+
 bool StreamPager_ConfigureLodSupplement(const NativePlacementIdentity& child,
                                         const NativePlacementIdentity& parent, std::string& error) {
     if (!s_init) {
