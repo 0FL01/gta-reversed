@@ -38,11 +38,13 @@ struct NativeSourceAnimAssociation {
     // Source callback pointer becomes a caller-qualified opaque token. Zero is
     // the default/no-op callback. No actual pointer or callback escapes.
     std::uint64_t FinishToken = 0;
+    std::uint64_t DeleteToken = 0; // exclusive with FinishToken, source has one callback slot
     bool operator==(const NativeSourceAnimAssociation&) const = default;
 };
 struct NativeSourceAnimEvent {
     std::uint64_t FinishToken = 0;
     bool Removed = false;
+    std::uint64_t DeleteToken = 0;
     bool operator==(const NativeSourceAnimEvent&) const = default;
 };
 

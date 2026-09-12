@@ -1,5 +1,6 @@
 #pragma once
 #include "NativeSourcePedControl.h"
+#include "NativeSourceAnimClump.h"
 
 enum class NativeSourceJumpPhase { Idle, Launch, AwaitWorld, InAir, Land, HitHead, Climb, Finished, Aborted };
 enum class NativeSourceJumpStatus { Ok, PendingWorld, InvalidInput, Stale, Unsupported, WorldError };
@@ -63,10 +64,17 @@ struct NativeSourceJumpState {
 class NativeSourceJump {
 public:
     NativeSourceJump() = default;
+    // Shared-clump mode: the clump outlives this task and is updated once by its
+    // enclosing owner. Begin derives associations/duration from that clump;
+    // ObserveAnimation consumes each clump update before the next one. The
+    // default constructor retains the isolated primitive fixture API.
+    explicit NativeSourceJump(NativeSourceAnimClump& clump);
+    ~NativeSourceJump();
     NativeSourceJump(const NativeSourceJump&) = delete;
     NativeSourceJump& operator=(const NativeSourceJump&) = delete;
     NativeSourceJumpStatus Begin(const NativeSourceJumpStart& start);
     NativeSourceJumpStatus AdvanceAnimation(std::uint64_t generation, float seconds);
+    NativeSourceJumpStatus ObserveAnimation(std::uint64_t generation);
     NativeSourceJumpStatus ResolveWorld(std::uint64_t generation, const NativeSourceJumpWorld& world);
     NativeSourceJumpStatus BeginLanding(std::uint64_t generation, float duration, float moveRatio,
         bool padMoving, bool sprintHeld, bool sprintMoveState, float currentStatModifier);
@@ -80,4 +88,9 @@ public:
 private:
     NativeSourceJumpState m_State;
     NativeSourceJumpStart m_Start;
+    NativeSourceAnimClump* m_Clump = nullptr;
+    NativeSourceAnimHandle m_Association;
+    std::uint64_t m_CallbackToken = 0, m_LastClumpUpdate = 0;
+    NativeSourceJumpStatus AttachAnimation(NativeSourceJumpState& next, std::int32_t animation);
+    void DetachAnimation();
 };

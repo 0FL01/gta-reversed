@@ -815,6 +815,25 @@ bool IfpAnimPlayerBank::Load(const char* gameDir, const char* bank, char* err, s
 }
 
 namespace {
+const IfpAnimData* FindPlayerAnimation(const IfpAnimPlayerBank& bank, const char* name) {
+    if (name && *name) {
+        if (const auto* data = bank.Data()) for (const auto& animation : data->Anims)
+            if (ToLowerCopy(animation.name) == ToLowerCopy(name)) return &animation;
+    }
+    return nullptr;
+}
+}
+
+bool IfpAnimPlayerBank::Describe(const char* animation, IfpAnimClipInfo& out, char* err, std::size_t errSize) const {
+    const auto* found = FindPlayerAnimation(*this, animation);
+    if (!found) { SetErr(err, errSize, "player IFP clip absent from loaded bank"); return false; }
+    IfpAnimClipInfo next{found->name, found->total, found->seqs.size()};
+    out = std::move(next);
+    SetErr(err, errSize, "");
+    return true;
+}
+
+namespace {
 rw::Matrix PlayerMatrix(const NativePlayerMatrix& m) {
     rw::Matrix out{};
     out.right = {m.Right[0], m.Right[1], m.Right[2]};
@@ -888,8 +907,7 @@ bool IfpAnim_InitPlayer(const NativePlayerAssets& assets, const IfpAnimPlayerBan
     const auto* data=bank.Data();
     const IfpAnimData* anim=nullptr;
     if (animName && *animName) {
-        if (data) for (const auto& a:data->Anims)
-            if (ToLowerCopy(a.name)==ToLowerCopy(animName)) { anim=&a; break; }
+        anim = FindPlayerAnimation(bank, animName);
         if (!anim) { SetErr(err,errSize,"player IFP clip absent from loaded bank"); return false; }
     }
     IfpAnimStats st{};

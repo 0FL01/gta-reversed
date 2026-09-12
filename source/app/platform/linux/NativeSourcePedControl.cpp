@@ -9,7 +9,7 @@ constexpr float Pi = std::numbers::pi_v<float>;
 bool Valid(const NativeSourceAnimAssociation& s) {
     return s.Alive && std::isfinite(s.TotalTime) && s.TotalTime > 0 &&
         std::isfinite(s.CurrentTime) && std::isfinite(s.TimeStep) && std::isfinite(s.Speed) &&
-        std::isfinite(s.BlendAmount) && std::isfinite(s.BlendDelta);
+        std::isfinite(s.BlendAmount) && std::isfinite(s.BlendDelta) && !(s.FinishToken && s.DeleteToken);
 }
 float RadianAngle(float x, float y) {
     // CGeneral::GetRadianAngleBetweenPoints(0,0,x,y), NOT std::atan2(y,x).
@@ -108,7 +108,9 @@ NativePedControlStatus NativeSourceAnimUpdateBlend(NativeSourceAnimAssociation& 
         if (next.BlendAutoRemove) {
             observed.FinishToken = next.FinishToken;
             observed.Removed = true;
+            observed.DeleteToken = next.DeleteToken;
             next.FinishToken = 0;
+            next.DeleteToken = 0;
             next.Alive = false;
         }
     }

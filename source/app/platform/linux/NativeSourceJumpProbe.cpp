@@ -113,8 +113,64 @@ void Decisions() {
     Check(changing.BeginLanding(changing.State().Generation, 1, 2, true, true, true, 0.75f) == Ok &&
         changing.State().Animation.Speed == 1.5f, "landing reads current stat modifier, not launch snapshot");
 }
+std::vector<NativeSourceAnimClip> SharedClips() {
+    std::vector<NativeSourceAnimClip> clips;
+    for (const int id : {0, 1, 2, 38, 116, 117, 119, 122}) {
+        NativeSourceAnimClip clip;
+        clip.Key = {0, id}; clip.Duration = id < 3 ? 1.0f : 0.5f; clip.Sequences = 1;
+        clip.Synchronised = clip.Looped = id < 3;
+        clip.Partial = clip.FinishAutoRemove = id >= 3;
+        clips.push_back(clip);
+    }
+    return clips;
+}
+void SharedOwnership() {
+    NativeSourceAnimClump clump;
+    Check(clump.LoadClips(SharedClips()) == NativeSourceClumpStatus::Ok, "load shared synthetic associations");
+    NativeSourceAnimHandle walk;
+    Check(clump.Add({0, 0}, walk) == NativeSourceClumpStatus::Ok && clump.SetSpeed(walk, 0.5f) == NativeSourceClumpStatus::Ok, "clump owns movement association with independent cycle");
+    std::vector<NativeSourceClumpEvent> events;
+    NativeSourceAnimHandle launch;
+    {
+        NativeSourceJump jump(clump);
+        Check(jump.Begin({}) == Ok && jump.State().Animation.TotalTime == 0.5f, "shared begin reads authored clip, no duration argument");
+        const auto generation = jump.State().Generation;
+        launch = clump.Find(116)->Handle;
+        Check(jump.AdvanceAnimation(generation, 0.5f) == NativeSourceJumpStatus::InvalidInput && clump.Get(launch)->State.CurrentTime == 0, "task cannot advance the shared clump a second time");
+        Check(clump.Update(0.5f, events) == NativeSourceClumpStatus::Ok && jump.ObserveAnimation(generation) == Ok && jump.State().LaunchFinished, "clump event drives task finish");
+        Check(clump.Get(launch) && clump.Get(launch)->State.Alive && clump.Get(launch)->State.BlendDelta == -4, "task callback leaves live fading association");
+        const auto held = jump.State();
+        Check(jump.ObserveAnimation(generation) == Ok && jump.State() == held, "repeat observation idempotent");
+        NativeSourceJumpWorld world; world.Status = NativeSourceJumpWorldStatus::Ready;
+        Check(jump.ResolveWorld(generation, world) == Ok, "shared launch world predicate");
+        Check(jump.BeginLanding(generation, 0, 2, true, false, false, 1) == Ok, "land reads shared authored duration");
+        Check(clump.Update(0.1f, events) == NativeSourceClumpStatus::Ok && jump.ObserveAnimation(generation) == Ok && jump.State().RightFoot, "shared right foot");
+        Check(clump.Update(0.1f, events) == NativeSourceClumpStatus::Ok && jump.ObserveAnimation(generation) == Ok && jump.State().LeftFoot, "shared left foot");
+        Check(clump.Update(0.3f, events) == NativeSourceClumpStatus::Ok && jump.ObserveAnimation(generation) == Ok && jump.State().LandFinished, "shared land callback");
+        Check(clump.Find(119)->State.BlendDelta == -100, "land callback mutates actual owner fade");
+        Check(clump.Get(walk)->State.CurrentTime > 0, "walk clock continued independently");
+        Check(jump.CompleteLanding(generation) == Ok && clump.Get(walk)->State.CurrentTime == 0, "source ProcessPed resets actual movement time");
+    }
+    Check(clump.Find(119) && clump.Get(walk), "task destructor does not own clump associations");
+    Check(clump.Update(0.25f, events) == NativeSourceClumpStatus::Ok && !clump.Find(119), "clump later retires land animation");
+    {
+        NativeSourceJump jump(clump);
+        Check(jump.Begin({}) == Ok, "second shared task");
+        const int id = jump.State().RightLaunch ? 117 : 116;
+        launch = clump.Find(id)->Handle;
+        bool accepted = true;
+        Check(jump.Abort(jump.State().Generation, Priority::Leisure, Event::None, false, accepted) == Ok && !accepted &&
+            clump.Get(launch)->State.BlendDelta == -4, "denied abort fades actual clump association");
+    }
+    Check(clump.Get(launch) && !clump.Get(launch)->State.FinishToken, "task destruction detaches callback only");
+    Check(clump.Update(0.25f, events) == NativeSourceClumpStatus::Ok && events.size() == 1 && !events[0].Event.FinishToken, "late fade has no dangling task callback");
+    NativeSourceJump missed(clump);
+    Check(missed.Begin({}) == Ok, "missed-update fixture");
+    Check(clump.Update(0.1f, events) == NativeSourceClumpStatus::Ok && clump.Update(0.1f, events) == NativeSourceClumpStatus::Ok &&
+        missed.ObserveAnimation(missed.State().Generation) == NativeSourceJumpStatus::Stale, "skipped callback delivery cannot silently advance task");
+}
 }
 int main() {
-    Flow(); Aborts(); Decisions();
+    Flow(); Aborts(); Decisions(); SharedOwnership();
     std::printf("source-jump-ok checks=%zu source-task-flow synthetic-world-predicates no-physics-host\n", s_Checks);
 }

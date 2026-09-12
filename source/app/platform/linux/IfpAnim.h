@@ -128,11 +128,20 @@ struct IfpAnimSeqFrame {
 };
 // Owned decoded bank: load once on the startup thread, then sample without IO,
 // librw engine state, model lookup, or fallback. Separate from legacy ped APIs.
+struct IfpAnimClipInfo {
+    std::string Name;
+    double Duration = 0;
+    std::size_t Sequences = 0;
+    bool operator==(const IfpAnimClipInfo&) const = default;
+};
 class IfpAnimPlayerBank {
 public:
     IfpAnimPlayerBank();
     ~IfpAnimPlayerBank();
     bool Load(const char* gameDir, const char* bank, char* err, std::size_t errSize);
+    // Same loaded-bank lookup as player posing, without loading/posing a model.
+    // Missing/unloaded clips preserve out; success reports reader metadata only.
+    bool Describe(const char* animation, IfpAnimClipInfo& out, char* err, std::size_t errSize) const;
     struct Impl;
     const Impl* Data() const { return m_Impl.get(); }
 private:
