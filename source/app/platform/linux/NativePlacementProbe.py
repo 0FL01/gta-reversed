@@ -24,7 +24,8 @@ def build():
             flags.append(template[i]); i += 1
     line = next(c for c in commands if ' -o mad-sa-linux ' in c)
     link = shlex.split(next(p for p in line.split('&&') if ' -o mad-sa-linux ' in p))
-    units = ['StreamPager', 'NativeCollisionAssets', 'NativeGarages', 'NativeScriptSession', 'NativeScriptEntities',
+    units = ['StreamPager', 'NativeCollisionAssets', 'NativeGarages', 'NativeScriptSchema',
+              'NativeScriptCorpus', 'NativeScriptSession', 'NativeScriptEntities',
              'RealtimeGameplay', 'RealtimeScriptHost', 'NativePlacementProbe']
     excluded = units + ['MainLinux', 'Realtime']
     link = [a for a in link if not any(a.endswith('/'+n+'.cpp.o') for n in excluded)]

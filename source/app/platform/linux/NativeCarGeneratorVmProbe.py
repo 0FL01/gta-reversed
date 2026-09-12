@@ -60,7 +60,9 @@ sanitize = ['-fsanitize=address,undefined', '-fno-sanitize-recover=all', '-fno-o
 objects = []
 log_path = output / 'NativeCarGeneratorVmProbe-build.log'
 with log_path.open('w') as log:
-    for relative in ('app/platform/linux/NativeScriptSession.cpp',
+    for relative in ('app/platform/linux/NativeScriptSchema.cpp',
+                     'app/platform/linux/NativeScriptCorpus.cpp',
+                     'app/platform/linux/NativeScriptSession.cpp',
                      'app/platform/linux/NativeCarGeneratorVmProbe.cpp', 'oswrapper/oswrapper_linux.cpp'):
         obj = output / ('CarGeneratorVm-' + pathlib.Path(relative).stem + '.o')
         result = subprocess.run(flags + ['-O1', '-g', '-Wall', '-Wextra', '-Werror'] + sanitize +

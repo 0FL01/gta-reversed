@@ -45,70 +45,7 @@ uint32 Word(std::span<const uint8> bytes, std::size_t pos, unsigned count = 4) {
     return value;
 }
 
-enum class Operand { Integer, Float, String, Output, FloatOutput, InOutInteger, InOutFloat };
-struct Signature {
-    uint16 Opcode;
-    std::array<Operand, 13> Types{};
-    unsigned Count = 0;
-};
-using O = Operand;
-// SA default schema 1.65, sannybuilder/library commit
-// 53ed1c2561bf6ca70dc16afca5d8f3a406066158, sa/sa.json.
-// Fixed typed contracts, NOT keyword dispatch or arity inference. Behavioral
-// references: game_sa/Scripts/{RunningScript,TheScripts,Commands/*}.cpp.
-constexpr Signature Signatures[] = {
-    {0x0000, {}, 0},
-    {0x0001, {O::Integer}, 1}, {0x0002, {O::Integer}, 1},
-    {0x0004, {O::Output, O::Integer}, 2}, {0x0005, {O::FloatOutput, O::Float}, 2},
-    {0x0006, {O::Output, O::Integer}, 2}, {0x0007, {O::FloatOutput, O::Float}, 2},
-    {0x0086, {O::FloatOutput, O::Float}, 2},
-    // BasicCommands.cpp::{Add,Sub,Mult,Div}InPlace<T>. The opcode selects
-    // global/local destination and int/float; addresses remain byte/cell based.
-    {0x0008, {O::InOutInteger, O::Integer}, 2}, {0x0009, {O::InOutFloat, O::Float}, 2},
-    {0x000A, {O::InOutInteger, O::Integer}, 2}, {0x000B, {O::InOutFloat, O::Float}, 2},
-    {0x000C, {O::InOutInteger, O::Integer}, 2}, {0x000D, {O::InOutFloat, O::Float}, 2},
-    {0x000E, {O::InOutInteger, O::Integer}, 2}, {0x000F, {O::InOutFloat, O::Float}, 2},
-    {0x0010, {O::InOutInteger, O::Integer}, 2}, {0x0011, {O::InOutFloat, O::Float}, 2},
-    {0x0012, {O::InOutInteger, O::Integer}, 2}, {0x0013, {O::InOutFloat, O::Float}, 2},
-    {0x0014, {O::InOutInteger, O::Integer}, 2}, {0x0015, {O::InOutFloat, O::Float}, 2},
-    {0x0016, {O::InOutInteger, O::Integer}, 2}, {0x0017, {O::InOutFloat, O::Float}, 2},
-    {0x001A, {O::Integer, O::Integer}, 2},
-    {0x004D, {O::Integer}, 1}, {0x004E, {}, 0}, {0x00D6, {O::Integer}, 1},
-    {0x03A4, {O::String}, 1}, {0x016A, {O::Integer, O::Integer}, 2},
-    {0x042C, {O::Integer}, 1}, {0x030D, {O::Integer}, 1},
-    {0x0997, {O::Integer}, 1}, {0x01F0, {O::Integer}, 1},
-    {0x0111, {O::Integer}, 1}, {0x00C0, {O::Integer, O::Integer}, 2},
-    {0x04E4, {O::Float, O::Float}, 2},
-    {0x03CB, {O::Float, O::Float, O::Float}, 3},
-    {0x062A, {O::Integer, O::Float}, 2},
-    {0x0629, {O::Integer, O::Integer}, 2},
-    {0x0053, {O::Integer, O::Float, O::Float, O::Float, O::Output}, 5},
-    {0x06CF, {O::Integer}, 1},
-    {0x0746, {O::Integer, O::Integer, O::Integer}, 3},
-    {0x07AF, {O::Integer, O::Output}, 2}, {0x01F5, {O::Integer, O::Output}, 2},
-    {0x0373, {}, 0}, {0x0173, {O::Integer, O::Float}, 2},
-    {0x0417, {O::Integer}, 1},
-    {0x06C8, {O::Integer}, 1},
-    {0x0517, {O::Float, O::Float, O::Float, O::String, O::Output}, 5},
-    {0x0518, {O::Float, O::Float, O::Float, O::Integer, O::String, O::Output}, 6},
-    {0x0570, {O::Float, O::Float, O::Float, O::Integer, O::Output}, 5},
-    {0x04CE, {O::Float, O::Float, O::Float, O::Integer, O::Output}, 5},
-    {0x018B, {O::Integer, O::Integer}, 2},
-    {0x09B4, {O::Float, O::Float, O::Float, O::Integer, O::Integer}, 5},
-    {0x02B9, {O::String}, 1},
-    {0x016C, {O::Float, O::Float, O::Float, O::Float, O::Integer}, 5},
-    {0x016D, {O::Float, O::Float, O::Float, O::Float, O::Integer}, 5},
-    {0x0213, {O::Integer, O::Integer, O::Float, O::Float, O::Float, O::Output}, 6},
-    {0x0214, {O::Integer}, 1}, {0x0215, {O::Integer}, 1},
-    {0x014B, {O::Float, O::Float, O::Float, O::Float, O::Integer, O::Integer, O::Integer,
-              O::Integer, O::Integer, O::Integer, O::Integer, O::Integer, O::Output}, 13},
-    {0x014C, {O::Integer, O::Integer}, 2},
-};
-
-const Signature* FindSignature(uint16 opcode) {
-    for (const auto& signature : Signatures) if (signature.Opcode == opcode) return &signature;
-    return nullptr;
-}
+using O = NativeScriptOperandType;
 
 bool ValidStat(int32 id) { return (id >= 0 && id < 82) || (id >= 120 && id < 343); }
 bool FitsInt(float value) {
@@ -266,6 +203,48 @@ bool NativeScriptSession::ReadGlobal(uint16 offset, int32& value) const {
     return true;
 }
 
+bool NativeScriptSession::InspectInstruction(std::size_t threadIndex, NativeScriptInstructionForm& out, std::string& error) const {
+    if (!m_Loaded || m_InService || threadIndex >= m_Threads.size()) {
+        error = "invalid script inspection";
+        return false;
+    }
+    Instruction instruction;
+    if (!Decode(threadIndex, m_Threads[threadIndex].IP, instruction, error)) return false;
+    const auto* schema = NativeScriptLookupSchema(instruction.Opcode);
+    if (!schema) {
+        error = "unclassified instruction schema";
+        return false;
+    }
+    const auto& thread = m_Threads[threadIndex];
+    NativeScriptInstructionForm candidate;
+    candidate.Session = m_SessionId;
+    candidate.Sequence = m_CommandSequence + 1;
+    candidate.ThreadGeneration = thread.Generation;
+    candidate.ThreadIndex = std::uint32_t(threadIndex);
+    candidate.IP = thread.IP;
+    candidate.NextIP = instruction.Next;
+    candidate.BaseIP = thread.BaseIP;
+    candidate.LocalCount = std::uint32_t(thread.Locals.size());
+    candidate.MissionIndex = thread.MissionIndex;
+    candidate.Opcode = instruction.Opcode;
+    candidate.RawOpcode = std::uint16_t(instruction.Opcode | (instruction.Negated ? 0x8000 : 0));
+    candidate.OperandTypes = schema->Operands;
+    candidate.OperandTags = instruction.RawTags;
+    candidate.ArrayCounts = instruction.ArrayCounts;
+    candidate.ArrayFlags = instruction.ArrayFlags;
+    candidate.OperandCount = schema->OperandCount;
+    candidate.Semantics = schema->Semantics;
+    candidate.Negated = instruction.Negated;
+    candidate.UsesMissionCleanup = thread.UsesMissionCleanup;
+    candidate.ExclusiveMission = thread.ThisMustBeTheOnlyMissionRunning;
+    candidate.External = thread.IsExternal;
+    candidate.ThreadForm = thread.IsExternal ? NativeScriptThreadForm::Streamed :
+        thread.ThisMustBeTheOnlyMissionRunning ? NativeScriptThreadForm::Mission : NativeScriptThreadForm::Main;
+    out = candidate;
+    error.clear();
+    return true;
+}
+
 bool NativeScriptSession::Decode(std::size_t thread, uint32 ip, Instruction& d, std::string& error) const {
     const auto& state = m_Threads[thread];
     const uint32 base = ip >= MainCapacity ? MainCapacity : 0;
@@ -276,12 +255,13 @@ bool NativeScriptSession::Decode(std::size_t thread, uint32 ip, Instruction& d, 
     d.Opcode = uint16(opcode);
     d.Negated = (opcode & 0x8000) != 0;
     if (d.Negated && ((opcode & 0x7FFF) == 0x001A || (opcode & 0x7FFF) == 0x0214)) d.Opcode &= 0x7FFF;
-    const auto* signature = FindSignature(d.Opcode);
+    const auto* signature = NativeScriptLookupSchema(d.Opcode);
     if (!signature) { error = "unsupported opcode (including NOT forms)"; return false; }
-    for (unsigned i = 0; i < signature->Count; ++i) {
+    for (unsigned i = 0; i < signature->OperandCount; ++i) {
         uint32 tag = 0, bits = 0;
         if (!reader.Read(1, tag)) { error = "truncated operand tag"; return false; }
-        const auto type = signature->Types[i];
+        d.RawTags[i] = uint8(tag);
+        const auto type = signature->Operands[i];
         const bool output = type == O::Output || type == O::FloatOutput || type == O::InOutInteger || type == O::InOutFloat;
         const bool floating = type == O::Float || type == O::FloatOutput || type == O::InOutFloat;
         if (type == O::String) {
@@ -305,6 +285,8 @@ bool NativeScriptSession::Decode(std::size_t thread, uint32 ip, Instruction& d, 
                     error = "truncated array operand"; return false;
                 }
                 const bool global = tag == 7, globalIndex = (flags & 0x80) != 0;
+                d.ArrayCounts[i] = uint8(count);
+                d.ArrayFlags[i] = uint8(flags);
                 if ((flags & 0x7F) != (floating ? 1u : 0u) || !count) {
                     error = "invalid numeric array type/count"; return false;
                 }
@@ -405,10 +387,13 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
     if (m_PendingInstruction) {
         d = *m_PendingInstruction; // timer-backed operands must not change on poll
     } else if (!Decode(thread, state.IP, d, error)) {
-        return Fail(thread, FindSignature(d.Opcode) ? NativeScriptStatus::Error : NativeScriptStatus::Unsupported, uint16(d.Opcode | (d.Negated ? 0x8000 : 0)), error);
+        return Fail(thread, NativeScriptLookupSchema(d.Opcode) ? NativeScriptStatus::Error : NativeScriptStatus::Unsupported, uint16(d.Opcode | (d.Negated ? 0x8000 : 0)), error);
     }
     const int32 a = d.Int(0), b = d.Int(1);
     const auto rawOpcode = uint16(d.Opcode | (d.Negated ? 0x8000 : 0));
+    const auto* schema = NativeScriptLookupSchema(d.Opcode);
+    if (!schema || schema->Semantics != NativeScriptSemanticCoverage::Implemented)
+        return Fail(thread, NativeScriptStatus::Unsupported, rawOpcode, "opcode form classified; semantics unsupported");
     auto invalid = [&](const char* message) { return Fail(thread, NativeScriptStatus::Error, rawOpcode, message); };
     std::vector<uint8> mission;
     std::optional<NativeScriptThreadState> newThread;

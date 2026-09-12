@@ -4,6 +4,8 @@
 // No result means "game booted"; hosts choose an explicit observation boundary.
 #pragma once
 
+#include "app/platform/linux/NativeScriptCorpus.h"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -324,6 +326,10 @@ public:
     const NativeScriptState& State() const { return m_State; } // main thread + shared VM state
     const NativeScriptMetadata& Metadata() const { return m_Metadata; }
     bool ReadGlobal(std::uint16_t byteOffset, std::int32_t& value) const;
+    // Read-only schema inspection of the current instruction in one owned
+    // thread. Known-but-unimplemented forms are returned as Unsupported
+    // coverage; this does not advance, execute, or turn them into NOPs.
+    bool InspectInstruction(std::size_t threadIndex, NativeScriptInstructionForm& out, std::string& error) const;
     bool Loaded() const { return m_Loaded; }
     std::uint64_t SessionId() const noexcept { return m_SessionId; }
     bool PassOutstanding() const noexcept { return m_Pending || !m_Pass.empty(); }
@@ -332,10 +338,12 @@ private:
     struct Instruction {
         std::uint16_t Opcode = 0;
         std::uint32_t Next = 0;
-        std::array<std::uint32_t, 13> Values{};
+        std::array<std::uint32_t, 16> Values{};
         std::uint32_t OutputValue = 0; // decoded old cell for checked in-place arithmetic
         std::array<char, 8> Text{};
-        std::array<std::uint8_t, 13> Tags{}; // normalized scalar/array operand bank
+        std::array<std::uint8_t, 16> Tags{}; // normalized scalar/array operand bank
+        std::array<std::uint8_t, 16> RawTags{}; // exact source operand form
+        std::array<std::uint8_t, 16> ArrayCounts{}, ArrayFlags{};
         bool OutputGlobal = true;
         bool Negated = false;
         std::int32_t Int(unsigned i) const;

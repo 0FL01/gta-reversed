@@ -31,12 +31,14 @@ def build():
     link = shlex.split(next(part for part in line.split('&&') if ' -o mad-sa-linux ' in part))
     product_objects = [arg for arg in link if arg.endswith('.cpp.o')]
     subprocess.run(['ninja', '-C', str(BUILD), *product_objects], check=True)
-    replaced = ('MainLinux', 'Realtime', 'NativeScriptSession', 'RealtimeScriptHost', NAME)
+    replaced = ('MainLinux', 'Realtime', 'NativeScriptSchema', 'NativeScriptCorpus',
+                'NativeScriptSession', 'RealtimeScriptHost', NAME)
     link = [arg for arg in link if not any(arg.endswith('/' + unit + '.cpp.o') for unit in replaced)]
     link[link.index('-o') + 1] = str(OUTPUT / NAME)
     OUTPUT.mkdir(parents=True, exist_ok=True)
     with (OUTPUT / (NAME + '-build.log')).open('w') as log:
-        for unit in ('NativeScriptSession', 'RealtimeScriptHost', NAME):
+        for unit in ('NativeScriptSchema', 'NativeScriptCorpus', 'NativeScriptSession',
+                     'RealtimeScriptHost', NAME):
             obj = OUTPUT / ('pickup-script-' + unit + '.o')
             command = flags + ['-UNDEBUG', '-Wall', '-Wextra', '-Werror', '-ffunction-sections',
                 '-fdata-sections', '-c', str(SOURCE / (unit + '.cpp')), '-o', str(obj)]

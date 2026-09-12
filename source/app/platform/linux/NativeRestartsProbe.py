@@ -28,7 +28,8 @@ def build():
             flags.append(template[index]); index += 1
     units = ['StreamPager', 'NativeCollisionAssets', 'RealtimeGameplay', 'NativePlayerAssets', 'TexSample',
              'Handling', 'Collide', 'IfpAnim', 'CarPose', 'GxtText', 'MenuShot', 'NativePlayerActivity',
-             'NativeGarages', 'NativeVehiclePool', 'NativeScriptSession', 'NativeScriptEntities', 'NativeEntryExits',
+              'NativeGarages', 'NativeVehiclePool', 'NativeScriptSchema', 'NativeScriptCorpus',
+              'NativeScriptSession', 'NativeScriptEntities', 'NativeEntryExits',
              'RealtimeScriptHost', 'NativeCarGenerators', 'NativeCarGeneratorResidency', 'NativeSourceRng',
              'RealtimeHud', 'RadarMap', 'NativeRestarts', NAME]
     OUTPUT.mkdir(parents=True, exist_ok=True)

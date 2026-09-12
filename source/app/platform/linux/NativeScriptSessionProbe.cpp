@@ -1269,6 +1269,60 @@ void PickupOperationsAndFloatCopy() {
     Bytes complete; Op(complete, 0x0086); Var(complete, 8); Var(complete, 12);
     for (std::size_t n = 2; n < complete.size(); ++n) RejectCode(Bytes(complete.begin(), complete.begin() + n));
 }
+void SchemaAndCorpus() {
+    Check(NativeScriptSchemaRevision() == "53ed1c2561bf6ca70dc16afca5d8f3a406066158" &&
+        NativeScriptSchemaSha256() == "797f32be6d3ebae87fd65b57ccc0c0b1cbc2e129c089668761e366740b5bd671" &&
+        NativeScriptSchemaVersion() == "1.65", "pinned schema identity");
+    const auto* stunt = NativeScriptLookupSchema(0x0814);
+    Check(stunt && stunt->OperandCount == 16 &&
+        std::all_of(stunt->Operands.begin(), stunt->Operands.begin() + 15,
+            [](auto type) { return type == NativeScriptOperandType::Float; }) &&
+        stunt->Operands[15] == NativeScriptOperandType::Integer &&
+        stunt->Semantics == NativeScriptSemanticCoverage::Unsupported,
+        "0814 complete known form remains semantic Unsupported");
+    Check(!NativeScriptLookupSchema(0x0FFF), "unknown opcode has no schema substitution");
+
+    Bytes code; Op(code, 0x0814);
+    for (int i = 0; i < 15; ++i) F(code, float(i));
+    I16(code, 500);
+    NativeScriptSession session; MockServices services; LoadFixture(session, services, code);
+    NativeScriptInstructionForm form; std::string error;
+    Check(session.InspectInstruction(0, form, error) && form.IP == FixtureCode &&
+        form.NextIP == FixtureCode + code.size() && form.Opcode == 0x0814 &&
+        form.OperandCount == 16 && form.OperandTags[15] == 5 &&
+        form.Semantics == NativeScriptSemanticCoverage::Unsupported &&
+        form.ThreadForm == NativeScriptThreadForm::Main, "read-only inspection returns exact fixture form");
+    const auto state = session.State();
+    const auto threads = std::vector<NativeScriptThreadState>(session.Threads().begin(), session.Threads().end());
+    const auto result = session.Step(services);
+    Check(result.Status == Status::Unsupported && result.Opcode == 0x0814 && result.IP == FixtureCode &&
+        !result.Executed && session.State() == state &&
+        std::vector<NativeScriptThreadState>(session.Threads().begin(), session.Threads().end()) == threads,
+        "known schema never executes through default NOP");
+
+    NativeScriptCorpusManifest corpus; const auto before = corpus;
+    Check(corpus.Observe(form, error) && corpus.Observe(form, error), "same corpus site visit is idempotent form aggregation");
+    auto summary = corpus.Summary();
+    Check(summary.Encounters == 2 && summary.Sites == 1 && summary.Threads == 1 && summary.Opcodes == 1 &&
+        summary.OperandForms == 1 && summary.MainSites == 1 && summary.UnsupportedSites == 1,
+        "corpus summary distinguishes sites, encounters and unsupported semantics");
+    const auto fingerprint = corpus.Fingerprint();
+    auto changed = form; changed.OperandTags[15] = 4;
+    const auto retained = corpus;
+    Check(!corpus.Observe(changed, error) && corpus.Sites() == retained.Sites() &&
+        corpus.Threads() == retained.Threads() && corpus.Fingerprint() == fingerprint,
+        "changed site form rejects atomically");
+    auto badArray = form; badArray.ArrayCounts[0] = 2;
+    Check(!corpus.Observe(badArray, error) && corpus.Fingerprint() == fingerprint,
+        "scalar operand cannot claim array metadata");
+    auto unknown = form; unknown.Opcode = unknown.RawOpcode = 0x0FFF;
+    Check(!corpus.Observe(unknown, error) && corpus.Fingerprint() == fingerprint,
+        "unknown opcode cannot enter corpus as inferred form");
+    auto foreign = form; foreign.Session++;
+    Check(!corpus.Observe(foreign, error) && corpus.Fingerprint() == fingerprint,
+        "mixed session corpus rejects atomically");
+    Check(before.Sites().empty() && before.Threads().empty(), "manifest snapshots are independent values");
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1286,5 +1340,6 @@ int main(int argc, char** argv) {
     RestartBarriers();
     PickupBarriers();
     PickupOperationsAndFloatCopy();
+    SchemaAndCorpus();
     std::printf("native-script-probe PASS checks=%zu services=TEST-ONLY no-worldboot-claim\n", s_Checks);
 }

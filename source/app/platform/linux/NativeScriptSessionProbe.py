@@ -92,7 +92,9 @@ while i < len(template):
 objects = []
 log_path = output / 'NativeScriptSessionProbe-build.log'
 with log_path.open('w') as log:
-    for relative in ('app/platform/linux/NativeScriptSession.cpp',
+    for relative in ('app/platform/linux/NativeScriptSchema.cpp',
+                     'app/platform/linux/NativeScriptCorpus.cpp',
+                     'app/platform/linux/NativeScriptSession.cpp',
                      'app/platform/linux/NativeScriptSessionProbe.cpp',
                      'oswrapper/oswrapper_linux.cpp'):
         obj = output / ('NativeScript-' + pathlib.Path(relative).stem + '.o')

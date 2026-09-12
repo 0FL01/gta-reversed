@@ -128,6 +128,14 @@ int main(int argc, char** argv) try {
 
     RealtimeGameplay gameplay;
     RealtimeScriptHost host(gameplay);
+    NativeScriptCorpusManifest corpus;
+    const auto observe = [&](std::size_t index) {
+        const auto threads = host.Session().Threads();
+        Require(index < threads.size() && threads[index].Active, "expected active corpus thread");
+        NativeScriptInstructionForm form;
+        Require(host.Session().InspectInstruction(index, form, error), error);
+        Require(corpus.Observe(form, error), error);
+    };
     Require(host.InitializeBeforeWorker(gameDir, error), error);
     EglContext egl;
     RealtimeHud hud;
@@ -138,23 +146,54 @@ int main(int argc, char** argv) try {
     Require(hud.IsRadarSpriteUploaded(33), "actual GL HUD sprite33 upload is ready");
     host.SetRadarSpriteReady([&](std::int32_t sprite) { return hud.IsRadarSpriteUploaded(sprite); });
 
-    const auto first = host.RunPass(256);
-    Require(first.Status == NativeScriptStatus::Waiting && first.Executed == 53 && host.State().IP == 56369,
+    NativeScriptResult first;
+    std::size_t mainCommands = 0;
+    for (unsigned guard = 0; guard < 100; ++guard) {
+        observe(0);
+        first = host.RunPass(1);
+        mainCommands += first.Executed;
+        if (first.Status != NativeScriptStatus::BudgetYield) break;
+    }
+    Require(first.Status == NativeScriptStatus::Waiting && mainCommands == 53 && host.State().IP == 56369,
         first.Message);
     Require(host.PrepareInitialGarageWorldBeforeWorker(error), error);
     Require(host.AdvanceTime(0, error), error);
     host.SealStartup();
-    const auto terminal = host.RunPass(10000);
+    NativeScriptResult terminal;
+    for (unsigned guard = 0; guard < 20000; ++guard) {
+        observe(1);
+        terminal = host.RunPass(1);
+        if (terminal.Status != NativeScriptStatus::BudgetYield) break;
+    }
     const auto& mission = host.Session().Threads()[1];
     std::printf("pickup-script actual-bound status=%d executed=%zu commands=%llu ip=%u opcode=%04X last=%04X@%u "
         "hud33=%d cpuImage=%s fullboot=0\n", int(terminal.Status), terminal.Executed,
         static_cast<unsigned long long>(mission.Commands), terminal.IP, terminal.Opcode,
         mission.LastOpcode, mission.LastInstructionIP, hud.IsRadarSpriteUploaded(33),
         hud.PreparedRadarSprite(33)->name);
-    Check(terminal.Status == NativeScriptStatus::Unsupported && terminal.Executed == 1234 &&
+    Check(terminal.Status == NativeScriptStatus::Unsupported && terminal.Executed == 0 &&
         mission.Commands == 1234 && terminal.IP == 212669 && terminal.Opcode == 0x0814 &&
         mission.LastInstructionIP == 212645 && mission.LastOpcode == 0x016D && host.WorldRevision() == 3,
         "actual HUD-ready mission reaches 1234 commands and strict 0814@212669 without a full-boot claim");
+    const auto summary = corpus.Summary();
+    Check(summary.Encounters == 1288 && summary.Sites == 1288 && summary.Threads == 2 &&
+        summary.Opcodes == 43 && summary.OperandForms == 48 && summary.MainSites == 53 &&
+        summary.MissionSites == 1235 && summary.StreamedSites == 0 &&
+        summary.ImplementedSites == 1287 && summary.UnsupportedSites == 1 &&
+        corpus.Fingerprint() == 0xBC61CAB8953E4545ULL,
+        "actual startup corpus classifies every encountered main/mission site including strict frontier");
+    const auto& frontier = corpus.Sites().back().Form;
+    Check(frontier.IP == 212669 && frontier.NextIP == 212749 && frontier.Opcode == 0x0814 &&
+        frontier.OperandCount == 16 && frontier.Semantics == NativeScriptSemanticCoverage::Unsupported &&
+        frontier.ThreadForm == NativeScriptThreadForm::Mission &&
+        std::all_of(frontier.OperandTags.begin(), frontier.OperandTags.begin() + 15, [](auto tag) { return tag == 6; }) &&
+        frontier.OperandTags[15] == 5, "0814 complete float15+int16 operand form remains semantic Unsupported");
+    std::printf("script-corpus schema=%s sha256=%s version=%s encounters=%llu sites=%zu threads=%zu opcodes=%zu forms=%zu main=%zu mission=%zu streamed=%zu implemented=%zu unsupported=%zu frontier=%04X@%u next=%u fingerprint=%016llX nop-substitution=0\n",
+        NativeScriptSchemaRevision().data(), NativeScriptSchemaSha256().data(), NativeScriptSchemaVersion().data(),
+        static_cast<unsigned long long>(summary.Encounters), summary.Sites, summary.Threads, summary.Opcodes,
+        summary.OperandForms, summary.MainSites, summary.MissionSites, summary.StreamedSites,
+        summary.ImplementedSites, summary.UnsupportedSites, frontier.Opcode, frontier.IP, frontier.NextIP,
+        static_cast<unsigned long long>(corpus.Fingerprint()));
 
     auto& entities = host.Entities();
     const auto player = gameplay.State().PedRoot;

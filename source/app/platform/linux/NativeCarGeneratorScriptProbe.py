@@ -28,8 +28,8 @@ def build():
     # New module paths use the same Ninja-derived flags even before parent CMake
     # integration. Isolated objects also avoid racing the parent's product build.
     units = ['StreamPager', 'NativeCollisionAssets', 'RealtimeGameplay', 'NativePlayerAssets', 'TexSample',
-             'Handling', 'Collide', 'IfpAnim', 'CarPose', 'GxtText', 'MenuShot', 'NativePlayerActivity',
-             'NativeGarages', 'NativeVehiclePool', 'NativeScriptSession', 'NativeScriptEntities', 'NativeEntryExits',
+              'Handling', 'Collide', 'IfpAnim', 'CarPose', 'GxtText', 'MenuShot', 'NativePlayerActivity',
+              'NativeGarages', 'NativeVehiclePool', 'NativeScriptSchema', 'NativeScriptCorpus', 'NativeScriptSession', 'NativeScriptEntities', 'NativeEntryExits',
              'RealtimeScriptHost', 'NativeCarGenerators', 'NativeCarGeneratorResidency', 'NativeSourceRng', 'NativeRestarts',
              'NativeCarGeneratorRuntime', 'RealtimeHud', 'RadarMap', NAME]
     OUTPUT.mkdir(parents=True, exist_ok=True)

@@ -59,6 +59,14 @@ int main(int argc, char** argv) try {
     std::string error; char message[512]{};
     RealtimeGameplay gameplay;
     RealtimeScriptHost host(gameplay);
+    NativeScriptCorpusManifest corpus;
+    const auto observe = [&](std::size_t index) {
+        const auto threads = host.Session().Threads();
+        Require(index < threads.size() && threads[index].Active, "expected active corpus thread");
+        NativeScriptInstructionForm form;
+        Require(host.Session().InspectInstruction(index, form, error), error);
+        Require(corpus.Observe(form, error), error);
+    };
     E2ELoadInfo info;
     Require(StreamPager_Init(argv[1], info, message, sizeof(message), {true,300,1200}), message);
     Require(host.SeedSourceRngAfterRwInit(error), error);
@@ -70,7 +78,16 @@ int main(int argc, char** argv) try {
         host.CarGeneratorResidency().Catalog().size() == 190, "full deferred binary catalog before source world publication");
     RealtimeHud hud;
     if (!cpu) Require(hud.Load(argv[1], message, sizeof(message)), message);
-    Require(host.RunPass(1000).Status == NativeScriptStatus::Waiting && host.State().Commands == 53, "actual main53 first yield");
+    NativeScriptResult first;
+    std::size_t firstCommands = 0;
+    for (unsigned guard = 0; guard < 100; ++guard) {
+        observe(0);
+        first = host.RunPass(1);
+        firstCommands += first.Executed;
+        if (first.Status != NativeScriptStatus::BudgetYield) break;
+    }
+    Require(first.Status == NativeScriptStatus::Waiting && firstCommands == 53 && host.State().Commands == 53,
+        "actual main53 first yield");
     Require(host.CarGeneratorResidency().Active().size() == 22 && host.CarGenerators().Census().Registered == 88 &&
         host.CarGeneratorResidency().Snapshot() == host.Publication().SourceCollision && host.WorldRevision() == 2,
         "initial Ready matched source-COL: 22 generator sources/88 definitions");
@@ -88,9 +105,28 @@ int main(int argc, char** argv) try {
         host.CarGeneratorResidency().Catalog().size(), paired.Frame.instances);
     if (cpu) {
         host.SealStartup();
-        const auto terminal = host.RunPass(5000);
+        NativeScriptResult terminal;
+        for (unsigned guard = 0; guard < 5000; ++guard) {
+            observe(1);
+            terminal = host.RunPass(1);
+            if (terminal.Status != NativeScriptStatus::BudgetYield) break;
+        }
         Require(terminal.Status == NativeScriptStatus::Unsupported && terminal.IP == 205876 && terminal.Opcode == 0x0570 &&
             host.Session().Threads()[1].Commands == 539 && host.CarGenerators().Events().empty(), "CPU-negative539 no GPU HUD readiness");
+        const auto summary = corpus.Summary();
+        Require(summary.Encounters == 593 && summary.Sites == 593 && summary.Threads == 2 &&
+            summary.Opcodes == 32 && summary.OperandForms == 36 && summary.MainSites == 53 &&
+            summary.MissionSites == 540 && summary.StreamedSites == 0 && summary.UnsupportedSites == 0 &&
+            corpus.Fingerprint() == 0x4C8A0CD97C3A3533ULL,
+            "CPU-negative corpus classifies main53/mission539 plus blocked0570");
+        const auto& frontier = corpus.Sites().back().Form;
+        Require(frontier.IP == 205876 && frontier.Opcode == 0x0570 && frontier.OperandCount == 5 &&
+            frontier.Semantics == NativeScriptSemanticCoverage::Implemented,
+            "0570 form is implemented while this CPU host readiness remains unavailable");
+        std::printf("script-corpus-cpu encounters=%llu sites=%zu opcodes=%zu forms=%zu main=%zu mission=%zu frontier=%04X@%u fingerprint=%016llX service-ready=0 nop-substitution=0\n",
+            static_cast<unsigned long long>(summary.Encounters), summary.Sites, summary.Opcodes,
+            summary.OperandForms, summary.MainSites, summary.MissionSites, frontier.Opcode, frontier.IP,
+            static_cast<unsigned long long>(corpus.Fingerprint()));
         std::printf("NativeCarGeneratorScriptProbe CPU PASS commands=539 terminal=0570@205876 generators=88\n");
         StreamPager_Shutdown(); return 0;
     }
@@ -115,6 +151,7 @@ int main(int argc, char** argv) try {
         NativeScriptResult terminal;
         std::size_t creates = 0, switches = 0;
         for (unsigned i = 0; i < 5000; ++i) {
+            observe(1);
             terminal = host.RunPass(1);
             const auto& thread = host.Session().Threads()[1];
             if (terminal.Status != NativeScriptStatus::BudgetYield) break;
@@ -142,6 +179,12 @@ int main(int argc, char** argv) try {
             "actual mission crosses679/create/switch and stops at next strict unsupported");
         Require(host.Session().Threads()[1].Commands == 1234 && terminal.Opcode == 0x0814 && terminal.IP == 212669 &&
             creates == 10 && switches == 10, "measured legal mission0 strict frontier");
+        const auto summary = corpus.Summary();
+        Require(summary.Encounters == 1288 && summary.Sites == 1288 && summary.Threads == 2 &&
+            summary.Opcodes == 43 && summary.OperandForms == 48 && summary.MainSites == 53 &&
+            summary.MissionSites == 1235 && summary.UnsupportedSites == 1 &&
+            corpus.Fingerprint() == 0xBC61CAB8953E4545ULL,
+            "GL-ready corpus matches exact shipped main/mission schema manifest");
         const auto first = host.CarGenerators().Events().front();
         Require(first.Create.ModelId == 476 && first.Id.IP == 207007 && first.Generator.Value == 88 &&
             first.Create.AngleDegrees == 180 && first.Create.MinDelay == 0 && first.Create.MaxDelay == 10000,

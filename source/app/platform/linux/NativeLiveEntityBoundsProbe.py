@@ -30,7 +30,8 @@ def build():
     # every production consumer locally, without touching shared build objects.
     units = [NAME, 'NativeLiveEntityBounds', 'NativeGeneratedVehicleAssets', 'NativeVehiclePool',
              'NativeGaragesRuntime', 'NativeCarGenerators', 'NativeCarGeneratorRuntime',
-             'NativeCarGeneratorResidency', 'NativeScriptSession', 'RealtimeScriptHost']
+              'NativeCarGeneratorResidency', 'NativeScriptSchema', 'NativeScriptCorpus',
+              'NativeScriptSession', 'RealtimeScriptHost']
     # A concurrently integrated host service may precede the parent CMake edit.
     if (SOURCE / 'NativeRestarts.cpp').exists():
         units.append('NativeRestarts')
