@@ -16,6 +16,7 @@ struct NativeTransmission {
     struct State {
         std::uint8_t CurrentGear=1;
         float InertiaRatio=0,InertiaSmoother=0; // CAutomobile ctor initializes both to zero
+        bool operator==(const State&) const = default;
     };
     struct Config {
         float MaxVelocityKmh=0,EngineAcceleration=0,EngineInertia=0,Drag=0;

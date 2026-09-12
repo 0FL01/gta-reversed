@@ -113,6 +113,16 @@ int main(int argc,char** argv) try {
     const auto beforeBadControl=automobile.LastCommitted();
     Check(automobile.ProcessPlayerControls(1,2,129,false,false,0,1,error)==NativeSourceAutomobileStatus::InvalidInput&&
         automobile.LastCommitted()==beforeBadControl,"invalid controls retain publication");
+    Check(automobile.ProcessPlayerControls(255,0,0,false,false,0,1,error)==NativeSourceAutomobileStatus::Ready,error);
+    Check(automobile.AdvanceDrive(NativeTransmission::TimeStep,true,error)==NativeSourceAutomobileStatus::Ready,error);
+    const auto launch=automobile.LastCommitted();
+    Check(launch->ForwardSpeed>0&&launch->Transmission.CurrentGear==1,"source transmission launches common automobile");
+    Check(automobile.ProcessPlayerControls(0,255,0,false,false,launch->ForwardSpeed,1,error)==NativeSourceAutomobileStatus::Ready,error);
+    Check(automobile.AdvanceDrive(NativeTransmission::TimeStep,true,error)==NativeSourceAutomobileStatus::Ready,error);
+    Check(automobile.LastCommitted()->ForwardSpeed<launch->ForwardSpeed,"source brake decelerates common automobile");
+    const auto beforeBadDrive=automobile.LastCommitted();
+    Check(automobile.AdvanceDrive(0,true,error)==NativeSourceAutomobileStatus::InvalidInput&&
+        automobile.LastCommitted()==beforeBadDrive,"invalid drive step retains publication");
     Check(automobile.AddPassenger(2001,0,error)==NativeSourceAutomobileStatus::Ready,error);
     Check(automobile.AddPassenger(2002,2,error)==NativeSourceAutomobileStatus::Ready,error);
     auto occupied=automobile.LastCommitted();

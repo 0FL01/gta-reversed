@@ -143,3 +143,27 @@ NativeSourceAutomobileStatus NativeSourceAutomobile::ProcessPlayerControls(std::
     }
     return Publish(std::move(next),error);
 }
+
+NativeSourceAutomobileStatus NativeSourceAutomobile::AdvanceDrive(float timeStep,
+    bool drivenWheelsOnGround, std::string& error) {
+    if (!m_State || !m_State->Occupants.Driver || !std::isfinite(timeStep) || timeStep <= 0) {
+        error="invalid automobile drive step"; return Status::InvalidInput;
+    }
+    NativeTransmission transmission;
+    transmission.Initialize({m_State->MaxVelocityKmh,m_State->EngineAcceleration,m_State->EngineInertia,
+        m_State->Drag,m_State->Gears,m_State->DriveType,m_State->HandlingFlags});
+    auto next=*m_State;
+    const float drive=transmission.DriveAcceleration(next.GasPedal,next.Transmission,
+        next.ForwardSpeed/NativeTransmission::UnitsPerSecond,timeStep,drivenWheelsOnGround);
+    next.ForwardSpeed+=drive*transmission.DrivenWheels()*NativeTransmission::UnitsPerSecond;
+    if (next.BrakePedal>0) {
+        const float brake=next.BrakeDeceleration*next.BrakePedal*timeStep/NativeTransmission::UnitsPerSecond;
+        if (next.ForwardSpeed>0) next.ForwardSpeed=std::max(0.0f,next.ForwardSpeed-brake);
+        else next.ForwardSpeed=std::min(0.0f,next.ForwardSpeed+brake);
+    }
+    if (next.Handbrake) next.ForwardSpeed=0;
+    next.ForwardSpeed=transmission.AirResistance(next.ForwardSpeed,timeStep);
+    if (!std::isfinite(next.ForwardSpeed)) { error="automobile drive overflow"; return Status::InvalidInput; }
+    next.Revision++;
+    return Publish(std::move(next),error);
+}

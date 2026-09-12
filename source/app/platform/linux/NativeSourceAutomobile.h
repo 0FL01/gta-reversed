@@ -3,6 +3,7 @@
 #include "Handling.h"
 #include "NativeGeneratedVehicleAssets.h"
 #include "NativeVehiclePool.h"
+#include "NativeTransmission.h"
 
 #include <array>
 #include <memory>
@@ -32,6 +33,8 @@ struct NativeSourceAutomobileState {
     std::uint32_t HandlingFlags{};
     float RawSteerAngle{}, SteerAngle{}, GasPedal{}, BrakePedal{};
     bool Handbrake{}, DoingBurnout{};
+    NativeTransmission::State Transmission;
+    float ForwardSpeed{};
     float Elasticity = 0.05f, BrakeCount = 20, TireTemperature = 1;
     std::uint8_t Gears{};
     char DriveType{}, EngineType{};
@@ -56,6 +59,8 @@ public:
     NativeSourceAutomobileStatus ProcessPlayerControls(std::uint8_t accelerate, std::uint8_t brake,
         std::int16_t steering, bool handbrake, bool automaticHandbrake, float forwardVelocity,
         float timeStep, std::string& error);
+    NativeSourceAutomobileStatus AdvanceDrive(float timeStep, bool drivenWheelsOnGround,
+        std::string& error);
     std::shared_ptr<const NativeSourceAutomobileState> LastCommitted() const noexcept { return m_State; }
 
 private:
