@@ -361,6 +361,7 @@ public:
     bool PassOutstanding() const noexcept { return m_Pending || !m_Pass.empty(); }
 
 private:
+    friend class NativeScriptPortableSave;
     struct Instruction {
         std::uint16_t Opcode = 0;
         std::uint32_t Next = 0;
