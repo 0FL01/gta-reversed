@@ -17,6 +17,10 @@ bool Finite(const NativeGarageMatrix& matrix) {
 bool ValidCreatedBy(NativeVehicleCreatedBy value) {
     return value >= NativeVehicleCreatedBy::Random && value <= NativeVehicleCreatedBy::Permanent;
 }
+float Dot(const NativeSourcePhysicalVector& a,const NativeSourcePhysicalVector& b) {
+    return a[2]*b[2]+a[1]*b[1]+a[0]*b[0];
+}
+bool Finite(const NativeSourcePhysicalVector& v) { return std::ranges::all_of(v,[](float n){return std::isfinite(n);}); }
 std::uint8_t PassengerSeats(const NativeGeneratedVehiclePacket& asset) {
     const auto doors=std::ranges::count_if(asset.Frames,[](const auto& frame) {
         return frame.Name.starts_with("door_") && frame.Name.ends_with("_dummy");
@@ -201,5 +205,53 @@ NativeSourceAutomobileStatus NativeSourceAutomobile::SetupSuspension(const CarPo
         return (1-1/(next.SuspensionForce*4))*spring+wheelR/2-next.SuspensionLines[i].Start[2];
     };
     next.FrontHeightAboveRoad=height(0); next.RearHeightAboveRoad=height(1);
+    return Publish(std::move(next),error);
+}
+
+NativeSourceAutomobileStatus NativeSourceAutomobile::ProcessWheels(
+    const std::array<NativeSourceWheelContact,4>& contacts,float timeStep,std::string& error) {
+    if (!m_State||!m_State->Occupants.Driver||!std::isfinite(timeStep)||timeStep<=0) {
+        error="invalid automobile wheel step"; return Status::InvalidInput;
+    }
+    for (const auto& c:contacts) if (!Finite(c.Forward)||!Finite(c.Right)||!Finite(c.Speed)||!Finite(c.Point)||
+        !std::isfinite(c.Adhesion)||c.Adhesion<0) { error="invalid automobile wheel contact"; return Status::InvalidInput; }
+    auto next=*m_State; next.Revision++;
+    const auto grounded=std::ranges::count_if(contacts,[](const auto& c){return c.OnGround;});
+    if (!grounded) { error="source wheel response requires contacts"; return Status::Unsupported; }
+    NativeTransmission transmission;
+    transmission.Initialize({next.MaxVelocityKmh,next.EngineAcceleration,next.EngineInertia,next.Drag,
+        next.Gears,next.DriveType,next.HandlingFlags});
+    const float thrust=transmission.DriveAcceleration(next.GasPedal,next.Transmission,
+        next.ForwardSpeed/NativeTransmission::UnitsPerSecond,timeStep,true);
+    const float brake=next.BrakeDeceleration*next.BrakePedal*timeStep;
+    for (std::size_t i=0;i<4;++i) {
+        const auto& c=contacts[i]; if (!c.OnGround) continue;
+        const bool front=i==0||i==2;
+        const bool driven=next.DriveType=='4'||(front&&next.DriveType=='F')||(!front&&next.DriveType=='R');
+        float fwd=driven?thrust:0,right=-Dot(c.Right,c.Speed)/float(grounded);
+        float adhesion=c.Adhesion*timeStep;
+        if (next.WheelStates[i]!=NativeSourceWheelState::Normal) adhesion*=next.TractionLoss;
+        next.WheelStates[i]=NativeSourceWheelState::Normal;
+        if (driven&&fwd!=0) right=std::clamp(right,-adhesion,adhesion);
+        else if (const float speed=Dot(c.Forward,c.Speed); speed!=0) {
+            fwd=-speed/float(grounded);
+            if (brake>adhesion&&std::abs(speed)>0.005f) next.WheelStates[i]=NativeSourceWheelState::Fixed;
+            else fwd=std::clamp(fwd,-brake,brake);
+        }
+        const float sq=right*right+fwd*fwd;
+        if (sq>adhesion*adhesion&&next.WheelStates[i]!=NativeSourceWheelState::Fixed) {
+            next.WheelStates[i]=driven&&0.3f*adhesion<std::abs(fwd)?NativeSourceWheelState::Spinning:NativeSourceWheelState::Skidding;
+            const float scale=adhesion*next.TractionLoss/std::sqrt(sq); fwd*=scale; right*=scale;
+        }
+        NativeSourcePhysicalVector force{};
+        for (std::size_t axis=0;axis<3;++axis) {
+            force[axis]=(fwd*c.Forward[axis]+right*c.Right[axis])*next.Mass;
+            next.MoveForce[axis]+=force[axis];
+        }
+        next.TurnForce[0]+=c.Point[1]*force[2]-c.Point[2]*force[1];
+        next.TurnForce[1]+=c.Point[2]*force[0]-c.Point[0]*force[2];
+        next.TurnForce[2]+=c.Point[0]*force[1]-c.Point[1]*force[0];
+    }
+    if (!Finite(next.MoveForce)||!Finite(next.TurnForce)) { error="automobile wheel force overflow"; return Status::InvalidInput; }
     return Publish(std::move(next),error);
 }

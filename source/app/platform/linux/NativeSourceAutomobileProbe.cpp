@@ -5,6 +5,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
+#include <ranges>
 #include <stdexcept>
 #include <string>
 
@@ -142,6 +144,16 @@ int main(int argc,char** argv) try {
     const auto beforeBadDrive=automobile.LastCommitted();
     Check(automobile.AdvanceDrive(0,true,error)==NativeSourceAutomobileStatus::InvalidInput&&
         automobile.LastCommitted()==beforeBadDrive,"invalid drive step retains publication");
+    std::array<NativeSourceWheelContact,4> contacts;
+    for (auto& contact:contacts) contact={{0,1,0},{1,0,0},{1,2,0},{0,1,-1},0.1f,true};
+    Check(automobile.ProcessWheels(contacts,NativeTransmission::TimeStep,error)==NativeSourceAutomobileStatus::Ready,error);
+    auto wheels=automobile.LastCommitted();
+    Check(wheels->MoveForce[0]<0&&std::isfinite(wheels->MoveForce[1]),"source wheel lateral/drive forces accumulated");
+    Check(std::ranges::any_of(wheels->WheelStates,[](auto state){return state!=NativeSourceWheelState::Normal;}),
+        "source wheel traction state transition");
+    const auto beforeBadWheels=wheels; contacts[0].Adhesion=-1;
+    Check(automobile.ProcessWheels(contacts,1,error)==NativeSourceAutomobileStatus::InvalidInput&&
+        automobile.LastCommitted()==beforeBadWheels,"invalid wheel contact retains publication");
     Check(automobile.AddPassenger(2001,0,error)==NativeSourceAutomobileStatus::Ready,error);
     Check(automobile.AddPassenger(2002,2,error)==NativeSourceAutomobileStatus::Ready,error);
     auto occupied=automobile.LastCommitted();

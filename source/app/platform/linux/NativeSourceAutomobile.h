@@ -11,6 +11,12 @@
 #include <string>
 
 enum class NativeSourceAutomobileStatus { Ready, InvalidInput, Unsupported, Error, Occupied, Full };
+enum class NativeSourceWheelState : std::uint8_t { Normal, Spinning, Skidding, Fixed };
+struct NativeSourceWheelContact {
+    NativeSourcePhysicalVector Forward{},Right{},Speed{},Point{};
+    float Adhesion{};
+    bool OnGround{};
+};
 
 struct NativeSourceAutomobileOccupants {
     std::uint64_t Driver{};
@@ -40,6 +46,8 @@ struct NativeSourceAutomobileState {
     struct SuspensionLine { NativeSourcePhysicalVector Start{},End{}; float SpringLength{},LineLength{}; bool operator==(const SuspensionLine&) const=default; };
     std::array<SuspensionLine,4> SuspensionLines{};
     float FrontHeightAboveRoad{},RearHeightAboveRoad{};
+    std::array<NativeSourceWheelState,4> WheelStates{};
+    NativeSourcePhysicalVector MoveForce{},TurnForce{};
     NativeTransmission::State Transmission;
     float ForwardSpeed{};
     float Elasticity = 0.05f, BrakeCount = 20, TireTemperature = 1;
@@ -69,6 +77,8 @@ public:
     NativeSourceAutomobileStatus AdvanceDrive(float timeStep, bool drivenWheelsOnGround,
         std::string& error);
     NativeSourceAutomobileStatus SetupSuspension(const CarPoseMeasure&, std::string& error);
+    NativeSourceAutomobileStatus ProcessWheels(const std::array<NativeSourceWheelContact,4>&,
+        float timeStep, std::string& error);
     std::shared_ptr<const NativeSourceAutomobileState> LastCommitted() const noexcept { return m_State; }
 
 private:
