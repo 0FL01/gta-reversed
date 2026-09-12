@@ -27,7 +27,7 @@ NativeSourcePedCollisionStatus NativeSourcePreparePedCollision(const NativeSourc
     const bool lines = !input.SkipLineCollision && !input.ProcessingShift && !input.ForceHitReturnFalse &&
         !input.Attached && input.Other != NativeSourcePedCollisionEntity::Ped;
     if (lines) {
-        shape.SetHasContacted = true;
+        shape.SetCollisionProcessed = true;
         shape.LineCount = 1;
         // TimeStep is float, source multiplier is double carrying float -0.15.
         const float extension = float(double(input.TimeStep) * double(-0.15f));

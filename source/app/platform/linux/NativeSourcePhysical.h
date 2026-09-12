@@ -62,6 +62,8 @@ NativeSourcePhysicalStatus NativeSourceCalculatePedCollisionSteps(NativeSourcePh
 NativeSourcePhysicalStatus NativeSourceApplyPedPair(NativeSourcePhysicalState& a,
     NativeSourcePhysicalState& b, const NativeSourcePhysicalContact&, NativeSourcePhysicalContactResult&);
 // Physical.cpp:976–988 single-body disable-turn-force collision response.
+// Also the identical early ped branch of ApplyCollisionAlt at1464–1487;
+// that branch does not write the caller's accumulated move/turn vectors.
 // No elasticity term or DisableCollisionForce gate in this source branch.
 NativeSourcePhysicalStatus NativeSourceApplyPedCollision(NativeSourcePhysicalState&,
     const NativeSourcePhysicalContact&, NativeSourcePhysicalContactResult&);

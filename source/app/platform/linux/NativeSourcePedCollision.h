@@ -20,7 +20,9 @@ struct NativeSourcePedCollisionShape {
     NativeCollisionVector HeadLineStart{}, HeadLineEnd{};
     std::uint8_t LineCount{};
     float LegSphereTop{};
-    bool QueryEnabled{}, SetHasContacted{}, ReturnAllContacts{};
+    // Entity flag bit1 (0x2), NOT HasContacted/bit3 (0x8). The latter selects
+    // friction handling and must not be set merely by preparing support lines.
+    bool QueryEnabled{}, SetCollisionProcessed{}, ReturnAllContacts{};
 };
 
 // TempColModels::Initialise Ped1 plus the normal preparation

@@ -22,7 +22,7 @@ int main() {
     Check(NativeSourcePreparePedCollision(input, shape) == Status::Ok && !shape.QueryEnabled && !shape.LineCount, "disabled source collision early-out");
     input.UsesCollision = true; input.TimeStep = 1;
     Check(NativeSourcePreparePedCollision(input, shape) == Status::Ok && shape.QueryEnabled && shape.LineCount == 1 &&
-        shape.SetHasContacted && shape.LineEnd == NativeCollisionVector{0, 0, -1} && shape.Max[2] == 1 && shape.BoundRadius == 1,
+        shape.SetCollisionProcessed && shape.LineEnd == NativeCollisionVector{0, 0, -1} && shape.Max[2] == 1 && shape.BoundRadius == 1,
         "ordinary source ped support line and temporary broadphase bound");
     Check(shape.Spheres[0].Center[2] == -0.2f && shape.Spheres[1].Center[2] == 0.2f && shape.Spheres[2].Center[2] == 0.6f &&
         shape.Spheres[0].Radius == 0.35f && shape.Spheres[2].Surface.Material == 62 && shape.Spheres[2].Surface.Piece == 2,
@@ -38,7 +38,7 @@ int main() {
     Check(NativeSourcePreparePedCollision(input, shape) == Status::Ok && !shape.LineCount && shape.Max[2] == 0.95f && shape.LegSphereTop == 0.94f,
         "ped-ped pair excludes support lines and retains original bounds");
     input.Other = Entity::Building; input.SkipLineCollision = true;
-    Check(NativeSourcePreparePedCollision(input, shape) == Status::Ok && !shape.LineCount && !shape.SetHasContacted, "source skip-line flag");
+    Check(NativeSourcePreparePedCollision(input, shape) == Status::Ok && !shape.LineCount && !shape.SetCollisionProcessed, "source skip-line flag");
     input.SkipLineCollision = false; input.ForceHitReturnFalse = true; input.UsesCollision = false;
     Check(NativeSourcePreparePedCollision(input, shape) == Status::Ok && shape.QueryEnabled && !shape.LineCount, "force-hit flag enables sphere query but suppresses lines");
     input.ForceHitReturnFalse = false; input.UsesCollision = true; input.IsStuck = true;
