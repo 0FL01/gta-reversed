@@ -1,7 +1,9 @@
 // SfxDecode implementation: real SFX bytes via OS_File*, signed PCM16 mono.
 #include "app/platform/linux/SfxDecode.h"
 
+#include <algorithm>
 #include <cmath>
+#include <climits>
 #include <cstdio>
 #include <cstring>
 
@@ -38,6 +40,12 @@ uint32_t ReadU32LE(const uint8_t* p) {
 
 uint16_t ReadU16LE(const uint8_t* p) {
     return static_cast<uint16_t>(p[0] | (p[1] << 8));
+}
+
+int32_t ReadI32LE(const uint8_t* p) {
+    const uint32_t value = ReadU32LE(p);
+    if (value <= static_cast<uint32_t>(INT32_MAX)) return static_cast<int32_t>(value);
+    return static_cast<int32_t>(static_cast<int64_t>(value) - (int64_t{1} << 32));
 }
 
 // Reads exactly `size` bytes from absolute file position `pos` in chunks.
@@ -241,8 +249,7 @@ bool SfxDecode_PakBank(const std::string& bankName, int wantSamples,
             // (Rates as odd as 2021 Hz ship in the tables with real PCM
             // behind them, so the floor stays low.)
             if ((s > 0 && off < prevOffset) || size == 0 ||
-                (size % 2) != 0 || off + size > bank.size || rate < 100 ||
-                rate > 200000) {
+                (size % 2) != 0 || off + size > bank.size || rate < 100) {
                 itemsOk = false;
                 break;
             }
@@ -277,6 +284,7 @@ bool SfxDecode_PakBank(const std::string& bankName, int wantSamples,
             sound.dataSize = size;
             sound.rateHz = items[s].rate;
             sound.headroom = items[s].headroom;
+            sound.loopStartOffset = ReadI32LE(header.data() + 4 + s * kSlotItemBytes + 4);
             sound.pcm.resize(size / 2);
             for (size_t i = 0; i < sound.pcm.size(); ++i) {
                 sound.pcm[i] = static_cast<int16_t>(
@@ -311,5 +319,124 @@ bool SfxDecode_PakBank(const std::string& bankName, int wantSamples,
     out.rms = totalSamples > 0
                   ? std::sqrt(static_cast<double>(sumSquares) / totalSamples)
                   : 0.0;
+    return true;
+}
+
+bool SfxDecode_Sound(int bankId, int soundIndex, SfxSingleSoundResult& out,
+                     std::string& error) {
+    if (bankId < 0 || soundIndex < 0 || soundIndex >= kMaxSoundsPerBank) {
+        error = "invalid SFX bank/sound identity";
+        return false;
+    }
+    std::vector<uint8_t> pakFiles;
+    std::vector<uint8_t> lookup;
+    if (!ReadWholeFile("audio/CONFIG/PakFiles.dat", pakFiles) || pakFiles.empty() ||
+        pakFiles.size() % kPakLkupEntryBytes != 0 ||
+        !ReadWholeFile("audio/CONFIG/BankLkup.dat", lookup) || lookup.empty() ||
+        lookup.size() % kBankLkupEntryBytes != 0 ||
+        static_cast<size_t>(bankId) >= lookup.size() / kBankLkupEntryBytes) {
+        error = "cannot read exact SFX lookup tables";
+        return false;
+    }
+    const uint8_t* bank = lookup.data() + static_cast<size_t>(bankId) * kBankLkupEntryBytes;
+    const size_t pakNo = bank[0];
+    if (pakNo >= pakFiles.size() / kPakLkupEntryBytes) {
+        error = "SFX bank references invalid pak";
+        return false;
+    }
+    const uint8_t* pakEntry = pakFiles.data() + pakNo * kPakLkupEntryBytes;
+    size_t pakNameLength = 0;
+    while (pakNameLength < 12 && pakEntry[pakNameLength]) ++pakNameLength;
+    if (!pakNameLength) {
+        error = "invalid exact SFX pak name";
+        return false;
+    }
+    std::string pakName(reinterpret_cast<const char*>(pakEntry), pakNameLength);
+    const std::string pakPath = "audio/sfx/" + pakName;
+    void* pak = nullptr;
+    if (OS_FileOpen(FILE_DATA_AREA_DEFAULT, &pak, pakPath.c_str(), FILE_ACCESS_READ) != 0 || !pak) {
+        error = "cannot open exact SFX pak";
+        return false;
+    }
+    const uint32_t bankOffset = ReadU32LE(bank + 4);
+    const uint32_t bankSize = ReadU32LE(bank + 8);
+    const int32_t pakSize = OS_FileSize(pak);
+    const uint64_t recordEnd = static_cast<uint64_t>(bankOffset) + kBankHeaderBytes + bankSize;
+    std::vector<uint8_t> header;
+    bool ok = pakSize >= 0 && recordEnd <= static_cast<uint64_t>(pakSize);
+    try {
+        if (ok) header.resize(kBankHeaderBytes);
+    } catch (...) {
+        OS_FileClose(pak);
+        error = "exact SFX header allocation failed";
+        return false;
+    }
+    ok = ok && ReadRange(pak, bankOffset, header.data(), header.size());
+    if (!ok) {
+        OS_FileClose(pak);
+        error = "invalid exact SFX bank bounds";
+        return false;
+    }
+    const int numSounds = static_cast<int16_t>(ReadU16LE(header.data()));
+    if (numSounds <= 0 || numSounds > kMaxSoundsPerBank || soundIndex >= numSounds) {
+        OS_FileClose(pak);
+        error = "exact SFX sound is absent";
+        return false;
+    }
+    const uint8_t* item = header.data() + 4 + soundIndex * kSlotItemBytes;
+    const uint32_t soundOffset = ReadU32LE(item);
+    const uint32_t nextOffset = soundIndex + 1 < numSounds
+        ? ReadU32LE(item + kSlotItemBytes) : bankSize;
+    const uint16_t rate = ReadU16LE(item + 8);
+    if (nextOffset <= soundOffset || nextOffset > bankSize || ((nextOffset - soundOffset) & 1) ||
+        rate < 100) {
+        OS_FileClose(pak);
+        error = "invalid exact SFX sound bounds";
+        return false;
+    }
+    const uint32_t size = nextOffset - soundOffset;
+    std::vector<uint8_t> raw;
+    try {
+        raw.resize(size);
+    } catch (...) {
+        OS_FileClose(pak);
+        error = "exact SFX sample allocation failed";
+        return false;
+    }
+    if (!ReadRange(pak, bankOffset + kBankHeaderBytes + soundOffset, raw.data(), raw.size())) {
+        OS_FileClose(pak);
+        error = "short exact SFX sample read";
+        return false;
+    }
+    OS_FileClose(pak);
+    SfxSingleSoundResult candidate;
+    try {
+        candidate.pakName = std::move(pakName);
+        candidate.sound.bankId = bankId;
+        candidate.sound.soundIndex = soundIndex;
+        candidate.sound.dataSize = size;
+        candidate.sound.rateHz = rate;
+        candidate.sound.headroom = static_cast<int16_t>(ReadU16LE(item + 10));
+        candidate.sound.loopStartOffset = ReadI32LE(item + 4);
+        candidate.sound.pcm.resize(size / 2);
+    } catch (...) {
+        error = "exact SFX result allocation failed";
+        return false;
+    }
+    uint64_t hash = 14695981039346656037ULL;
+    int64_t sumSquares = 0;
+    for (size_t i = 0; i < candidate.sound.pcm.size(); ++i) {
+        const auto sample = static_cast<int16_t>(ReadU16LE(raw.data() + i * 2));
+        candidate.sound.pcm[i] = sample;
+        sumSquares += static_cast<int64_t>(sample) * sample;
+        const int absolute = sample < 0 ? -sample : sample;
+        candidate.peak = std::max(candidate.peak, absolute);
+    }
+    hash = Fnv1a64(hash, raw.data(), raw.size());
+    candidate.bufChecksum = hash;
+    candidate.durationMs = static_cast<double>(candidate.sound.pcm.size()) * 1000.0 / rate;
+    candidate.rms = std::sqrt(static_cast<double>(sumSquares) / candidate.sound.pcm.size());
+    out = std::move(candidate);
+    error.clear();
     return true;
 }

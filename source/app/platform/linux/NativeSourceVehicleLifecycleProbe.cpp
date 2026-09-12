@@ -1,4 +1,5 @@
 #include "NativeSourceVehicleLifecycle.h"
+#include "NativeSourceSliceFeedback.h"
 #include "NativeCarGenerators.h"
 #include "NativeCollisionAssets.h"
 #include "RealtimeStreaming.h"
@@ -44,14 +45,18 @@ NativeSourcePadFrame Frame(std::uint64_t sequence, std::uint8_t buttons, std::ui
     frame.Pressed = buttons & ~previous; frame.Released = previous & ~buttons;
     return frame;
 }
-std::shared_ptr<NativeCollisionModel> Floor() {
-    auto model = std::make_shared<NativeCollisionModel>();
-    model->Name = "lifecycle-floor"; model->Version = 2; model->Flags = 2;
-    model->Min = {-4, -4, -.125f}; model->Max = {4, 4, .125f}; model->BoundRadius = 6;
-    model->Vertices = {{-4, -4, 0}, {4, -4, 0}, {4, 4, 0}, {-4, 4, 0}};
-    model->Faces = {{{0, 1, 2}, {1, 0, 0, 10}}, {{0, 2, 3}, {1, 0, 0, 10}}};
-    return model;
-}
+class SourceInput {
+public:
+    NativeSourcePadFrame Submit(std::uint64_t sequence, std::uint8_t buttons,
+        std::int16_t moveX = 0) {
+        NativeSourcePadFrame frame;
+        Check(m_Pad.SubmitSample({sequence, sequence * 10, moveX, 0, buttons}, frame) ==
+            NativeSourcePadStatus::Ok, "source pad accepts normal lifecycle input");
+        return frame;
+    }
+private:
+    NativeSourcePad m_Pad;
+};
 std::shared_ptr<const NativeVehicleAssetCompletion> Completion(std::uint64_t generation,
     std::uint64_t request, const char* gameDir, const NativeCarGeneratorModelDefinition& definition,
     std::shared_ptr<const NativeCollisionAssets> catalog) {
@@ -95,10 +100,15 @@ int main(int argc, char** argv) try {
 
     NativeSourceSurfaces surfaces;
     Check(surfaces.Load(argv[1], error), error);
-    auto floor = Floor();
+    const auto realWorldModel = collision->LookupModel("gsfreeway7_lan");
+    Check(realWorldModel.Status == NativeCollisionModelStatus::Ready && realWorldModel.Model &&
+        realWorldModel.Model->HeaderId == 3991 && realWorldModel.Model->Faces.size() == 122,
+        "real streamed world COL model ready");
+    const auto floor = realWorldModel.Model;
     auto world10 = std::make_shared<NativeCollisionSnapshot>();
     NativeCollisionInstance worldFloor;
-    worldFloor.Placement.ModelId = 3991; worldFloor.Placement.Model = "lifecycle-floor";
+    worldFloor.Placement.ModelId = 3991; worldFloor.Placement.Model = "gsfreeway7_lan";
+    worldFloor.Placement.Ipl = "bounded-source-lifecycle-world";
     worldFloor.Model = floor; worldFloor.Basis = Matrix().Basis;
     worldFloor.Min = floor->Min; worldFloor.Max = floor->Max;
     world10->Instances.push_back(worldFloor);
@@ -110,6 +120,7 @@ int main(int argc, char** argv) try {
         asset->DffSource == "gta3.img:landstal.dff", "real source asset retained");
 
     NativeSourceVehicleLifecycle lifecycle;
+    SourceInput sourceInput;
     Check(!lifecycle.LastCommitted() && lifecycle.Pool().Census().Alive == 0, "fresh lifecycle empty");
     NativeSourceVehicleLifecycleSpawn spawn;
     spawn.WorldGeneration = 10; spawn.PedIdentity = 11; spawn.VehicleIdentity = 22;
@@ -136,8 +147,27 @@ int main(int argc, char** argv) try {
         "spawn ped-world and camera ownership");
     Check(initial->Events.size() == 1 && initial->Events[0].Kind ==
         NativeSourceVehicleLifecycleEventKind::Spawn, "spawn lifecycle journal");
+    NativeSourceSliceFeedback feedback;
+    SfxSingleSoundResult retainedSound;
+    Check(SfxDecode_Sound(138, 40, retainedSound, error) && retainedSound.sound.dataSize == 11220 &&
+        retainedSound.sound.rateHz == 20000 && retainedSound.bufChecksum == 12126532606915493261ULL,
+        "exact bank138 sound40 decoder oracle");
+    const auto retainedSoundCopy = retainedSound;
+    Check(!SfxDecode_Sound(138, 400, retainedSound, error) && retainedSound == retainedSoundCopy,
+        "invalid exact SFX identity retains caller output");
+    Check(feedback.Initialize(argv[1], initial, error) == NativeSourceSliceFeedbackStatus::Ok, error);
+    const auto feedbackInitial = feedback.LastCommitted(); const auto feedbackInitialCopy = *feedbackInitial;
+    Check(feedbackInitial->Hud.Health == 100 && feedbackInitial->Hud.MaxHealth == 100 &&
+        feedbackInitial->Hud.Armour == 0 && feedbackInitial->Hud.MaxArmour == 100 &&
+        feedbackInitial->Hud.Money == 0 && feedbackInitial->Hud.DisplayMoney == 0 &&
+        feedbackInitial->Hud.WantedLevel == 0 && feedbackInitial->Hud.ActiveWeapon == 0,
+        "source-initial player HUD state");
+    Check(feedbackInitial->Actions.size() == 1 && feedbackInitial->Audio.empty() &&
+        !feedbackInitial->PresentationFeedback, "spawn feedback has no fabricated audio/presentation authority");
+    Check(feedback.Observe(initial, error) == NativeSourceSliceFeedbackStatus::DuplicateIdempotent &&
+        feedback.LastCommitted() == feedbackInitial, "duplicate lifecycle observation idempotent");
 
-    Check(lifecycle.Tick(Frame(1, 4, 0), 101, 1, {1, 0, 0}, nullptr, error) ==
+    Check(lifecycle.Tick(sourceInput.Submit(1, 4), 101, 1, {1, 0, 0}, nullptr, error) ==
         NativeSourceVehicleLifecycleStatus::Ok, error);
     auto entering = lifecycle.LastCommitted(); const auto enteringCopy = *entering;
     Check(entering->Phase == NativeSourceVehicleLifecyclePhase::Entering && entering->Task ==
@@ -148,16 +178,45 @@ int main(int argc, char** argv) try {
         "entry starts source camera transition");
     Check(!entering->Automobile->Occupants.Driver && pedWorld10.PedCount() == 1,
         "driver handoff awaits task completion");
-    Check(lifecycle.CompleteTask(101, {}, error) == NativeSourceVehicleLifecycleStatus::TransitionOutstanding &&
-        lifecycle.LastCommitted() == entering, "entry cannot complete before camera transition");
-    Check(lifecycle.Tick(Frame(2, 0, 4), 1450, 1, {1, 0, 0}, nullptr, error) ==
+    Check(feedback.Observe(entering, error) == NativeSourceSliceFeedbackStatus::Ok &&
+        feedback.LastCommitted()->Actions.back().Kind == NativeSourceSliceActionKind::EnterVehicle &&
+        feedback.LastCommitted()->Actions.back().Flags == NativeSourceSliceActionEnterExit,
+        "normal Triangle entry publishes authoritative action");
+    Check(lifecycle.ReportDriverDoor(true, 102, error) == NativeSourceVehicleLifecycleStatus::Ok, error);
+    Check(feedback.Observe(lifecycle.LastCommitted(), error) == NativeSourceSliceFeedbackStatus::Ok, error);
+    Check(feedback.LastCommitted()->Audio.size() == 1 &&
+        feedback.LastCommitted()->Audio.back().EventId == 80 &&
+        feedback.LastCommitted()->Audio.back().BankId == 138 &&
+        feedback.LastCommitted()->Audio.back().BankSlot == 19 &&
+        feedback.LastCommitted()->Audio.back().SoundId == 40 &&
+        feedback.LastCommitted()->Audio.back().DoorType == 2 &&
+        feedback.LastCommitted()->Audio.back().Clip &&
+        feedback.LastCommitted()->Audio.back().Clip->sound.bankId == 138 &&
+        feedback.LastCommitted()->Audio.back().Clip->sound.soundIndex == 40 &&
+        !feedback.LastCommitted()->Audio.back().Clip->sound.pcm.empty(),
+        "model400 driver door open routes exact NEW-door PCM");
+    const auto entryDoorOpen = lifecycle.LastCommitted();
+    Check(lifecycle.CompleteTask(102, {}, error) == NativeSourceVehicleLifecycleStatus::TransitionOutstanding &&
+        lifecycle.LastCommitted() == entryDoorOpen, "entry cannot complete before camera transition");
+    Check(lifecycle.Tick(sourceInput.Submit(2, 0), 1450, 1, {1, 0, 0}, nullptr, error) ==
         NativeSourceVehicleLifecycleStatus::Ok && lifecycle.LastCommitted()->Camera->Transition.Active,
         "entry transition remains active before exact end");
-    Check(lifecycle.Tick(Frame(3, 0, 0), 1451, 1, {1, 0, 0}, nullptr, error) ==
+    Check(lifecycle.Tick(sourceInput.Submit(3, 0), 1451, 1, {1, 0, 0}, nullptr, error) ==
         NativeSourceVehicleLifecycleStatus::Ok && !lifecycle.LastCommitted()->Camera->Transition.Active,
         "entry transition exact completion");
+    Check(lifecycle.ReportDriverDoor(false, 1451, error) == NativeSourceVehicleLifecycleStatus::Ok, error);
+    Check(feedback.Observe(lifecycle.LastCommitted(), error) == NativeSourceSliceFeedbackStatus::Ok &&
+        feedback.LastCommitted()->Audio.size() == 2 &&
+        feedback.LastCommitted()->Audio.back().EventId == 86 &&
+        feedback.LastCommitted()->Audio.back().SoundId == 33 &&
+        feedback.LastCommitted()->Audio.back().Clip->sound.soundIndex == 33,
+        "model400 driver door close routes exact NEW-door PCM");
     Check(lifecycle.CompleteTask(1451, {}, error) == NativeSourceVehicleLifecycleStatus::Ok, error);
     auto driving = lifecycle.LastCommitted();
+    Check(feedback.Observe(driving, error) == NativeSourceSliceFeedbackStatus::Ok &&
+        feedback.LastCommitted()->Hud.InVehicle &&
+        feedback.LastCommitted()->Actions.back().Kind == NativeSourceSliceActionKind::DriverAttached,
+        "driver callback updates authoritative HUD/action state");
     Check(driving->Phase == NativeSourceVehicleLifecyclePhase::Driving && driving->Task ==
         NativeSourceVehicleLifecycleTask::CarDrive && driving->InVehicle && !driving->PedInWorld &&
         !driving->PedUsesCollision, "task handoff commits source driver state");
@@ -169,10 +228,11 @@ int main(int argc, char** argv) try {
 
     NativeSourceVehicleLifecycleWorldTarget collisionTarget;
     collisionTarget.WorldGeneration = 10; collisionTarget.Surfaces = &surfaces;
-    collisionTarget.Target.Identity = 9001; collisionTarget.Target.Kind = NativeSourceAutomobileContactKind::Building;
+    collisionTarget.Target.Identity = 3991; collisionTarget.Target.Kind = NativeSourceAutomobileContactKind::Building;
     collisionTarget.Target.Collision = floor; collisionTarget.Target.InWorld = true;
     collisionTarget.Target.UsesCollision = collisionTarget.Target.Static = collisionTarget.Target.Collidable = true;
-    Check(lifecycle.Tick(Frame(4, 2, 0, 64), 1453, NativeTransmission::TimeStep,
+    const auto input4 = sourceInput.Submit(4, 2, 64);
+    Check(lifecycle.Tick(input4, 1453, NativeTransmission::TimeStep,
         {1, 0, 0}, &collisionTarget, error) ==
         NativeSourceVehicleLifecycleStatus::Ok, error);
     auto accelerated = lifecycle.LastCommitted();
@@ -182,28 +242,42 @@ int main(int argc, char** argv) try {
     Check(accelerated->Automobile->Matrix.Position != spawn.VehicleMatrix.Position &&
         accelerated->Automobile->VehicleCollisionProcessed,
         "drive advances through retained source position and loaded collision owners");
+    Check(collisionTarget.Target.Collision->HeaderId == 3991 &&
+        collisionTarget.Target.Collision->Faces.size() == 122,
+        "normal driving collision target is real gsfreeway7_lan COL, not a substitute");
     Check(lifecycle.Pool().Resolve(accelerated->VehicleReference)->State.Matrix ==
         accelerated->Automobile->Matrix, "pool publication follows source vehicle matrix");
     Check(accelerated->Events.back().Kind == NativeSourceVehicleLifecycleEventKind::Drive &&
         accelerated->Events.back().InputSequence == 4, "drive event sampled input sequence");
+    Check(feedback.Observe(accelerated, error) == NativeSourceSliceFeedbackStatus::Ok &&
+        feedback.LastCommitted()->Actions.back().Kind == NativeSourceSliceActionKind::VehicleControl &&
+        feedback.LastCommitted()->Actions.back().Flags ==
+            (NativeSourceSliceActionAccelerate | NativeSourceSliceActionSteer) &&
+        feedback.LastCommitted()->Actions.back().MoveX == 64 &&
+        feedback.LastCommitted()->Hud.VehicleSpeed == accelerated->Automobile->ForwardSpeed,
+        "Cross and steering reach action journal and source HUD speed");
     const auto acceleratedCopy = *accelerated;
     auto staleTarget = collisionTarget; staleTarget.WorldGeneration = 9;
     Check(lifecycle.Tick(Frame(5, 2, 2, 64), 1454, 1, {1, 0, 0}, &staleTarget, error) ==
         NativeSourceVehicleLifecycleStatus::StaleWorld && lifecycle.LastCommitted() == accelerated,
         "stale collision generation rejects drive atomically");
-    Check(lifecycle.Tick(Frame(4, 2, 0, 64), 1454, 1, {1, 0, 0}, nullptr, error) ==
+    Check(lifecycle.Tick(input4, 1454, 1, {1, 0, 0}, nullptr, error) ==
         NativeSourceVehicleLifecycleStatus::StaleInput && lifecycle.LastCommitted() == accelerated,
         "duplicate normal-input frame rejected atomically");
     Check(*accelerated == acceleratedCopy, "rejected input retains held publication");
-    Check(lifecycle.Tick(Frame(5, 1, 2), 1454, NativeTransmission::TimeStep, {1, 0, 0}, nullptr, error) ==
+    Check(lifecycle.Tick(sourceInput.Submit(5, 1), 1454, NativeTransmission::TimeStep, {1, 0, 0}, nullptr, error) ==
         NativeSourceVehicleLifecycleStatus::Ok, error);
+    Check(feedback.Observe(lifecycle.LastCommitted(), error) == NativeSourceSliceFeedbackStatus::Ok &&
+        (feedback.LastCommitted()->Actions.back().Flags & NativeSourceSliceActionBrake),
+        "Square driving input reaches authoritative brake action");
     Check(lifecycle.LastCommitted()->Automobile->GasPedal <= 0 &&
         lifecycle.LastCommitted()->Automobile->ForwardSpeed < accelerated->Automobile->ForwardSpeed,
         "normal Square input selects source deceleration branch");
 
-    Check(lifecycle.Tick(Frame(6, 0, 1), 1455, 1, {1, 0, 0}, nullptr, error) ==
+    Check(lifecycle.Tick(sourceInput.Submit(6, 0), 1455, 1, {1, 0, 0}, nullptr, error) ==
         NativeSourceVehicleLifecycleStatus::Ok, error);
-    Check(lifecycle.Tick(Frame(7, 4, 0), 1456, 1, {1, 0, 0}, nullptr, error) ==
+    Check(feedback.Observe(lifecycle.LastCommitted(), error) == NativeSourceSliceFeedbackStatus::Ok, error);
+    Check(lifecycle.Tick(sourceInput.Submit(7, 4), 1456, 1, {1, 0, 0}, nullptr, error) ==
         NativeSourceVehicleLifecycleStatus::Ok, error);
     auto exiting = lifecycle.LastCommitted();
     Check(exiting->Phase == NativeSourceVehicleLifecyclePhase::Exiting && exiting->Task ==
@@ -213,14 +287,23 @@ int main(int argc, char** argv) try {
         exiting->Automobile->Occupants.Driver == 11, "exit-held source automatic handbrake and retained driver");
     Check(exiting->Camera->Mode == NativeSourceCameraMode::FollowPed && exiting->Camera->Transition.Active,
         "exit source camera transition");
+    Check(feedback.Observe(exiting, error) == NativeSourceSliceFeedbackStatus::Ok &&
+        feedback.LastCommitted()->Actions.back().Kind == NativeSourceSliceActionKind::ExitVehicle,
+        "Triangle exit publishes authoritative action");
+    Check(lifecycle.ReportDriverDoor(true, 1457, error) == NativeSourceVehicleLifecycleStatus::Ok, error);
+    Check(feedback.Observe(lifecycle.LastCommitted(), error) == NativeSourceSliceFeedbackStatus::Ok &&
+        feedback.LastCommitted()->Audio.size() == 3, "exit door open publishes third exact PCM event");
     Check(lifecycle.Destroy(1456, error) == NativeSourceVehicleLifecycleStatus::InvalidPhase,
         "live exit task prevents destruction");
-    Check(lifecycle.Tick(Frame(8, 0, 4), 2805, 1, {1, 0, 0}, nullptr, error) ==
+    Check(lifecycle.Tick(sourceInput.Submit(8, 0), 2805, 1, {1, 0, 0}, nullptr, error) ==
         NativeSourceVehicleLifecycleStatus::Ok && lifecycle.LastCommitted()->Camera->Transition.Active,
         "exit remains active before exact end");
-    Check(lifecycle.Tick(Frame(9, 0, 0), 2806, 1, {1, 0, 0}, nullptr, error) ==
+    Check(lifecycle.Tick(sourceInput.Submit(9, 0), 2806, 1, {1, 0, 0}, nullptr, error) ==
         NativeSourceVehicleLifecycleStatus::Ok && !lifecycle.LastCommitted()->Camera->Transition.Active,
         "exit camera exact completion");
+    Check(lifecycle.ReportDriverDoor(false, 2806, error) == NativeSourceVehicleLifecycleStatus::Ok, error);
+    Check(feedback.Observe(lifecycle.LastCommitted(), error) == NativeSourceSliceFeedbackStatus::Ok &&
+        feedback.LastCommitted()->Audio.size() == 4, "exit door close publishes fourth exact PCM event");
     const auto completedTransition = lifecycle.LastCommitted();
     const auto completedTransitionCopy = *completedTransition;
     Check(lifecycle.CompleteTask(2806, {}, error) == NativeSourceVehicleLifecycleStatus::InvalidInput &&
@@ -233,6 +316,10 @@ int main(int argc, char** argv) try {
     const NativeCollisionVector setPedOutPosition{1.25f, 0, 1};
     Check(lifecycle.CompleteTask(2806, setPedOutPosition, error) == NativeSourceVehicleLifecycleStatus::Ok, error);
     auto onFoot = lifecycle.LastCommitted();
+    Check(feedback.Observe(onFoot, error) == NativeSourceSliceFeedbackStatus::Ok &&
+        !feedback.LastCommitted()->Hud.InVehicle &&
+        feedback.LastCommitted()->Actions.back().Kind == NativeSourceSliceActionKind::DriverDetached,
+        "SetPedOut callback returns HUD/action authority on foot");
     Check(onFoot->Phase == NativeSourceVehicleLifecyclePhase::OnFoot && !onFoot->InVehicle &&
         onFoot->PedInWorld && onFoot->PedUsesCollision && onFoot->Task ==
         NativeSourceVehicleLifecycleTask::PlayerOnFoot, "SetPedOut handoff restores source on-foot owner");
@@ -250,6 +337,7 @@ int main(int argc, char** argv) try {
         lifecycle.Pool().Resolve(oldReference)->State.ModelCollision;
     Check(lifecycle.Destroy(2807, error) == NativeSourceVehicleLifecycleStatus::Ok, error);
     auto destroyed = lifecycle.LastCommitted(); const auto destroyedCopy = *destroyed;
+    Check(feedback.Observe(destroyed, error) == NativeSourceSliceFeedbackStatus::Ok, error);
     Check(destroyed->Phase == NativeSourceVehicleLifecyclePhase::Destroyed &&
         destroyed->PoolAlive == 0 && destroyed->LastPoolEvent == NativeVehicleEventKind::Released &&
         !lifecycle.Pool().Resolve(oldReference),
@@ -269,12 +357,34 @@ int main(int argc, char** argv) try {
     Check(lifecycle.EvictWorld(11, world11, pedWorld11, 2808, error) ==
         NativeSourceVehicleLifecycleStatus::Ok, error);
     auto evicted = lifecycle.LastCommitted();
+    Check(feedback.Observe(evicted, error) == NativeSourceSliceFeedbackStatus::Ok, error);
     Check(evicted->WorldGeneration == 11 && evicted->WorldCollision == world11 &&
         !evicted->VehicleAsset && !evicted->Automobile, "stream generation adopts and releases vehicle asset owner");
     Check(pedWorld10.PedCount() == 0 && pedWorld11.PedCount() == 1,
         "ped migrates only after vehicle pool cleanup");
     Check(evicted->Events.back().Kind == NativeSourceVehicleLifecycleEventKind::WorldEvicted &&
-        evicted->Events.size() == 10, "ordered complete lifecycle journal");
+        evicted->Events.size() == 14, "ordered complete lifecycle journal");
+    const auto feedbackFinal = feedback.LastCommitted();
+    Check(feedbackFinal->Actions.size() == 14 && feedbackFinal->Audio.size() == 4 &&
+        feedbackFinal->Actions.back().Kind == NativeSourceSliceActionKind::WorldEvicted,
+        "normal-input route publishes complete ordered action/audio journal");
+    Check(feedbackFinal->Audio[0].Clip == feedbackFinal->Audio[2].Clip &&
+        feedbackFinal->Audio[1].Clip == feedbackFinal->Audio[3].Clip &&
+        feedbackFinal->Audio[0].Clip != feedbackFinal->Audio[1].Clip &&
+        feedbackFinal->Audio[0].Clip->bufChecksum != feedbackFinal->Audio[1].Clip->bufChecksum,
+        "door requests retain two exact shared PCM owners without substitution");
+    auto skippedCandidate = *evicted;
+    skippedCandidate.Generation += 2;
+    skippedCandidate.Events.push_back(skippedCandidate.Events.back());
+    skippedCandidate.Events.back().Sequence = 15;
+    skippedCandidate.Events.back().Kind = NativeSourceVehicleLifecycleEventKind::Destroyed;
+    skippedCandidate.Events.push_back(skippedCandidate.Events.back());
+    skippedCandidate.Events.back().Sequence = 16;
+    const auto skippedEvent = std::make_shared<const NativeSourceVehicleLifecycleSnapshot>(std::move(skippedCandidate));
+    Check(feedback.Observe(skippedEvent, error) == NativeSourceSliceFeedbackStatus::MissingLifecycleEvent &&
+        feedback.LastCommitted() == feedbackFinal, "skipped lifecycle event cannot be inferred by feedback owner");
+    Check(*feedbackInitial == feedbackInitialCopy && feedbackInitial->Audio.empty(),
+        "held feedback snapshot remains immutable after full route");
     Check(*destroyed == destroyedCopy && destroyed->VehicleAsset == completion10,
         "held pre-eviction snapshot remains immutable");
 
@@ -301,6 +411,12 @@ int main(int argc, char** argv) try {
             static_cast<unsigned long long>(event.InputSequence), event.TimeMs);
     std::printf("source-vehicle-lifecycle-ok checks=%zu model=400 phases=spawn,enter,drive,exit,destroy,evict pool=110 refs=7bit normal-input=mode0\n",
         s_Checks);
+    std::printf("source-slice-feedback-ok actions=%zu audio=%zu hud=100,0,0 door=80/86 bank=138 slot=19 sounds=40/33 open=%u/%u/%llu close=%u/%u/%llu pcm=owned pointer-feedback=0\n",
+        feedbackFinal->Actions.size(), feedbackFinal->Audio.size(),
+        feedbackFinal->Audio[0].Clip->sound.dataSize, feedbackFinal->Audio[0].Clip->sound.rateHz,
+        static_cast<unsigned long long>(feedbackFinal->Audio[0].Clip->bufChecksum),
+        feedbackFinal->Audio[1].Clip->sound.dataSize, feedbackFinal->Audio[1].Clip->sound.rateHz,
+        static_cast<unsigned long long>(feedbackFinal->Audio[1].Clip->bufChecksum));
 } catch (const std::exception& exception) {
     std::fprintf(stderr, "source-vehicle-lifecycle-failed check=%zu %s\n", s_Checks, exception.what());
     return 1;

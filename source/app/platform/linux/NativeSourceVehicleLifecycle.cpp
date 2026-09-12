@@ -216,6 +216,8 @@ NativeSourceVehicleLifecycleStatus NativeSourceVehicleLifecycle::Tick(const Nati
     }
     auto next = *m_Published; auto events = m_Events;
     next.Generation++; next.TimeMs = nowMs; next.InputSequence = input.Sample.Seq; next.PadButtons = input.Down;
+    next.PadPressed = input.Pressed; next.PadReleased = input.Released;
+    next.PadMoveX = input.Sample.MoveX; next.PadMoveY = input.Sample.MoveY;
     const bool exitPressed = (input.Pressed & Triangle) != 0;
     bool emitted = false;
     if (next.Phase == NativeSourceVehicleLifecyclePhase::OnFoot && exitPressed) {
@@ -227,6 +229,7 @@ NativeSourceVehicleLifecycleStatus NativeSourceVehicleLifecycle::Tick(const Nati
         }
         next.Phase = NativeSourceVehicleLifecyclePhase::Entering;
         next.Task = NativeSourceVehicleLifecycleTask::EnterCarAsDriver;
+        next.DriverDoorOpen = false;
         if (!Append(next, events, NativeSourceVehicleLifecycleEventKind::EnterRequested, next.Phase,
                 next.Task, nowMs, input.Sample.Seq, error)) return Status::Overflow;
         emitted = true;
@@ -238,6 +241,7 @@ NativeSourceVehicleLifecycleStatus NativeSourceVehicleLifecycle::Tick(const Nati
     } else if (next.Phase == NativeSourceVehicleLifecyclePhase::Driving && exitPressed) {
         next.Phase = NativeSourceVehicleLifecyclePhase::Exiting;
         next.Task = NativeSourceVehicleLifecycleTask::LeaveCar;
+        next.DriverDoorOpen = false;
         if (!Append(next, events, NativeSourceVehicleLifecycleEventKind::ExitRequested, next.Phase,
                 next.Task, nowMs, input.Sample.Seq, error)) return Status::Overflow;
         emitted = true;
@@ -286,6 +290,28 @@ NativeSourceVehicleLifecycleStatus NativeSourceVehicleLifecycle::Tick(const Nati
     if (!m_Pool.Events().empty()) next.LastPoolEvent = m_Pool.Events().back().Kind;
     const auto status = Publish(std::move(next), std::move(events), error);
     if (status == Status::Ok && emitted) ++m_NextEvent;
+    return status;
+}
+
+NativeSourceVehicleLifecycleStatus NativeSourceVehicleLifecycle::ReportDriverDoor(
+    bool open, std::uint32_t nowMs, std::string& error) {
+    if (!m_Published || !m_Automobile) { error = "source lifecycle not loaded"; return Status::NotLoaded; }
+    if (m_Published->Phase != NativeSourceVehicleLifecyclePhase::Entering &&
+        m_Published->Phase != NativeSourceVehicleLifecyclePhase::Exiting) {
+        error = "driver-door task observation outside enter/leave task";
+        return Status::InvalidPhase;
+    }
+    if (nowMs < m_Published->TimeMs) { error = "backward driver-door task time"; return Status::StaleInput; }
+    if (m_Published->DriverDoorOpen == open) {
+        error = "driver-door task observation did not change state"; return Status::InvalidInput;
+    }
+    auto next = *m_Published; auto events = m_Events;
+    next.Generation++; next.TimeMs = nowMs; next.DriverDoorOpen = open;
+    if (!Append(next, events, open ? NativeSourceVehicleLifecycleEventKind::DoorOpened :
+            NativeSourceVehicleLifecycleEventKind::DoorClosed, next.Phase, next.Task,
+            nowMs, next.InputSequence, error)) return Status::Overflow;
+    const auto status = Publish(std::move(next), std::move(events), error);
+    if (status == Status::Ok) ++m_NextEvent;
     return status;
 }
 

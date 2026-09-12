@@ -25,8 +25,9 @@ enum class NativeSourceVehicleLifecycleTask : std::uint16_t {
     PlayerOnFoot = 0, EnterCarAsDriver = 701, LeaveCar = 704, CarDrive = 710,
 };
 enum class NativeSourceVehicleLifecycleEventKind : std::uint8_t {
-    Spawn, EnterRequested, DriverAttached, Drive, ExitRequested,
-    DriverDetached, Destroyed, WorldEvicted,
+    Spawn = 0, EnterRequested = 1, DriverAttached = 2, Drive = 3,
+    ExitRequested = 4, DriverDetached = 5, Destroyed = 6, WorldEvicted = 7,
+    DoorOpened = 8, DoorClosed = 9,
 };
 
 struct NativeSourceVehicleLifecycleEvent {
@@ -66,8 +67,9 @@ struct NativeSourceVehicleLifecycleSnapshot {
     std::uint64_t PoolOwner{}, PoolRevision{};
     std::size_t PoolAlive{};
     NativeCollisionVector PedPosition{};
-    bool PedInWorld{}, PedUsesCollision{}, InVehicle{};
-    std::uint8_t PadButtons{};
+    bool PedInWorld{}, PedUsesCollision{}, InVehicle{}, DriverDoorOpen{};
+    std::uint8_t PadButtons{}, PadPressed{}, PadReleased{};
+    std::int16_t PadMoveX{}, PadMoveY{};
     std::uint64_t InputSequence{};
     std::uint32_t TimeMs{};
     std::shared_ptr<const NativeCollisionSnapshot> WorldCollision;
@@ -95,6 +97,11 @@ public:
     NativeSourceVehicleLifecycleStatus Tick(const NativeSourcePadFrame&, std::uint32_t nowMs,
         float timeStep, std::array<float, 3> activeSourceFront,
         const NativeSourceVehicleLifecycleWorldTarget*, std::string& error);
+    // Address-backed enter/leave animation tasks report the actual ordinary
+    // driver-door state crossing here. It is task evidence, not a guessed
+    // input-time event and not a presentation callback.
+    NativeSourceVehicleLifecycleStatus ReportDriverDoor(bool open, std::uint32_t nowMs,
+        std::string& error);
     // Enter completion has no world position. Exit completion must supply the
     // finite, nearby SetPedOut position produced by the task boundary; this
     // owner never invents a door/world result or reads a presentation node.

@@ -34,7 +34,19 @@ struct SfxSound {
     uint32_t dataSize = 0; // bytes (always even)
     uint16_t rateHz = 0;   // per-sound SampleFrequency
     int16_t headroom = 0;  // per-sound Headroom (/100 dB, informational)
+    int32_t loopStartOffset = -1;
     std::vector<int16_t> pcm; // dataSize/2 signed samples
+    bool operator==(const SfxSound&) const = default;
+};
+
+struct SfxSingleSoundResult {
+    std::string pakName;
+    SfxSound sound;
+    uint64_t bufChecksum = 0;
+    double durationMs = 0.0;
+    double rms = 0.0;
+    int peak = 0;
+    bool operator==(const SfxSingleSoundResult&) const = default;
 };
 
 struct SfxDecodeResult {
@@ -56,3 +68,9 @@ struct SfxDecodeResult {
 // than wantSamples valid sounds exist. No synthesis, no game_sa linkage.
 bool SfxDecode_PakBank(const std::string& bankName, int wantSamples,
                        SfxDecodeResult& out);
+
+// Decodes one exact global BankLkup.dat bank/sound pair. The caller owns the
+// OS_File path root. Failure leaves `out` unchanged and reports a typed reason;
+// no neighbouring bank/sample can silently substitute for the requested ID.
+bool SfxDecode_Sound(int bankId, int soundIndex, SfxSingleSoundResult& out,
+                     std::string& error);
