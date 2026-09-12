@@ -4,7 +4,7 @@
 
 using NativeSourcePhysicalVector = std::array<float, 3>;
 struct NativeSourcePhysicalState {
-    NativeSourcePhysicalVector Position{}, MoveSpeed{};
+    NativeSourcePhysicalVector Position{}, MoveSpeed{}, FrictionMoveSpeed{};
     float Mass = 0, Elasticity = 0;
     bool InfiniteMass{}, DisableMoveForce{}, DisableZ{}, DontApplySpeed{};
     bool ApplyGravity{}, UsesCollision{};
@@ -67,3 +67,14 @@ NativeSourcePhysicalStatus NativeSourceApplyPedPair(NativeSourcePhysicalState& a
 // No elasticity term or DisableCollisionForce gate in this source branch.
 NativeSourcePhysicalStatus NativeSourceApplyPedCollision(NativeSourcePhysicalState&,
     const NativeSourcePhysicalContact&, NativeSourcePhysicalContactResult&);
+// Physical.cpp:1685–1705 and1762–1797. Accumulate friction separately from
+// velocity. Single-body ped friction writes only X/Y; pair friction preserves
+// the source's repeated first-body clamp (the second force is NOT clamped).
+NativeSourcePhysicalStatus NativeSourceApplyPedFriction(NativeSourcePhysicalState&,
+    float friction, float timeStep, const NativeSourcePhysicalContact&, bool& applied);
+NativeSourcePhysicalStatus NativeSourceApplyPedPairFriction(NativeSourcePhysicalState& a,
+    NativeSourcePhysicalState& b, float friction, float timeStep,
+    const NativeSourcePhysicalContact&, bool& applied);
+// Translation add/reset component only (Physical.cpp:2547/2549), not the
+// DisableZ ground-friction/rotation prepass or a whole physics update.
+NativeSourcePhysicalStatus NativeSourceConsumeFrictionMoveSpeed(NativeSourcePhysicalState&);

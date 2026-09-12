@@ -142,8 +142,63 @@ void CollisionSteps() {
     Check(NativeSourceCalculatePedCollisionSteps(ped, 1, true, false, plan) == Status::Ok && plan.Count == 0,
         "masked int32 FISTP overflow has defined integer-indefinite low byte, not C++ UB");
 }
+void Friction() {
+    NativeSourcePhysicalContact contact{{}, {0, 0, 1}, 1, 2};
+    auto s = Ped(); s.Mass = 1; s.MoveSpeed = {3, 4, 5}; s.FrictionMoveSpeed[2] = 7;
+    bool applied = false;
+    Check(NativeSourceApplyPedFriction(s, 1, 1, contact, applied) == Status::Ok && applied &&
+        s.MoveSpeed == NativeSourcePhysicalVector{3, 4, 5} && s.FrictionMoveSpeed == NativeSourcePhysicalVector{-0.6f, -0.8f, 7},
+        "single ped friction accumulates only XY, independently of current velocity and existing Z accumulation");
+    Check(NativeSourceConsumeFrictionMoveSpeed(s) == Status::Ok && s.MoveSpeed == NativeSourcePhysicalVector{2.4f, 3.2f, 12} &&
+        s.FrictionMoveSpeed == NativeSourcePhysicalVector{}, "source translation consumes and clears all three accumulated components");
+    const auto consumed = s;
+    Check(NativeSourceConsumeFrictionMoveSpeed(s) == Status::Ok && s == consumed, "consumption cannot apply a previous contact twice");
+    s = Ped(); s.Mass = 1; s.MoveSpeed = {3, 4, 0};
+    Check(NativeSourceApplyPedFriction(s, 100, 1, contact, applied) == Status::Ok && applied &&
+        s.FrictionMoveSpeed == NativeSourcePhysicalVector{-3, -4, 0}, "single-body friction does not overshoot tangential stop");
+    s = Ped(); s.Mass = 1; s.MoveSpeed = {0, 0, 5}; contact.Normal = {1, 0, 0};
+    Check(NativeSourceApplyPedFriction(s, 1, 1, contact, applied) == Status::Ok && applied && s.FrictionMoveSpeed == NativeSourcePhysicalVector{},
+        "vertical tangent returns true even though source ped XY-only accumulation is zero");
+    s.DisableCollisionForce = true;
+    const auto disabled = s;
+    Check(NativeSourceApplyPedFriction(s, 1, 1, contact, applied) == Status::Ok && !applied && s == disabled,
+        "single-body disabled collision-force returns false");
+    s = Ped(); s.Mass = 1; s.MoveSpeed = {5, 0, 0}; s.DisableMoveForce = s.InfiniteMass = true; contact.Normal = {0, 0, 1};
+    Check(NativeSourceApplyPedFriction(s, 1, 1, contact, applied) == Status::Ok && applied && s.FrictionMoveSpeed[0] == -1,
+        "single-body direct accumulation does not incorrectly reuse the force helper's disabled/infinite-mass gate");
+    s = Ped(); s.MoveSpeed[0] = 5;
+    Check(NativeSourceApplyPedFriction(s, 0, 1, contact, applied) == Status::Ok && applied && s.FrictionMoveSpeed == NativeSourcePhysicalVector{},
+        "zero friction still reports source tangential contact");
+    s.MoveSpeed = {0, 0, 5};
+    Check(NativeSourceApplyPedFriction(s, 1, 1, contact, applied) == Status::Ok && !applied, "no tangential velocity returns false");
+    auto a = Ped(), b = Ped(); a.Mass = b.Mass = 1; a.MoveSpeed[0] = 10;
+    Check(NativeSourceApplyPedPairFriction(a, b, 1, 1, contact, applied) == Status::Ok && applied &&
+        a.FrictionMoveSpeed[0] == -1 && b.FrictionMoveSpeed[0] == 5 && a.MoveSpeed[0] == 10 && b.MoveSpeed[0] == 0,
+        "source duplicate first clamp leaves second friction force unclamped and velocities unconsumed");
+    a = Ped(); b = Ped(); a.Mass = b.Mass = 1; a.MoveSpeed[0] = 10; b.MoveSpeed[0] = -10;
+    Check(NativeSourceApplyPedPairFriction(a, b, 1, 1, contact, applied) == Status::Ok && !applied &&
+        a.FrictionMoveSpeed == NativeSourcePhysicalVector{} && b.FrictionMoveSpeed == NativeSourcePhysicalVector{},
+        "source pair compares tangent magnitudes, not relative signed velocities");
+    a = Ped(); b = Ped(); a.Mass = b.Mass = 1; a.MoveSpeed[0] = 10; a.InfiniteMass = true;
+    Check(NativeSourceApplyPedPairFriction(a, b, 1, 1, contact, applied) == Status::Ok && applied &&
+        a.FrictionMoveSpeed[0] == 0 && b.FrictionMoveSpeed[0] == 5, "pair force helper honors infinite mass without suppressing other body");
+    a = Ped(); b = Ped(); a.Mass = b.Mass = 1; a.MoveSpeed[2] = 10; b.DisableZ = true; contact.Normal = {1, 0, 0};
+    Check(NativeSourceApplyPedPairFriction(a, b, 1, 1, contact, applied) == Status::Ok && applied &&
+        a.FrictionMoveSpeed[2] == -1 && b.FrictionMoveSpeed[2] == 0, "pair accumulates Z except where source per-body DisableZ suppresses it");
+    const auto oldA = a, oldB = b;
+    Check(NativeSourceApplyPedPairFriction(a, b, -1, 1, contact, applied) == Status::InvalidInput && applied && a == oldA && b == oldB,
+        "invalid coefficient leaves both bodies and result unchanged");
+    Check(NativeSourceApplyPedPairFriction(a, a, 1, 1, contact, applied) == Status::InvalidInput && applied && a == oldA,
+        "aliased friction pair rejected atomically");
+    contact.Normal[2] = std::numeric_limits<float>::max();
+    Check(NativeSourceApplyPedPairFriction(a, b, 1, 1, contact, applied) == Status::Overflow && applied && a == oldA && b == oldB,
+        "tangent overflow cannot become successful empty friction");
+    s = Ped(); s.MoveSpeed[0] = s.FrictionMoveSpeed[0] = std::numeric_limits<float>::max();
+    const auto huge = s;
+    Check(NativeSourceConsumeFrictionMoveSpeed(s) == Status::Overflow && s == huge, "consumption overflow retains accumulated friction and velocity");
+}
 }
 int main() {
-    Translation(); Pair(); WorldResponse(); CollisionSteps();
+    Translation(); Pair(); WorldResponse(); CollisionSteps(); Friction();
     std::printf("source-physical-ok checks=%zu source-force-and-dynamic-ped-pair no-narrowphase-or-world-route\n", s_Checks);
 }
