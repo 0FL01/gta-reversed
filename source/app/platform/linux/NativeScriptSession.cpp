@@ -753,6 +753,10 @@ NativeScriptResult NativeScriptSession::Run(NativeScriptServices& services, std:
 }
 
 NativeScriptResult NativeScriptSession::RunPass(NativeScriptServices& services, std::size_t quota) {
+    return RunPass(services, quota, nullptr);
+}
+
+NativeScriptResult NativeScriptSession::RunPass(NativeScriptServices& services, std::size_t quota, NativeScriptCommitSink* sink) {
     if (!m_Loaded || m_InService || !quota) return {NativeScriptStatus::Error, m_State.IP, 0, 0, "invalid scheduler call"};
     if (m_Faulted) return m_Fault;
     if (m_Pending && m_Pass.empty()) return {NativeScriptStatus::Error, m_State.IP, 0, 0, "main observation service outstanding"};
@@ -764,6 +768,13 @@ NativeScriptResult NativeScriptSession::RunPass(NativeScriptServices& services, 
     while (m_PassCursor < m_Pass.size()) {
         result = StepThread(services, m_Pass[m_PassCursor]);
         static_cast<NativeScriptThreadState&>(m_State) = m_Threads[0];
+        if (sink && result.Executed) {
+            const auto& thread = m_Threads[result.ThreadIndex];
+            m_InService = true;
+            sink->OnScriptCommit({m_SessionId, m_CommandSequence, thread.LastInstructionIP},
+                result.ThreadIndex, m_State, thread);
+            m_InService = false;
+        }
         count += result.Executed;
         result.Executed = count;
         if (result.Status == NativeScriptStatus::Pending || result.Status == NativeScriptStatus::Unsupported || result.Status == NativeScriptStatus::Error) return result;

@@ -281,6 +281,16 @@ struct NativeScriptMetadata {
     std::vector<std::array<char, 24>> UsedObjects;
 };
 
+// Optional observation AFTER an instruction has committed, in scheduler order.
+// No pending attempts, no ownership transfer. The callback must not allocate,
+// throw or mutate/reenter the session. References expire when it returns.
+class NativeScriptCommitSink {
+public:
+    virtual ~NativeScriptCommitSink() = default;
+    virtual void OnScriptCommit(NativeScriptRequestId id, std::size_t threadIndex,
+        const NativeScriptState& state, const NativeScriptThreadState& thread) noexcept = 0;
+};
+
 class NativeScriptSession {
 public:
     NativeScriptSession() = default;
@@ -303,6 +313,7 @@ public:
     // ClearSkip(false), per-pass death/arrest checks and ShutdownThisScript world
     // cleanup are not implemented. Unknown world opcodes fault before advancing.
     NativeScriptResult RunPass(NativeScriptServices& services, std::size_t quota);
+    NativeScriptResult RunPass(NativeScriptServices& services, std::size_t quota, NativeScriptCommitSink* sink);
     std::span<const NativeScriptThreadState> Threads() const { return m_Threads; }
     bool SeedRelationships(const std::array<std::array<std::uint32_t, 5>, 32>& relationships);
     // Caller supplies monotonic, pause-aware GAME milliseconds, not wall time.
@@ -314,6 +325,8 @@ public:
     const NativeScriptMetadata& Metadata() const { return m_Metadata; }
     bool ReadGlobal(std::uint16_t byteOffset, std::int32_t& value) const;
     bool Loaded() const { return m_Loaded; }
+    std::uint64_t SessionId() const noexcept { return m_SessionId; }
+    bool PassOutstanding() const noexcept { return m_Pending || !m_Pass.empty(); }
 
 private:
     struct Instruction {
