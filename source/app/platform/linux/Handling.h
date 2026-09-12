@@ -30,6 +30,9 @@ struct HandlingParams {
     int gears = 0; // (M) nNumberOfGears
     char driveType = '\0'; // (Q) F/R/4
     char engineType = '\0'; // (R) P/D/E
+    double centreOfMass[3]{}; // (E/F/G)
+    double percentSubmerged = 0.0; // (H)
+    double tractionMult = 0.0, tractionLoss = 0.0, tractionBias = 0.0; // (I/J/K)
     // SI values for the integrator (derived, formula logged by caller).
     double vmaxMs = 0.0; // vmaxFileKmh * (1000/3600)
     double accelSi = 0.0; // == accelFile (ms-2)
@@ -39,6 +42,7 @@ struct HandlingParams {
     char vmaxTok[32] = {};
     char accelTok[32] = {};
     char gearsTok[32] = {};
+    char handlingFlagsTok[32] = {}; // (ag), validated hex source token
 };
 
 // Loads the handling row for `model` (case-insensitive, matched UPPERCASE)
