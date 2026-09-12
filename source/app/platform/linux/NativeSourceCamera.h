@@ -67,10 +67,11 @@ public:
         std::uint32_t nowMs);
     NativeSourceCameraStatus SetDirectlyBehind(std::uint32_t nowMs, std::array<float, 3> pedForward);
     NativeSourceCameraStatus Restore(std::uint32_t nowMs, const NativeSourceCameraPlayer&,
+        std::array<float, 3> activeSourceFront,
         NativeSourceCameraSwitch = NativeSourceCameraSwitch::Interpolation,
         std::uint64_t inputSequence = 0);
     NativeSourceCameraStatus StartTransition(std::uint32_t nowMs, NativeSourceCameraMode,
-        NativeSourceCameraTarget, std::array<float, 3> activeFront,
+        NativeSourceCameraTarget, std::array<float, 3> activeSourceFront,
         NativeSourceCameraSwitch, bool playerWasOnBike, std::uint64_t inputSequence = 0);
     NativeSourceCameraStatus Advance(std::uint32_t nowMs);
     std::shared_ptr<const NativeSourceCameraSnapshot> LastCommitted() const noexcept { return m_Published; }

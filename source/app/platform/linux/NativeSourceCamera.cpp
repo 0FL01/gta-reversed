@@ -78,7 +78,7 @@ NativeSourceCameraStatus NativeSourceCamera::Initialize(std::uint64_t epoch, std
     catch (...) { return Status::Overflow; }
     const auto status = Publish(std::move(snapshot), std::move(events));
     if (status == Status::Ok) { m_NextSequence = 2; m_PedIdentity = ped; }
-    return Status::Ok;
+    return status;
 }
 
 NativeSourceCameraStatus NativeSourceCamera::SetDirectlyBehind(std::uint32_t nowMs, std::array<float, 3> forward) {
@@ -98,7 +98,8 @@ NativeSourceCameraStatus NativeSourceCamera::SetDirectlyBehind(std::uint32_t now
 }
 
 NativeSourceCameraStatus NativeSourceCamera::Restore(std::uint32_t nowMs, const NativeSourceCameraPlayer& player,
-    NativeSourceCameraSwitch switchType, std::uint64_t inputSequence) {
+    std::array<float, 3> activeSourceFront, NativeSourceCameraSwitch switchType,
+    std::uint64_t inputSequence) {
     if (!m_Published) return Status::NotLoaded;
     if (nowMs < m_Published->TimeMs) return Status::BackwardTime;
     if (!ValidState(player.State) || player.PedIdentity != m_PedIdentity ||
@@ -126,7 +127,7 @@ NativeSourceCameraStatus NativeSourceCamera::Restore(std::uint32_t nowMs, const 
         catch (...) { return Status::Overflow; }
     }
     if (m_Published->Transition.Active) return Status::TransitionOutstanding;
-    return StartTransition(nowMs, mode, target, {0, 0, -1}, switchType,
+    return StartTransition(nowMs, mode, target, activeSourceFront, switchType,
         player.PlayerWasOnBike, inputSequence);
 }
 
@@ -138,6 +139,7 @@ NativeSourceCameraStatus NativeSourceCamera::StartTransition(std::uint32_t nowMs
     if ((mode != NativeSourceCameraMode::FollowPed && mode != NativeSourceCameraMode::CamOnAString) ||
         !target.Identity || target.Kind == NativeSourceCameraTargetKind::None ||
         (mode == NativeSourceCameraMode::FollowPed && target.Kind != NativeSourceCameraTargetKind::Ped) ||
+        (mode == NativeSourceCameraMode::FollowPed && target.Identity != m_PedIdentity) ||
         (mode == NativeSourceCameraMode::CamOnAString && target.Kind != NativeSourceCameraTargetKind::Vehicle) ||
         !Finite(front) || (front[0] == 0 && front[1] == 0))
         return Status::InvalidInput;

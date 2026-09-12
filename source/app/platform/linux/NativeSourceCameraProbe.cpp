@@ -35,7 +35,7 @@ int main() {
     Check(camera.Advance(1) == NativeSourceCameraStatus::NotLoaded, "unloaded advance typed");
     Check(camera.SetDirectlyBehind(1, {1, 0, 0}) == NativeSourceCameraStatus::NotLoaded,
         "unloaded direct-behind typed");
-    Check(camera.Restore(1, Player(NativeSourceCameraPlayerState::OnFoot)) ==
+    Check(camera.Restore(1, Player(NativeSourceCameraPlayerState::OnFoot), {1, 0, 0}) ==
         NativeSourceCameraStatus::NotLoaded, "unloaded restore typed");
     Check(camera.Initialize(0, 11, 100) == NativeSourceCameraStatus::InvalidInput,
         "zero epoch rejected");
@@ -74,14 +74,14 @@ int main() {
     Check(*spawn == spawnCopy, "old spawn publication immutable");
 
     auto invalid = Player(NativeSourceCameraPlayerState::InVehicle);
-    Check(camera.Restore(102, invalid) == NativeSourceCameraStatus::InvalidInput,
+    Check(camera.Restore(102, invalid, {1, 0, 0}) == NativeSourceCameraStatus::InvalidInput,
         "in-vehicle requires vehicle owner");
     invalid = Player(NativeSourceCameraPlayerState::OnFoot);
     invalid.PedIdentity = 12;
-    Check(camera.Restore(102, invalid) == NativeSourceCameraStatus::InvalidInput,
+    Check(camera.Restore(102, invalid, {1, 0, 0}) == NativeSourceCameraStatus::InvalidInput,
         "foreign ped identity rejected");
     invalid = Player(static_cast<NativeSourceCameraPlayerState>(255));
-    Check(camera.Restore(102, invalid) == NativeSourceCameraStatus::InvalidInput,
+    Check(camera.Restore(102, invalid, {1, 0, 0}) == NativeSourceCameraStatus::InvalidInput,
         "unknown player state rejected");
     Check(camera.LastCommitted() == behind, "invalid restore retains publication");
     Check(camera.StartTransition(102, NativeSourceCameraMode::CamOnAString,
@@ -93,6 +93,10 @@ int main() {
         NativeSourceCameraSwitch::Interpolation, false) == NativeSourceCameraStatus::InvalidInput,
         "mode-target mismatch rejected");
     Check(camera.LastCommitted() == behind, "bad explicit transition retains publication");
+    Check(camera.StartTransition(102, NativeSourceCameraMode::FollowPed,
+        {NativeSourceCameraTargetKind::Ped, 99}, {1, 0, 0},
+        NativeSourceCameraSwitch::Interpolation, false) == NativeSourceCameraStatus::InvalidInput,
+        "foreign follow-ped target rejected");
 
     Check(camera.StartTransition(102, NativeSourceCameraMode::CamOnAString,
         {NativeSourceCameraTargetKind::Vehicle, 22}, {1, 0, 0},
@@ -115,7 +119,7 @@ int main() {
         entering->Events.back().To == NativeSourceCameraMode::CamOnAString,
         "enter event order and modes");
     const auto enteringCopy = *entering;
-    Check(camera.Restore(103, Player(NativeSourceCameraPlayerState::ExitCar, true)) ==
+    Check(camera.Restore(103, Player(NativeSourceCameraPlayerState::ExitCar, true), {1, 0, 0}) ==
         NativeSourceCameraStatus::TransitionOutstanding, "overlapping transition explicit");
     Check(*entering == enteringCopy && camera.LastCommitted() == entering,
         "overlap rejection retains immutable transition");
@@ -132,7 +136,7 @@ int main() {
         inCar->Events.back().Sequence == 4, "completion journal");
     Check(*entering == enteringCopy, "enter publication remains immutable after completion");
 
-    Check(camera.Restore(1453, Player(NativeSourceCameraPlayerState::InVehicle, true)) ==
+    Check(camera.Restore(1453, Player(NativeSourceCameraPlayerState::InVehicle, true), {1, 0, 0}) ==
         NativeSourceCameraStatus::Ok, "steady in-car owner accepted");
     Check(camera.LastCommitted()->Events.size() == 4 && camera.LastCommitted()->TimeMs == 1453,
         "steady owner advances without event");
@@ -168,14 +172,14 @@ int main() {
         "source bike-exit transition profile");
     Check(camera.Advance(3606) == NativeSourceCameraStatus::Ok &&
         !camera.LastCommitted()->Transition.Active, "bike exit completes at800ms");
-    Check(camera.Restore(3607, Player(NativeSourceCameraPlayerState::OnFoot)) ==
+    Check(camera.Restore(3607, Player(NativeSourceCameraPlayerState::OnFoot), {1, 0, 0}) ==
         NativeSourceCameraStatus::Ok, "steady on-foot target accepted after vehicle release");
     auto sampled = camera.LastCommitted();
-    Check(camera.Restore(3608, Player(NativeSourceCameraPlayerState::OnFoot),
+    Check(camera.Restore(3608, Player(NativeSourceCameraPlayerState::OnFoot), {1, 0, 0},
         NativeSourceCameraSwitch::Interpolation, 16) == NativeSourceCameraStatus::InvalidInput,
         "backward input sequence rejected");
     Check(camera.LastCommitted() == sampled, "bad input sequence retains publication");
-    Check(camera.Restore(3608, Player(NativeSourceCameraPlayerState::OnFoot),
+    Check(camera.Restore(3608, Player(NativeSourceCameraPlayerState::OnFoot), {1, 0, 0},
         NativeSourceCameraSwitch::Interpolation, 18) == NativeSourceCameraStatus::Ok &&
         camera.LastCommitted()->InputSequence == 18, "new sampled-input sequence published");
 
