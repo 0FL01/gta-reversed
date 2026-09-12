@@ -1,0 +1,122 @@
+#include "NativeSourcePhysical.h"
+#include <cmath>
+
+namespace {
+using Status = NativeSourcePhysicalStatus;
+using Vector = NativeSourcePhysicalVector;
+bool Finite(const Vector& value) {
+    for (const auto v : value) if (!std::isfinite(v)) return false;
+    return true;
+}
+bool Valid(const NativeSourcePhysicalState& value) {
+    return Finite(value.Position) && Finite(value.MoveSpeed) && std::isfinite(value.Mass) && value.Mass > 0 &&
+        std::isfinite(value.Elasticity) && value.Elasticity >= 0;
+}
+float Dot(const Vector& a, const Vector& b) { return a[2] * b[2] + a[1] * b[1] + a[0] * b[0]; }
+void MoveForce(NativeSourcePhysicalState& state, Vector force) {
+    if (state.InfiniteMass || state.DisableMoveForce) return;
+    if (state.DisableZ) force[2] = 0;
+    for (std::size_t i = 0; i < 3; ++i) state.MoveSpeed[i] += force[i] / state.Mass;
+}
+Vector Scale(const Vector& v, float scale) { return {v[0] * scale, v[1] * scale, v[2] * scale}; }
+}
+NativeSourcePhysicalStatus NativeSourceApplyMoveForce(NativeSourcePhysicalState& state, Vector force) {
+    if (!Valid(state) || !Finite(force)) return Status::InvalidInput;
+    auto candidate = state;
+    MoveForce(candidate, force);
+    if (!Finite(candidate.MoveSpeed)) return Status::Overflow;
+    state = candidate;
+    return Status::Ok;
+}
+NativeSourcePhysicalStatus NativeSourceApplyGravity(NativeSourcePhysicalState& state, float timeStep) {
+    if (!Valid(state) || !std::isfinite(timeStep) || timeStep < 0) return Status::InvalidInput;
+    if (!state.ApplyGravity || state.DisableMoveForce) return Status::Ok;
+    // Infinite-mass gravity applies torque through ApplyForce and centre of
+    // mass; do not silently collapse it into this translational owner.
+    if (state.InfiniteMass) return Status::Unsupported;
+    auto candidate = state;
+    if (state.UsesCollision) candidate.MoveSpeed[2] -= timeStep * 0.008f;
+    if (!Finite(candidate.MoveSpeed)) return Status::Overflow;
+    state = candidate;
+    return Status::Ok;
+}
+NativeSourcePhysicalStatus NativeSourceApplyMoveSpeed(NativeSourcePhysicalState& state, float timeStep) {
+    if (!Valid(state) || !std::isfinite(timeStep) || timeStep < 0) return Status::InvalidInput;
+    auto candidate = state;
+    if (state.DontApplySpeed || state.DisableMoveForce) candidate.MoveSpeed = {};
+    else for (std::size_t i = 0; i < 3; ++i) candidate.Position[i] += state.MoveSpeed[i] * timeStep;
+    if (!Finite(candidate.Position)) return Status::Overflow;
+    state = candidate;
+    return Status::Ok;
+}
+NativeSourcePhysicalStatus NativeSourceApplyPedPair(NativeSourcePhysicalState& a, NativeSourcePhysicalState& b,
+    const NativeSourcePhysicalContact& contact, NativeSourcePhysicalContactResult& out) {
+    if (&a == &b || !Valid(a) || !Valid(b) || !Finite(contact.Point) || !Finite(contact.Normal)) return Status::InvalidInput;
+    const auto eligible = [](const auto& s) {
+        return s.IsPed && s.DisableTurnForce && !s.Static && !s.Attached && !s.SafePosition;
+    };
+    if (!eligible(a) || !eligible(b)) return Status::Unsupported;
+    auto first = a, second = b;
+    NativeSourcePhysicalContactResult result;
+    const float speedA = Dot(a.MoveSpeed, contact.Normal), speedB = Dot(b.MoveSpeed, contact.Normal);
+    float shared = 0;
+    bool applyB = true;
+    if (a.DisableCollisionForce || a.DontApplySpeed) shared = speedA;
+    else if (b.DisableCollisionForce || b.DontApplySpeed) { shared = speedB; applyB = false; }
+    else if (!a.PushOtherPeds) { shared = speedB >= 0 ? 0 : speedB; applyB = false; }
+    else {
+        const float momentumA = a.Mass * speedA * 4.0f, momentumB = b.Mass * speedB;
+        const float numerator = momentumA + momentumB, denominator = a.Mass * 4.0f + b.Mass;
+        if (!std::isfinite(momentumA) || !std::isfinite(momentumB) || !std::isfinite(numerator) || !std::isfinite(denominator)) return Status::Overflow;
+        shared = numerator / denominator;
+    }
+    const float difference = speedA - shared;
+    if (!std::isfinite(speedA) || !std::isfinite(speedB) || !std::isfinite(shared) || !std::isfinite(difference)) return Status::Overflow;
+    if (difference >= 0) { out = result; return Status::Ok; }
+    const float elasticity = (b.Elasticity + a.Elasticity) * 0.5f;
+    const float targetA = a.HasHitWall ? shared : shared - elasticity * difference;
+    result.DamageA = (targetA - speedA) * a.Mass;
+    const auto report = [&](bool reverse, float impact) {
+        result.Reports[result.ReportCount++] = {reverse,
+            reverse ? contact.SurfaceB : contact.SurfaceA, reverse ? contact.SurfaceA : contact.SurfaceB,
+            contact.Point, contact.Normal, impact};
+    };
+    if (!a.DisableCollisionForce && !a.DontApplySpeed) {
+        MoveForce(first, Scale(contact.Normal, result.DamageA));
+        report(false, result.DamageA / a.Mass);
+    }
+    if (applyB) {
+        const float targetB = b.HasHitWall ? shared : shared - (speedB - shared) * elasticity;
+        result.DamageB = -((targetB - speedB) * b.Mass);
+        if (!b.DisableCollisionForce && !b.DontApplySpeed) {
+            // Preserve the two source multiplies rather than folding -DamageB.
+            MoveForce(second, Scale(Scale(contact.Normal, result.DamageB), -1.0f));
+            report(true, result.DamageB / b.Mass);
+        }
+    }
+    if (!std::isfinite(elasticity) || !std::isfinite(result.DamageA) || !std::isfinite(result.DamageB) ||
+        !Finite(first.MoveSpeed) || !Finite(second.MoveSpeed)) return Status::Overflow;
+    for (std::uint8_t i = 0; i < result.ReportCount; ++i) if (!std::isfinite(result.Reports[i].Impact)) return Status::Overflow;
+    result.Applied = true;
+    a = first; b = second; out = result;
+    return Status::Ok;
+}
+NativeSourcePhysicalStatus NativeSourceApplyPedCollision(NativeSourcePhysicalState& state,
+    const NativeSourcePhysicalContact& contact, NativeSourcePhysicalContactResult& out) {
+    if (!Valid(state) || !Finite(contact.Point) || !Finite(contact.Normal)) return Status::InvalidInput;
+    if (!state.IsPed || !state.DisableTurnForce || state.Attached) return Status::Unsupported;
+    const float speed = Dot(state.MoveSpeed, contact.Normal);
+    if (!std::isfinite(speed)) return Status::Overflow;
+    NativeSourcePhysicalContactResult result;
+    if (speed >= 0) { out = result; return Status::Ok; }
+    auto candidate = state;
+    result.DamageA = -(speed * state.Mass);
+    MoveForce(candidate, Scale(contact.Normal, result.DamageA));
+    const float impact = result.DamageA / state.Mass;
+    if (!Finite(candidate.MoveSpeed) || !std::isfinite(result.DamageA) || !std::isfinite(impact)) return Status::Overflow;
+    result.Applied = true;
+    result.ReportCount = 1;
+    result.Reports[0] = {false, contact.SurfaceA, contact.SurfaceB, contact.Point, contact.Normal, impact};
+    state = candidate; out = result;
+    return Status::Ok;
+}

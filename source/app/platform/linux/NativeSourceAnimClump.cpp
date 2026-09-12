@@ -31,6 +31,10 @@ bool Sync(NativeSourceAnimAssociation& to, const NativeSourceAnimAssociation& fr
 }
 
 NativeSourceAnimClump::NativeSourceAnimClump() : m_Owner(AllocateOwner()) {}
+std::uint64_t NativeSourceAnimClump::NewCallbackToken() {
+    if (m_NextCallback == std::numeric_limits<std::uint64_t>::max()) throw std::overflow_error("source animation callback identity exhausted");
+    return m_NextCallback++;
+}
 
 NativeSourceClumpStatus NativeSourceAnimClump::LoadClips(const std::vector<NativeSourceAnimClip>& clips) {
     for (std::size_t i = 0; i < clips.size(); ++i) {

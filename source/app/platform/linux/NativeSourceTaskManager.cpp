@@ -155,6 +155,23 @@ NativeSourceTaskStatus NativeSourceTaskManager::Manage() {
     }
     return Ok;
 }
+NativeSourceTaskStatus NativeSourceTaskManager::NotifyAnimations() {
+    if (m_Managing || m_Changing) return NativeSourceTaskStatus::Busy;
+    FlagGuard guard(m_Changing);
+    bool accepted = true;
+    const auto notify = [&](const auto& slots) {
+        for (const auto& root : slots) {
+            for (auto* task = root.get(); task; task = task->Child()) {
+                // Do not short-circuit: a rejected task must not cause other
+                // inactive tasks to miss their source callback delivery.
+                if (!task->ObserveAnimationUpdate()) accepted = false;
+            }
+        }
+    };
+    notify(m_Primary);
+    notify(m_Secondary);
+    return accepted ? Ok : NativeSourceTaskStatus::AnimationNotificationRejected;
+}
 NativeSourceTaskStatus NativeSourceTaskManager::Flush() {
     if (m_Managing || m_Changing) return NativeSourceTaskStatus::Busy;
     FlagGuard guard(m_Changing);

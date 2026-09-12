@@ -1,19 +1,9 @@
 #include "NativeSourceJump.h"
 #include <cmath>
 #include <limits>
-#include <atomic>
-#include <stdexcept>
 
 namespace {
 constexpr auto Ok = NativeSourceJumpStatus::Ok;
-std::atomic<std::uint64_t> s_NextCallback{1};
-std::uint64_t AllocateCallback() {
-    auto value = s_NextCallback.load(std::memory_order_relaxed);
-    while (value != std::numeric_limits<std::uint64_t>::max()) {
-        if (s_NextCallback.compare_exchange_weak(value, value + 1, std::memory_order_relaxed)) return value;
-    }
-    throw std::overflow_error("source jump callback identity exhausted");
-}
 NativeSourceMoveAssociation Movement(const NativeSourceAnimClump& clump, int id) {
     const auto* a = clump.Find(id);
     return a ? NativeSourceMoveAssociation{true, a->State.BlendAmount, a->State.CurrentTime, a->State.TotalTime} : NativeSourceMoveAssociation{};
@@ -24,7 +14,7 @@ bool Valid(const NativeSourceMoveAssociation& a) {
 }
 }
 
-NativeSourceJump::NativeSourceJump(NativeSourceAnimClump& clump) : m_Clump(&clump), m_CallbackToken(AllocateCallback()) {}
+NativeSourceJump::NativeSourceJump(NativeSourceAnimClump& clump) : m_Clump(&clump), m_CallbackToken(clump.NewCallbackToken()) {}
 NativeSourceJump::~NativeSourceJump() { DetachAnimation(); }
 
 void NativeSourceJump::DetachAnimation() {

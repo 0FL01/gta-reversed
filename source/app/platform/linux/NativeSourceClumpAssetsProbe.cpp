@@ -2,6 +2,7 @@
 #include "NativeSourceAnimClump.h"
 #include "NativeSourceJump.h"
 #include "NativeSourceWalkRun.h"
+#include "NativeSourcePedTasks.h"
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -95,5 +96,46 @@ int main(int argc, char** argv) {
     locomotion.MoveRatio = 0;
     Check(NativeSourceProcessWalkRun(clump, locomotion, movement) == NativeSourceWalkRunStatus::Ok && clump.Update(0.25f, events) == NativeSourceClumpStatus::Ok &&
         clump.Find(3) && !clump.Find(1), "real ordinary stop retires run in favor of idle");
+    {
+        NativeSourcePedTaskContext context;
+        NativeSourceAnimClump owned;
+        NativeSourceTaskManager tasks;
+        Check(owned.LoadClips(clips) == NativeSourceClumpStatus::Ok &&
+            tasks.SetPrimary(NativePlayerPrimarySlot::Default, NativeSourceMakePlayerOnFootTask(context, owned, tasks)) == NativeSourceTaskStatus::Ok,
+            "integrated tasks adopt real source clip bank");
+        const auto tick = [&](float seconds) {
+            Check(owned.Update(seconds, events) == NativeSourceClumpStatus::Ok &&
+                tasks.NotifyAnimations() == NativeSourceTaskStatus::Ok && tasks.Manage() == NativeSourceTaskStatus::Ok,
+                "real clip single-owner task tick");
+        };
+        context.MoveSample.TimeStep = 1;
+        tick(0);
+        context.MoveSample.UpDown = -120;
+        for (int i = 0; i < 35; ++i) tick(1.0f / 30);
+        Check(context.Movement.Move == NativeSourceMoveState::Run && context.MoveBlend.Ratio == 2, "real clip integrated run");
+        context.JumpJustDown = true;
+        tick(0);
+        context.JumpJustDown = false;
+        tick(0);
+        Check(context.Jump.Phase == NativeSourceJumpPhase::Launch, "real integrated launch");
+        tick(context.Jump.Animation.TotalTime);
+        Check(context.Frontier == NativeSourcePedFrontier::UnsupportedWorld && !context.Jump.UpwardForce,
+            "real clip completion cannot manufacture world contact");
+        context.JumpWorld.Status = NativeSourceJumpWorldStatus::Ready; // explicitly synthetic physical observation
+        context.AirStatus = NativeSourceJumpWorldStatus::Ready;
+        tick(0);
+        Check(owned.Find(118) && owned.Find(118)->State.DeleteToken, "real glide bound by in-air task");
+        context.Landed = true; // explicitly synthetic physical observation
+        tick(0);
+        tick(0.1f);
+        Check(context.Jump.RightFoot && !context.Jump.LeftFoot, "real integrated right-foot marker");
+        tick(0.1f);
+        Check(context.Jump.LeftFoot && !context.Jump.RightFoot, "real integrated left-foot marker");
+        tick(context.Jump.Animation.TotalTime - 0.2f);
+        Check(tasks.Active()->Type() == 0 && context.Jump.Phase == NativeSourceJumpPhase::Finished, "real landing unwinds task tree");
+        context.MoveSample.UpDown = 0;
+        tick(0.25f);
+        Check(context.Movement.Move == NativeSourceMoveState::Still && owned.Find(3) && !owned.Find(119), "real clip task route returns to idle");
+    }
     std::printf("source-clump-assets-ok checks=%zu clips=%zu reader-metadata-only no-physics-or-pose-claim\n", s_Checks, clips.size());
 }

@@ -143,6 +143,7 @@ bool NativeCollisionAssets::Parse(std::span<const uint8_t> chunk, const std::str
                 for (size_t i=0; i<groups; ++i) {
                     const auto p=end+i*28; Bounds(b.Vector(p),b.Vector(p+12));
                     Require(b.U16(p+24)<=b.U16(p+26) && b.U16(p+26)<nf,"COL face group indices");
+                    m.FaceGroups.push_back({b.Vector(p), b.Vector(p+12), b.U16(p+24), b.U16(p+26)});
                 }
             }
             Require(end>=pv, "COL vertices overlap faces");

@@ -12,6 +12,10 @@ using NativeSourceTaskPtr = std::unique_ptr<NativeSourceTask>;
 
 struct NativeSourceTaskEvent {
     std::int32_t Type = 0, Priority = 0;
+    // Qualification belongs to the source event owner. FatalFallDamage includes
+    // WEAPON_FALL + health zero + AddToEventGroup; ScriptCommand71 includes its
+    // exact priority. Unclassified events are Other, never inferred from text.
+    NativeSourceAbortEvent JumpAbort = NativeSourceAbortEvent::Other;
 };
 class NativeSourceTask {
 public:
@@ -22,6 +26,9 @@ public:
     virtual std::int32_t Type() const = 0;
     virtual bool MakeAbortable(NativeSourceAbortPriority priority, const NativeSourceTaskEvent* event) = 0;
     virtual void StopTimer(const NativeSourceTaskEvent*) {}
+    // Owned replacement for clump callbacks reaching tasks independently of
+    // which primary slot currently runs. Must not create/destroy task roots.
+    virtual bool ObserveAnimationUpdate() { return true; }
     virtual NativeSourceTask* Child() const = 0;
     NativeSourceComplexTask* Parent() const { return m_Parent; }
 protected:
@@ -55,7 +62,7 @@ private:
     NativeSourceTaskPtr m_Child;
 };
 
-enum class NativeSourceTaskStatus { Ok, InvalidSlot, Busy };
+enum class NativeSourceTaskStatus { Ok, InvalidSlot, Busy, AnimationNotificationRejected };
 // Single owner/thread. Manage may install tasks into OTHER slots (e.g. default
 // on-foot installs primary jump), but recursive management or destruction of
 // the currently executing root is rejected. Lifecycle callbacks during slot
@@ -70,6 +77,7 @@ public:
     NativeSourceTaskStatus SetPrimary(NativePlayerPrimarySlot slot, NativeSourceTaskPtr&& task);
     NativeSourceTaskStatus SetSecondary(NativePlayerSecondarySlot slot, NativeSourceTaskPtr&& task);
     NativeSourceTaskStatus Manage();
+    NativeSourceTaskStatus NotifyAnimations();
     NativeSourceTaskStatus Flush();
     NativeSourceTaskStatus FlushImmediately();
     NativeSourceTaskStatus ClearTaskEventResponse();

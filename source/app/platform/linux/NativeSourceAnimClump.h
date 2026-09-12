@@ -65,12 +65,14 @@ public:
     std::vector<NativeSourceAnimInstance> Snapshot() const { return m_Instances; }
     std::uint64_t UpdateSequence() const { return m_UpdateSequence; }
     const std::vector<NativeSourceClumpEvent>& LastEvents() const { return m_LastEvents; }
+    std::uint64_t NewCallbackToken(); // owner-scoped, never reset/recycled
 private:
     NativeSourceClumpStatus Insert(NativeSourceAnimKey key, const float* blendDelta, NativeSourceAnimHandle& out);
     NativeSourceAnimInstance* Mutable(NativeSourceAnimHandle handle);
     const std::uint64_t m_Owner;
     std::uint64_t m_NextSerial = 1;
     std::uint64_t m_UpdateSequence = 0;
+    std::uint64_t m_NextCallback = 1;
     std::vector<NativeSourceClumpEvent> m_LastEvents;
     std::vector<NativeSourceAnimClip> m_Clips;
     std::vector<NativeSourceAnimInstance> m_Instances; // head first, like source Prepend

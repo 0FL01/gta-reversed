@@ -86,6 +86,7 @@ struct NativeCollisionModel {
     struct Sphere { NativeCollisionVector Center{}; float Radius{}; NativeCollisionSurface Surface; };
     struct Box { NativeCollisionVector Min{}, Max{}; NativeCollisionSurface Surface; };
     struct Face { std::array<uint32_t, 3> Vertices{}; NativeCollisionSurface Surface; };
+    struct FaceGroup { NativeCollisionVector Min{}, Max{}; uint16_t First{}, Last{}; };
     std::string Name, Library, Unsupported;
     uint16_t HeaderId{};
     uint32_t Flags{}, Version{}, ChunkOffset{};
@@ -96,6 +97,7 @@ struct NativeCollisionModel {
     std::vector<Box> Boxes;
     std::vector<NativeCollisionVector> Vertices;
     std::vector<Face> Faces;
+    std::vector<FaceGroup> FaceGroups; // authored broadphase ranges/order; never inferred from geometry
     // Preserve all source metadata (face groups, shadow mesh, planes, V4 word).
     // Shadow mesh is rendering data, never substituted for collision faces.
     std::vector<uint8_t> SourceChunk;

@@ -157,6 +157,7 @@ public:
     explicit JumpLeaf(NativeSourceAnimClump& clump) : Jump(clump) { Check(Jump.Begin({}) == NativeSourceJumpStatus::Ok, "slot jump initialized from clip owner"); }
     int Type() const override { return 210; }
     bool ProcessPed() override { return Jump.State().LaunchFinished; }
+    bool ObserveAnimationUpdate() override { return Jump.ObserveAnimation(Jump.State().Generation) == NativeSourceJumpStatus::Ok; }
     bool MakeAbortable(NativeSourceAbortPriority priority, const NativeSourceTaskEvent*) override {
         bool accepted = false;
         return Jump.Abort(Jump.State().Generation, priority, NativeSourceAbortEvent::None, false, accepted) == NativeSourceJumpStatus::Ok && accepted;
@@ -179,8 +180,26 @@ void ClumpLifetime() {
     Check(tasks.SetPrimary(Primary::Primary, std::make_unique<JumpLeaf>(clump)) == Ok && tasks.Flush() == Ok &&
         clump.Find(116) && !clump.Find(116)->State.FinishToken, "forced slot teardown detaches task callback only");
 }
+void InactiveCallbacks() {
+    NativeSourceAnimClump clump;
+    NativeSourceAnimClip clip;
+    clip.Key = {0, 116}; clip.Duration = 0.2f; clip.Sequences = 1; clip.Partial = clip.FinishAutoRemove = true;
+    Check(clump.LoadClips({clip}) == NativeSourceClumpStatus::Ok, "inactive callback fixture");
+    Audit audit;
+    NativeSourceTaskManager tasks;
+    auto jump = std::make_unique<JumpLeaf>(clump);
+    auto* waiting = jump.get();
+    Check(tasks.SetPrimary(Primary::Primary, std::move(jump)) == Ok &&
+        tasks.SetPrimary(Primary::PhysicalResponse, std::make_unique<Leaf>(audit, 200, false)) == Ok, "physical response preempts jump slot");
+    std::vector<NativeSourceClumpEvent> events;
+    Check(clump.Update(0.2f, events) == NativeSourceClumpStatus::Ok && tasks.NotifyAnimations() == Ok && waiting->Jump.State().LaunchFinished,
+        "inactive jump still receives clump finish callback");
+    Check(tasks.Manage() == Ok && tasks.Primary(Primary::Primary) && audit.Processed == std::vector<int>{200}, "callback delivery does not execute inactive task");
+    Check(clump.Update(0.25f, events) == NativeSourceClumpStatus::Ok && tasks.NotifyAnimations() == Ok && !clump.Find(116), "clump may retire before inactive task resumes");
+    Check(tasks.SetPrimary(Primary::PhysicalResponse, nullptr) == Ok && tasks.Manage() == Ok && !tasks.Primary(Primary::Primary), "resuming task observes retained finish state");
+}
 }
 int main() {
-    Scheduling(); ControlAndTeardown(); NestedTrees(); ClumpLifetime();
+    Scheduling(); ControlAndTeardown(); NestedTrees(); ClumpLifetime(); InactiveCallbacks();
     std::printf("source-task-manager-ok checks=%zu owned-slot-flow no-full-ped-host-claim\n", s_Checks);
 }
