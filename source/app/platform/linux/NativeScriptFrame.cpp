@@ -101,6 +101,8 @@ NativeScriptFrameResult NativeScriptFrame::Drive(NativeScriptServices& services,
     m_Preparing->State = m_Session.State();
     const auto threads = m_Session.Threads();
     m_Preparing->Threads.assign(threads.begin(), threads.end());
+    const auto streamed = m_Session.StreamedScripts();
+    m_Preparing->StreamedScripts.assign(streamed.begin(), streamed.end());
     m_Preparing->Globals.resize(m_Session.Metadata().GlobalBytes / 4);
     for (std::size_t i = 0; i < m_Preparing->Globals.size(); ++i) {
         const bool read = m_Session.ReadGlobal(static_cast<std::uint16_t>(8 + i * 4), m_Preparing->Globals[i]);

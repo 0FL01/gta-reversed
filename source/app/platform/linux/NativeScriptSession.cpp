@@ -5,6 +5,7 @@
 #include <atomic>
 #include <bit>
 #include <cmath>
+#include <cstring>
 #include <exception>
 #include <limits>
 #include <numbers>
@@ -25,6 +26,8 @@ using uint64 = std::uint64_t;
 
 namespace {
 constexpr uint32 MainCapacity = 200000;
+constexpr uint32 ExternalBase = 300000;
+constexpr uint32 ExternalStride = 65536;
 std::atomic<uint64> s_NextSession{1};
 
 // Explicit little-endian reads avoid alignment, aliasing and host-endian UB.
@@ -51,6 +54,29 @@ bool ValidStat(int32 id) { return (id >= 0 && id < 82) || (id >= 120 && id < 343
 bool FitsInt(float value) {
     return std::isfinite(value) && double(value) >= std::numeric_limits<int32>::min()
         && double(value) <= std::numeric_limits<int32>::max();
+}
+
+char LowerAscii(char value) {
+    return value >= 'A' && value <= 'Z' ? char(value + ('a' - 'A')) : value;
+}
+
+bool ValidStreamedName(std::span<const char, 20> name) {
+    const auto end = std::find(name.begin(), name.end(), '\0');
+    if (end == name.begin() || end == name.end()) return false;
+    return std::all_of(name.begin(), end, [](char c) {
+        return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') || c == '_';
+    });
+}
+
+std::string StreamedMemberName(const NativeScriptStreamedDefinition& definition) {
+    std::string result;
+    for (const char c : definition.Name) {
+        if (!c) break;
+        result.push_back(LowerAscii(c));
+    }
+    result += ".scm";
+    return result;
 }
 } // namespace
 
@@ -137,9 +163,22 @@ bool NativeScriptSession::LoadMainBytes(std::span<const uint8> prefix, uint64 fi
             metadata.LargestStreamed = Word(prefix, pos + 8);
             metadata.StreamedScripts = Word(prefix, pos + 12);
             if (uint64(metadata.StreamedScripts) * 28 + 16 != length) return reject("invalid streamed table");
+            if (metadata.StreamedScripts > 82 || metadata.LargestStreamed >= ExternalStride)
+                return reject("streamed script source capacity exceeded");
+            metadata.StreamedDefinitions.resize(metadata.StreamedScripts);
             for (uint32 j = 0; j < metadata.StreamedScripts; ++j) {
-                if (Word(prefix, pos + 16 + j * 28 + 24) > metadata.LargestStreamed)
+                const auto at = pos + 16 + j * 28;
+                auto& definition = metadata.StreamedDefinitions[j];
+                std::copy_n(prefix.begin() + at, definition.Name.size(), definition.Name.begin());
+                definition.FileOffset = Word(prefix, at + 20);
+                definition.Size = Word(prefix, at + 24);
+                if (!ValidStreamedName(definition.Name) || !definition.Size ||
+                    definition.Size > metadata.LargestStreamed)
                     return reject("streamed script exceeds declared maximum");
+                for (uint32 previous = 0; previous < j; ++previous) {
+                    if (StreamedMemberName(metadata.StreamedDefinitions[previous]) == StreamedMemberName(definition))
+                        return reject("duplicate streamed script name");
+                }
             }
             break;
         case 4:
@@ -167,9 +206,15 @@ bool NativeScriptSession::LoadMainBytes(std::span<const uint8> prefix, uint64 fi
     threads.reserve(96); // source script pool capacity; references survive launch
     threads.emplace_back();
     threads[0].Active = true;
+    std::vector<std::vector<uint8>> streamedPayloads(metadata.StreamedScripts);
+    std::vector<NativeScriptStreamedState> streamedStates(metadata.StreamedScripts);
+    for (std::size_t i = 0; i < streamedStates.size(); ++i)
+        streamedStates[i].Definition = metadata.StreamedDefinitions[i];
     m_Memory = std::move(memory);
     m_Payload = std::move(payload);
     m_Mission.clear();
+    m_StreamedPayloads = std::move(streamedPayloads);
+    m_StreamedStates = std::move(streamedStates);
     m_Threads = std::move(threads);
     m_Active = {0};
     m_Active.reserve(96);
@@ -188,6 +233,119 @@ bool NativeScriptSession::LoadMainBytes(std::span<const uint8> prefix, uint64 fi
     m_CommandSequence = 0;
     m_Fault = {};
     m_PendingInstruction.reset();
+    error.clear();
+    return true;
+}
+
+bool NativeScriptSession::LoadStreamedScript(const char* gameDir, uint16 scriptIndex, std::string& error) {
+    if (!m_Loaded || !gameDir || !*gameDir || m_InService || m_Pending || !m_Pass.empty() ||
+        scriptIndex >= m_StreamedStates.size()) {
+        error = "invalid streamed-script load";
+        return false;
+    }
+    if (m_StreamedStates[scriptIndex].Loaded || m_StreamedStates[scriptIndex].Users) {
+        error = "streamed script already loaded/in use";
+        return false;
+    }
+    const std::string path = std::string(gameDir) + "/data/script/script.img";
+    if (path.size() >= 2048) { error = "streamed IMG path too long"; return false; }
+    void* file = nullptr;
+    if (OS_FileOpen(FILE_DATA_AREA_DEFAULT, &file, path.c_str(), FILE_ACCESS_READ) || !file) {
+        error = "cannot open script.img";
+        return false;
+    }
+    struct Close { void* File; ~Close() { OS_FileClose(File); } } close{file};
+    const int32 fileSize = OS_FileSize(file);
+    std::array<uint8, 8> header{};
+    if (fileSize < 8 || OS_FileRead(file, header.data(), int32(header.size())) != 0 ||
+        std::memcmp(header.data(), "VER2", 4) != 0) {
+        error = "invalid streamed IMG header";
+        return false;
+    }
+    const uint32 count = Word(header, 4);
+    const uint64 directoryEnd = 8ull + uint64(count) * 32;
+    if (!count || count > 300000 || count != m_StreamedStates.size() || directoryEnd > uint32(fileSize)) {
+        error = "invalid streamed IMG directory";
+        return false;
+    }
+    std::vector<bool> matched(m_StreamedStates.size());
+    uint64 memberOffset = 0, memberExtent = 0;
+    for (uint32 i = 0; i < count; ++i) {
+        std::array<uint8, 32> entry{};
+        if (OS_FileRead(file, entry.data(), int32(entry.size())) != 0) {
+            error = "short streamed IMG directory";
+            return false;
+        }
+        const auto zero = std::find(entry.begin() + 8, entry.end(), uint8(0));
+        if (zero == entry.end()) { error = "unterminated streamed IMG name"; return false; }
+        std::string name;
+        for (auto at = entry.begin() + 8; at != zero; ++at) name.push_back(LowerAscii(char(*at)));
+        const uint64 offset = uint64(Word(entry, 0)) * 2048;
+        const uint64 extent = uint64(Word(entry, 4)) * 2048;
+        if (offset < directoryEnd || !extent || offset + extent > uint32(fileSize)) {
+            error = "streamed IMG member out of bounds";
+            return false;
+        }
+        bool known = false;
+        for (std::size_t definitionIndex = 0; definitionIndex < m_StreamedStates.size(); ++definitionIndex) {
+            if (name != StreamedMemberName(m_StreamedStates[definitionIndex].Definition)) continue;
+            if (matched[definitionIndex] || m_StreamedStates[definitionIndex].Definition.Size > extent) {
+                error = "ambiguous/truncated streamed IMG member";
+                return false;
+            }
+            matched[definitionIndex] = true;
+            known = true;
+            if (definitionIndex == scriptIndex) {
+                memberOffset = offset;
+                memberExtent = extent;
+            }
+            break;
+        }
+        if (!known) { error = "streamed metadata/archive name mismatch"; return false; }
+    }
+    const uint32 size = m_StreamedStates[scriptIndex].Definition.Size;
+    if (!std::ranges::all_of(matched, [](bool value) { return value; }) ||
+        !memberExtent || size > memberExtent || memberOffset > std::numeric_limits<int32>::max()) {
+        error = "missing/truncated streamed IMG member";
+        return false;
+    }
+    std::vector<uint8> bytes(size);
+    OS_FileSetPosition(file, int32(memberOffset));
+    if (OS_FileGetPosition(file) != int32(memberOffset) || OS_FileRead(file, bytes.data(), int32(bytes.size())) != 0) {
+        error = "short streamed script read";
+        return false;
+    }
+    return LoadStreamedScriptBytes(scriptIndex, bytes, error);
+}
+
+bool NativeScriptSession::LoadStreamedScriptBytes(uint16 scriptIndex, std::span<const uint8> bytes, std::string& error) {
+    if (!m_Loaded || m_InService || m_Pending || !m_Pass.empty() || scriptIndex >= m_StreamedStates.size()) {
+        error = "invalid streamed-script payload load";
+        return false;
+    }
+    auto& state = m_StreamedStates[scriptIndex];
+    if (state.Loaded || state.Users || bytes.size() != state.Definition.Size || bytes.empty() ||
+        state.Generation == std::numeric_limits<uint64>::max()) {
+        error = "streamed-script payload identity mismatch";
+        return false;
+    }
+    std::vector<uint8> candidate(bytes.begin(), bytes.end());
+    m_StreamedPayloads[scriptIndex] = std::move(candidate);
+    ++state.Generation;
+    state.Loaded = true;
+    error.clear();
+    return true;
+}
+
+bool NativeScriptSession::UnloadStreamedScript(uint16 scriptIndex, std::string& error) {
+    if (!m_Loaded || m_InService || m_Pending || !m_Pass.empty() || scriptIndex >= m_StreamedStates.size()) {
+        error = "invalid streamed-script unload";
+        return false;
+    }
+    auto& state = m_StreamedStates[scriptIndex];
+    if (!state.Loaded || state.Users) { error = "streamed script not loaded or still in use"; return false; }
+    std::vector<uint8>{}.swap(m_StreamedPayloads[scriptIndex]);
+    state.Loaded = false;
     error.clear();
     return true;
 }
@@ -226,13 +384,17 @@ bool NativeScriptSession::InspectInstruction(std::size_t threadIndex, NativeScri
     candidate.BaseIP = thread.BaseIP;
     candidate.LocalCount = std::uint32_t(thread.Locals.size());
     candidate.MissionIndex = thread.MissionIndex;
+    candidate.StreamedIndex = thread.StreamedIndex;
+    candidate.StreamedGeneration = thread.StreamedGeneration;
     candidate.Opcode = instruction.Opcode;
     candidate.RawOpcode = std::uint16_t(instruction.Opcode | (instruction.Negated ? 0x8000 : 0));
-    candidate.OperandTypes = schema->Operands;
+    candidate.OperandTypes = instruction.OperandTypes;
     candidate.OperandTags = instruction.RawTags;
     candidate.ArrayCounts = instruction.ArrayCounts;
     candidate.ArrayFlags = instruction.ArrayFlags;
-    candidate.OperandCount = schema->OperandCount;
+    candidate.OperandCount = instruction.OperandCount;
+    candidate.FixedOperandCount = instruction.FixedOperandCount;
+    candidate.VariadicArguments = instruction.VariadicArguments;
     candidate.Semantics = schema->Semantics;
     candidate.Negated = instruction.Negated;
     candidate.UsesMissionCleanup = thread.UsesMissionCleanup;
@@ -245,11 +407,41 @@ bool NativeScriptSession::InspectInstruction(std::size_t threadIndex, NativeScri
     return true;
 }
 
+bool NativeScriptSession::ScriptStorage(std::size_t threadIndex, uint32 ip, std::span<const uint8>& bytes,
+    uint32& base, std::string& error) const {
+    const auto& thread = m_Threads[threadIndex];
+    if (ip < MainCapacity) {
+        bytes = m_Memory;
+        base = 0;
+        return true;
+    }
+    if (thread.ThisMustBeTheOnlyMissionRunning && ip >= MainCapacity &&
+        uint64(ip) - MainCapacity < m_Mission.size()) {
+        bytes = m_Mission;
+        base = MainCapacity;
+        return true;
+    }
+    if (thread.IsExternal && thread.StreamedIndex >= 0 &&
+        std::size_t(thread.StreamedIndex) < m_StreamedStates.size()) {
+        const auto index = std::size_t(thread.StreamedIndex);
+        const auto& streamed = m_StreamedStates[index];
+        if (streamed.Loaded && streamed.Generation == thread.StreamedGeneration &&
+            ip >= thread.BaseIP && uint64(ip) - thread.BaseIP < m_StreamedPayloads[index].size()) {
+            bytes = m_StreamedPayloads[index];
+            base = thread.BaseIP;
+            return true;
+        }
+    }
+    error = "instruction pointer has no owned script storage";
+    return false;
+}
+
 bool NativeScriptSession::Decode(std::size_t thread, uint32 ip, Instruction& d, std::string& error) const {
     const auto& state = m_Threads[thread];
-    const uint32 base = ip >= MainCapacity ? MainCapacity : 0;
-    if (base && !state.ThisMustBeTheOnlyMissionRunning) { error = "mission IP without ownership"; return false; }
-    Reader reader{base ? std::span<const uint8>(m_Mission) : std::span<const uint8>(m_Memory), ip - base};
+    std::span<const uint8> bytes;
+    uint32 base = 0;
+    if (!ScriptStorage(thread, ip, bytes, base, error)) return false;
+    Reader reader{bytes, ip - base};
     uint32 opcode = 0;
     if (!reader.Read(2, opcode)) { error = "truncated opcode"; return false; }
     d.Opcode = uint16(opcode);
@@ -257,25 +449,25 @@ bool NativeScriptSession::Decode(std::size_t thread, uint32 ip, Instruction& d, 
     if (d.Negated && ((opcode & 0x7FFF) == 0x001A || (opcode & 0x7FFF) == 0x0214)) d.Opcode &= 0x7FFF;
     const auto* signature = NativeScriptLookupSchema(d.Opcode);
     if (!signature) { error = "unsupported opcode (including NOT forms)"; return false; }
-    for (unsigned i = 0; i < signature->OperandCount; ++i) {
-        uint32 tag = 0, bits = 0;
-        if (!reader.Read(1, tag)) { error = "truncated operand tag"; return false; }
+    d.FixedOperandCount = signature->OperandCount;
+    d.VariadicArguments = signature->VariadicArguments;
+    auto decodeOperand = [&](unsigned i, O type, uint32 tag, bool variadic) {
+        uint32 bits = 0;
         d.RawTags[i] = uint8(tag);
-        const auto type = signature->Operands[i];
-        const bool output = type == O::Output || type == O::FloatOutput || type == O::InOutInteger || type == O::InOutFloat;
-        const bool floating = type == O::Float || type == O::FloatOutput || type == O::InOutFloat;
+        d.OperandTypes[i] = type;
         if (type == O::String) {
-            if (tag != 9) { error = "unsupported string operand type"; return false; }
+            if (tag != 9 || variadic) { error = "unsupported string operand type"; return false; }
             d.Tags[i] = uint8(tag);
             for (auto& c : d.Text) {
                 if (!reader.Read(1, bits)) { error = "truncated short string"; return false; }
                 c = char(bits);
             }
-            continue;
+            return true;
         }
         if (tag == 2 || tag == 3 || tag == 7 || tag == 8) {
+            const bool array = tag == 7 || tag == 8;
             if (!reader.Read(2, bits)) { error = "truncated variable operand"; return false; }
-            if (tag == 7 || tag == 8) {
+            if (array) {
                 // RunningScript::{ReadArrayInformation,CollectParameters,
                 // StoreParameters}: global base is bytes, local base is cells;
                 // the index variable is independent of the array's own bank.
@@ -287,7 +479,11 @@ bool NativeScriptSession::Decode(std::size_t thread, uint32 ip, Instruction& d, 
                 const bool global = tag == 7, globalIndex = (flags & 0x80) != 0;
                 d.ArrayCounts[i] = uint8(count);
                 d.ArrayFlags[i] = uint8(flags);
-                if ((flags & 0x7F) != (floating ? 1u : 0u) || !count) {
+                if (variadic) {
+                    if ((flags & 0x7F) > 1) { error = "invalid variadic array element type"; return false; }
+                }
+                const bool floating = type == O::Float || type == O::FloatOutput || type == O::InOutFloat;
+                if ((!variadic && (flags & 0x7F) != (floating ? 1u : 0u)) || !count) {
                     error = "invalid numeric array type/count"; return false;
                 }
                 if ((global && !IsGlobal(uint16(bits))) || (!global && bits >= state.Locals.size()) ||
@@ -308,6 +504,8 @@ bool NativeScriptSession::Decode(std::size_t thread, uint32 ip, Instruction& d, 
                 return false;
             }
             d.Tags[i] = uint8(tag);
+            const bool output = type == O::Output || type == O::FloatOutput || type == O::InOutInteger || type == O::InOutFloat;
+            const bool floating = type == O::Float || type == O::FloatOutput || type == O::InOutFloat;
             if (output) {
                 d.Values[i] = bits;
                 d.OutputGlobal = tag == 2;
@@ -317,14 +515,14 @@ bool NativeScriptSession::Decode(std::size_t thread, uint32 ip, Instruction& d, 
                         error = "nonfinite arithmetic destination"; return false;
                     }
                 }
-                continue;
+                return true;
             }
             bits = tag == 2 ? Word(m_Memory, bits) : state.Locals[bits];
-        } else if (type == O::Integer && (tag == 1 || tag == 4 || tag == 5)) {
+        } else if ((type == O::Integer || type == O::Argument) && (tag == 1 || tag == 4 || tag == 5)) {
             if (!reader.Read(tag == 1 ? 4 : tag == 4 ? 1 : 2, bits)) { error = "truncated integer"; return false; }
             if (tag == 4) bits = uint32(int32(std::bit_cast<int8>(uint8(bits))));
             if (tag == 5) bits = uint32(int32(std::bit_cast<int16>(uint16(bits))));
-        } else if (type == O::Float && tag == 6) {
+        } else if ((type == O::Float || type == O::Argument) && tag == 6) {
             if (!reader.Read(4, bits)) { error = "truncated float"; return false; }
         } else {
             error = "wrong/unsupported typed operand";
@@ -332,7 +530,28 @@ bool NativeScriptSession::Decode(std::size_t thread, uint32 ip, Instruction& d, 
         }
         d.Tags[i] = uint8(tag);
         d.Values[i] = bits;
-        if (type == O::Float && !std::isfinite(d.Float(i))) { error = "nonfinite float operand"; return false; }
+        if ((type == O::Float || (type == O::Argument && tag == 6)) &&
+            !std::isfinite(d.Float(i))) { error = "nonfinite float operand"; return false; }
+        return true;
+    };
+    for (unsigned i = 0; i < signature->OperandCount; ++i) {
+        uint32 tag = 0;
+        if (!reader.Read(1, tag)) { error = "truncated operand tag"; return false; }
+        if (!decodeOperand(i, signature->Operands[i], tag, false)) return false;
+        ++d.OperandCount;
+    }
+    if (signature->VariadicArguments) {
+        for (unsigned arguments = 0;; ++arguments) {
+            uint32 tag = 0;
+            if (!reader.Read(1, tag)) { error = "missing variadic argument terminator"; return false; }
+            if (!tag) break;
+            if (arguments >= 32 || d.OperandCount >= NativeScriptMaxOperands) {
+                error = "new script argument capacity exceeded";
+                return false;
+            }
+            if (!decodeOperand(d.OperandCount, O::Argument, tag, true)) return false;
+            ++d.OperandCount;
+        }
     }
     d.Next = base + uint32(reader.Pos);
     return true;
@@ -343,15 +562,22 @@ uint32 NativeScriptSession::Target(std::size_t thread, int32 target) const {
 }
 
 bool NativeScriptSession::IsTarget(std::size_t thread, int32 label) const {
-    if (label < 0 && (!m_Threads[thread].BaseIP || uint64(-int64(label)) >= m_Mission.size())) return false;
+    // RunningScript::UpdatePC interprets every nonnegative label in the shared
+    // main ScriptSpace. Mission/streamed-local labels are negative offsets from
+    // BaseIP, even though this owner represents their addresses numerically.
+    if (label >= 0 && uint32(label) >= MainCapacity) return false;
+    if (label < 0 && !m_Threads[thread].BaseIP) return false;
+    if (label < 0 && uint64(m_Threads[thread].BaseIP) + uint64(-int64(label)) > std::numeric_limits<uint32>::max()) return false;
     const uint32 target = Target(thread, label);
-    const bool mission = target >= MainCapacity;
-    if (mission && (!m_Threads[thread].ThisMustBeTheOnlyMissionRunning || target - MainCapacity >= m_Mission.size())) return false;
-    if (!mission && std::find(m_Headers.begin(), m_Headers.end(), target) != m_Headers.end()) return true;
-    if (!mission && (target < m_Metadata.CodeStart || target >= m_Metadata.MainSize)) return false;
+    std::span<const uint8> bytes;
+    uint32 base = 0;
+    std::string storageError;
+    if (!ScriptStorage(thread, target, bytes, base, storageError)) return false;
+    if (!base && std::find(m_Headers.begin(), m_Headers.end(), target) != m_Headers.end()) return true;
+    if (!base && (target < m_Metadata.CodeStart || target >= m_Metadata.MainSize)) return false;
     // Prove an instruction boundary by typed decoding, never searching bytes.
     // This bounded slice rejects forward labels beyond an unknown instruction.
-    uint32 pos = mission ? MainCapacity : m_Metadata.CodeStart;
+    uint32 pos = base ? base : m_Metadata.CodeStart;
     while (pos < target) {
         Instruction d;
         std::string error;
@@ -397,6 +623,7 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
     auto invalid = [&](const char* message) { return Fail(thread, NativeScriptStatus::Error, rawOpcode, message); };
     std::vector<uint8> mission;
     std::optional<NativeScriptThreadState> newThread;
+    int32 streamedLaunch = -1;
     uint32 arithmeticResult = 0;
     if (d.Opcode >= 0x0008 && d.Opcode <= 0x0017) {
         if (d.OutputGlobal != ((d.Opcode & 2) == 0)) return invalid("arithmetic variable bank mismatch");
@@ -432,6 +659,25 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         for (unsigned i = 0; i < m_Headers.size(); ++i) {
             if (state.IP == m_Headers[i] && uint32(a) != m_HeaderTargets[i]) return invalid("modified SCM header target");
         }
+        break;
+    case 0x004F:
+        if (a < 0 || uint32(a) >= MainCapacity || !IsTarget(thread, a))
+            return invalid("START_NEW_SCRIPT target is not a main instruction boundary");
+        if (m_Threads.size() >= 96 && m_Idle.empty()) return invalid("script thread pool exhausted");
+        newThread.emplace();
+        newThread->IP = uint32(a);
+        newThread->TimeMs = state.TimeMs;
+        newThread->Active = true;
+        if (!m_Idle.empty()) newThread->Generation = m_Threads[m_Idle.back()].Generation + 1;
+        for (unsigned i = d.FixedOperandCount; i < d.OperandCount; ++i)
+            newThread->Locals[i - d.FixedOperandCount] = d.Values[i];
+        break;
+    case 0x0050:
+        if (state.StackDepth >= state.ReturnStack.size()) return invalid("script return stack overflow");
+        if (!IsTarget(thread, a)) return invalid("GOSUB target is not a supported instruction boundary");
+        break;
+    case 0x0051:
+        if (!state.StackDepth) return invalid("script return stack underflow");
         break;
     case 0x042C: case 0x030D: case 0x0997:
         if (a < 0) return invalid("negative startup total");
@@ -483,6 +729,33 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         newThread->Locals.assign(1024, 0); // WipeLocalVariableMemoryForMissionScript
         break;
     }
+    case 0x0913: {
+        if (a < 0 || std::size_t(a) >= m_StreamedStates.size()) return invalid("streamed script ID out of bounds");
+        auto& streamed = m_StreamedStates[std::size_t(a)];
+        if (!streamed.Loaded || m_StreamedPayloads[std::size_t(a)].empty()) return invalid("streamed script is not loaded");
+        if (streamed.Users >= std::numeric_limits<uint8>::max()) return invalid("streamed script user count overflow");
+        if (m_Threads.size() >= 96 && m_Idle.empty()) return invalid("script thread pool exhausted");
+        newThread.emplace();
+        newThread->BaseIP = ExternalBase + uint32(a) * ExternalStride;
+        newThread->IP = newThread->BaseIP;
+        newThread->TimeMs = state.TimeMs;
+        newThread->Active = newThread->IsExternal = true;
+        newThread->StreamedIndex = a;
+        newThread->StreamedGeneration = streamed.Generation;
+        if (!m_Idle.empty()) newThread->Generation = m_Threads[m_Idle.back()].Generation + 1;
+        for (unsigned i = d.FixedOperandCount; i < d.OperandCount; ++i)
+            newThread->Locals[i - d.FixedOperandCount] = d.Values[i];
+        streamedLaunch = a;
+        break;
+    }
+    case 0x004E:
+        if (state.IsExternal && (state.StreamedIndex < 0 ||
+            std::size_t(state.StreamedIndex) >= m_StreamedStates.size() ||
+            !m_StreamedStates[std::size_t(state.StreamedIndex)].Loaded ||
+            m_StreamedStates[std::size_t(state.StreamedIndex)].Generation != state.StreamedGeneration ||
+            !m_StreamedStates[std::size_t(state.StreamedIndex)].Users))
+            return invalid("external thread has no matching streamed-script user");
+        break;
     default: break;
     }
 
@@ -611,6 +884,12 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         if (state.AndOrState == 1 || state.AndOrState == 21) state.AndOrState = 0;
         else if (state.AndOrState) --state.AndOrState;
     };
+    auto launchPrepared = [&]() {
+        const auto slot = m_Idle.empty() ? m_Threads.size() : m_Idle.back();
+        if (m_Idle.empty()) m_Threads.push_back(std::move(*newThread));
+        else { m_Idle.pop_back(); m_Threads[slot] = std::move(*newThread); }
+        m_Active.insert(m_Active.begin(), slot);
+    };
     state.Waiting = false;
     m_Pending = false;
     m_PendingInstruction.reset();
@@ -620,6 +899,15 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         state.Waiting = true;
         break;
     case 0x0002: d.Next = Target(thread, a); break;
+    case 0x004F: launchPrepared(); break;
+    case 0x0050:
+        state.ReturnStack[state.StackDepth++] = d.Next;
+        d.Next = Target(thread, a);
+        break;
+    case 0x0051:
+        d.Next = state.ReturnStack[--state.StackDepth];
+        state.ReturnStack[state.StackDepth] = 0;
+        break;
     case 0x0004: case 0x0005: case 0x0006: case 0x0007: case 0x0086: write(0, d.Values[1]); break;
     case 0x0008: case 0x0009: case 0x000A: case 0x000B:
     case 0x000C: case 0x000D: case 0x000E: case 0x000F:
@@ -647,6 +935,7 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         // cleanup is outside this slice; no mission world allocations supported.
         state.Active = false;
         if (state.ThisMustBeTheOnlyMissionRunning) m_State.AlreadyRunningMission = false;
+        if (state.IsExternal) --m_StreamedStates[std::size_t(state.StreamedIndex)].Users;
         std::erase(m_Active, thread);
         m_Idle.push_back(thread); // AddScriptToList(idle): head insertion
         break;
@@ -705,13 +994,15 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
     }
     case 0x0417: {
         m_Mission = std::move(mission);
-        const auto slot = m_Idle.empty() ? m_Threads.size() : m_Idle.back();
-        if (m_Idle.empty()) m_Threads.push_back(std::move(*newThread));
-        else { m_Idle.pop_back(); m_Threads[slot] = std::move(*newThread); }
-        m_Active.insert(m_Active.begin(), slot);
+        launchPrepared();
         m_State.AlreadyRunningMission = true;
         break;
     }
+    case 0x0911: break; // genuine REGISTER_STREAMED_SCRIPT NOP
+    case 0x0913:
+        launchPrepared();
+        ++m_StreamedStates[std::size_t(streamedLaunch)].Users;
+        break;
     case 0x06CF: break; // genuine DISPLAY_TIMER_BARS NOP: UnusedCommands.cpp
     default: break; // service commands committed their effects on Ready
     }

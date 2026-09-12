@@ -29,6 +29,9 @@ struct NativeScriptFrameSnapshot {
     bool HasPad = false;
     NativeScriptState State;
     std::vector<NativeScriptThreadState> Threads;
+    // Value-only external registry state; script payload bytes remain private
+    // to NativeScriptSession and cannot escape through presentation snapshots.
+    std::vector<NativeScriptStreamedState> StreamedScripts;
     // Cell i corresponds to source global byte offset 8 + 4*i.
     std::vector<std::int32_t> Globals;
     std::vector<NativeScriptFrameEvent> Events;

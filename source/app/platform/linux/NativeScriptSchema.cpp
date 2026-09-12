@@ -21,7 +21,10 @@ constexpr NativeScriptOpcodeSchema s_Schema[]{
     {0x0014, {O::InOutInteger, O::Integer}, 2, C::Implemented}, {0x0015, {O::InOutFloat, O::Float}, 2, C::Implemented},
     {0x0016, {O::InOutInteger, O::Integer}, 2, C::Implemented}, {0x0017, {O::InOutFloat, O::Float}, 2, C::Implemented},
     {0x001A, {O::Integer, O::Integer}, 2, C::Implemented},
+    {0x004F, {O::Integer}, 1, C::Implemented, true},
+    {0x0050, {O::Integer}, 1, C::Implemented}, {0x0051, {}, 0, C::Implemented},
     {0x004D, {O::Integer}, 1, C::Implemented}, {0x004E, {}, 0, C::Implemented},
+    {0x00C5, {}, 0, C::Unsupported}, {0x00C6, {}, 0, C::Unsupported},
     {0x00D6, {O::Integer}, 1, C::Implemented}, {0x03A4, {O::String}, 1, C::Implemented},
     {0x016A, {O::Integer, O::Integer}, 2, C::Implemented},
     {0x042C, {O::Integer}, 1, C::Implemented}, {0x030D, {O::Integer}, 1, C::Implemented},
@@ -52,6 +55,10 @@ constexpr NativeScriptOpcodeSchema s_Schema[]{
     {0x014B, {O::Float, O::Float, O::Float, O::Float, O::Integer, O::Integer, O::Integer,
               O::Integer, O::Integer, O::Integer, O::Integer, O::Integer, O::Output}, 13, C::Implemented},
     {0x014C, {O::Integer, O::Integer}, 2, C::Implemented},
+    // Streamed registration opcodes are genuine source NOPs. 0913 starts an
+    // already-loaded script and copies its tag-zero-terminated arguments.
+    {0x0911, {}, 0, C::Implemented},
+    {0x0913, {O::Integer}, 1, C::Implemented, true},
     // First strict P4 frontier. Full form is classified, but World::AddStuntJump
     // and its registry/runtime owner are deliberately not fabricated here.
     {0x0814, {O::Float, O::Float, O::Float, O::Float, O::Float, O::Float,

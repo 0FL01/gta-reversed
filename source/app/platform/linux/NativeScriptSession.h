@@ -233,7 +233,10 @@ struct NativeScriptThreadState {
     bool Active = false, Waiting = false, UsesMissionCleanup = false;
     bool ThisMustBeTheOnlyMissionRunning = false, IsExternal = false;
     std::uint32_t BaseIP = 0;
-    std::int32_t MissionIndex = -1;
+    std::int32_t MissionIndex = -1, StreamedIndex = -1;
+    std::uint64_t StreamedGeneration = 0;
+    std::array<std::uint32_t, 8> ReturnStack{}; // CRunningScript::MAX_STACK_DEPTH
+    std::uint8_t StackDepth = 0;
     bool Condition = false;
     std::uint8_t AndOrState = 0;
     std::uint64_t Commands = 0;
@@ -242,6 +245,20 @@ struct NativeScriptThreadState {
     std::uint32_t LastInstructionIP = 0;
     std::uint16_t LastOpcode = 0;
     bool operator==(const NativeScriptThreadState&) const = default;
+};
+
+struct NativeScriptStreamedDefinition {
+    std::array<char, 20> Name{};
+    std::uint32_t FileOffset = 0, Size = 0;
+    bool operator==(const NativeScriptStreamedDefinition&) const = default;
+};
+
+struct NativeScriptStreamedState {
+    NativeScriptStreamedDefinition Definition;
+    std::uint64_t Generation = 0;
+    std::uint8_t Users = 0; // CStreamedScriptInfo::m_NumberOfUsers
+    bool Loaded = false;
+    bool operator==(const NativeScriptStreamedState&) const = default;
 };
 
 struct NativeScriptState : NativeScriptThreadState {
@@ -281,6 +298,7 @@ struct NativeScriptMetadata {
     std::uint32_t StreamedScripts = 0, LargestStreamed = 0, Build = 0;
     std::vector<std::uint32_t> MissionOffsets;
     std::vector<std::array<char, 24>> UsedObjects;
+    std::vector<NativeScriptStreamedDefinition> StreamedDefinitions;
 };
 
 // Optional observation AFTER an instruction has committed, in scheduler order.
@@ -305,6 +323,13 @@ public:
     // Requires the complete owned file (size == fileBytes), including missions.
     // No runtime mission IO; immutable payload is retained separately from globals.
     bool LoadMainBytes(std::span<const std::uint8_t> prefix, std::uint64_t fileBytes, std::string& error);
+    // Source CStreamedScripts ownership: metadata index is the script-file ID.
+    // Load reads exactly the named VER2 member's declared unpadded byte count;
+    // unload is legal only at zero active users. Failed operations retain the
+    // previous generation and payload. No script bytes escape this owner.
+    bool LoadStreamedScript(const char* gameDir, std::uint16_t scriptIndex, std::string& error);
+    bool LoadStreamedScriptBytes(std::uint16_t scriptIndex, std::span<const std::uint8_t> bytes, std::string& error);
+    bool UnloadStreamedScript(std::uint16_t scriptIndex, std::string& error);
     NativeScriptResult Step(NativeScriptServices& services);
     NativeScriptResult Run(NativeScriptServices& services, std::size_t quota);
     // Step/Run remain main-thread-only observation helpers. RunPass processes
@@ -317,6 +342,7 @@ public:
     NativeScriptResult RunPass(NativeScriptServices& services, std::size_t quota);
     NativeScriptResult RunPass(NativeScriptServices& services, std::size_t quota, NativeScriptCommitSink* sink);
     std::span<const NativeScriptThreadState> Threads() const { return m_Threads; }
+    std::span<const NativeScriptStreamedState> StreamedScripts() const { return m_StreamedStates; }
     bool SeedRelationships(const std::array<std::array<std::uint32_t, 5>, 32>& relationships);
     // Caller supplies monotonic, pause-aware GAME milliseconds, not wall time.
     // Advances wake/local timers and source fade state. Clock is the 00C0 setter
@@ -338,18 +364,23 @@ private:
     struct Instruction {
         std::uint16_t Opcode = 0;
         std::uint32_t Next = 0;
-        std::array<std::uint32_t, 16> Values{};
+        std::array<std::uint32_t, NativeScriptMaxOperands> Values{};
         std::uint32_t OutputValue = 0; // decoded old cell for checked in-place arithmetic
         std::array<char, 8> Text{};
-        std::array<std::uint8_t, 16> Tags{}; // normalized scalar/array operand bank
-        std::array<std::uint8_t, 16> RawTags{}; // exact source operand form
-        std::array<std::uint8_t, 16> ArrayCounts{}, ArrayFlags{};
+        std::array<NativeScriptOperandType, NativeScriptMaxOperands> OperandTypes{};
+        std::array<std::uint8_t, NativeScriptMaxOperands> Tags{}; // normalized scalar/array operand bank
+        std::array<std::uint8_t, NativeScriptMaxOperands> RawTags{}; // exact source operand form
+        std::array<std::uint8_t, NativeScriptMaxOperands> ArrayCounts{}, ArrayFlags{};
+        std::uint8_t OperandCount = 0, FixedOperandCount = 0;
+        bool VariadicArguments = false;
         bool OutputGlobal = true;
         bool Negated = false;
         std::int32_t Int(unsigned i) const;
         float Float(unsigned i) const;
     };
     bool Decode(std::size_t thread, std::uint32_t ip, Instruction& instruction, std::string& error) const;
+    bool ScriptStorage(std::size_t thread, std::uint32_t ip, std::span<const std::uint8_t>& bytes,
+        std::uint32_t& base, std::string& error) const;
     bool IsGlobal(std::uint16_t byteOffset) const;
     bool IsTarget(std::size_t thread, std::int32_t target) const;
     std::uint32_t Target(std::size_t thread, std::int32_t target) const;
@@ -360,6 +391,8 @@ private:
     NativeScriptMetadata m_Metadata;
     std::vector<std::uint8_t> m_Memory;
     std::vector<std::uint8_t> m_Payload, m_Mission;
+    std::vector<std::vector<std::uint8_t>> m_StreamedPayloads;
+    std::vector<NativeScriptStreamedState> m_StreamedStates;
     std::vector<NativeScriptThreadState> m_Threads;
     std::vector<std::size_t> m_Active, m_Idle, m_Pass;
     std::size_t m_PassCursor = 0;

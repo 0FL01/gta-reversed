@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <span>
 #include <string_view>
@@ -16,6 +17,9 @@ enum class NativeScriptOperandType : std::uint8_t {
     FloatOutput,
     InOutInteger,
     InOutFloat,
+    // One tag0-terminated START_NEW_* parameter. Variable operands carry raw
+    // 32-bit union data, so their int/float intent is not encoded in bytecode.
+    Argument,
 };
 
 enum class NativeScriptSemanticCoverage : std::uint8_t {
@@ -23,11 +27,17 @@ enum class NativeScriptSemanticCoverage : std::uint8_t {
     Unsupported,
 };
 
+constexpr std::size_t NativeScriptMaxFixedOperands = 16;
+// START_NEW_SCRIPT/START_NEW_STREAMED_SCRIPT have one fixed operand followed
+// by up to all 32 source local-parameter slots and a tag-zero terminator.
+constexpr std::size_t NativeScriptMaxOperands = 33;
+
 struct NativeScriptOpcodeSchema {
     std::uint16_t Opcode = 0;
-    std::array<NativeScriptOperandType, 16> Operands{};
+    std::array<NativeScriptOperandType, NativeScriptMaxFixedOperands> Operands{};
     std::uint8_t OperandCount = 0;
     NativeScriptSemanticCoverage Semantics = NativeScriptSemanticCoverage::Unsupported;
+    bool VariadicArguments = false;
 };
 
 std::span<const NativeScriptOpcodeSchema> NativeScriptSchemaEntries() noexcept;

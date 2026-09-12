@@ -21,7 +21,8 @@ void Hash(std::uint64_t& hash, T value) noexcept {
 
 NativeScriptCorpusThread ThreadOf(const NativeScriptInstructionForm& form) {
     return {form.ThreadIndex, form.BaseIP, form.LocalCount, form.ThreadGeneration,
-        form.MissionIndex, form.ThreadForm, form.UsesMissionCleanup,
+        form.MissionIndex, form.StreamedIndex, form.StreamedGeneration,
+        form.ThreadForm, form.UsesMissionCleanup,
         form.ExclusiveMission, form.External};
 }
 
@@ -29,9 +30,11 @@ bool SameSiteForm(const NativeScriptInstructionForm& a, const NativeScriptInstru
     return a.Session == b.Session && a.ThreadGeneration == b.ThreadGeneration &&
         a.ThreadIndex == b.ThreadIndex && a.IP == b.IP && a.NextIP == b.NextIP &&
         a.BaseIP == b.BaseIP && a.LocalCount == b.LocalCount && a.MissionIndex == b.MissionIndex &&
+        a.StreamedIndex == b.StreamedIndex && a.StreamedGeneration == b.StreamedGeneration &&
         a.Opcode == b.Opcode && a.RawOpcode == b.RawOpcode && a.OperandTypes == b.OperandTypes &&
         a.OperandTags == b.OperandTags && a.ArrayCounts == b.ArrayCounts &&
         a.ArrayFlags == b.ArrayFlags && a.OperandCount == b.OperandCount &&
+        a.FixedOperandCount == b.FixedOperandCount && a.VariadicArguments == b.VariadicArguments &&
         a.Semantics == b.Semantics && a.ThreadForm == b.ThreadForm &&
         a.Negated == b.Negated && a.UsesMissionCleanup == b.UsesMissionCleanup &&
         a.ExclusiveMission == b.ExclusiveMission && a.External == b.External;
@@ -66,31 +69,46 @@ bool NativeScriptCorpusManifest::ObserveInPlace(const NativeScriptInstructionFor
         case NativeScriptOperandType::InOutInteger:
         case NativeScriptOperandType::InOutFloat:
             return tag == 2 || tag == 3 || tag == 7 || tag == 8;
+        case NativeScriptOperandType::Argument:
+            return tag >= 1 && tag <= 8;
         }
         return false;
     };
     if (!form.Session || !form.Sequence || !form.ThreadGeneration || !form.LocalCount ||
         !schema || form.RawOpcode != std::uint16_t(form.Opcode | (form.Negated ? 0x8000 : 0)) ||
-        form.OperandCount != schema->OperandCount || form.OperandTypes != schema->Operands ||
+        form.FixedOperandCount != schema->OperandCount ||
+        form.VariadicArguments != schema->VariadicArguments ||
+        (!form.VariadicArguments && form.OperandCount != form.FixedOperandCount) ||
+        (form.VariadicArguments && (form.OperandCount < form.FixedOperandCount ||
+            form.OperandCount - form.FixedOperandCount > 32)) ||
         form.Semantics != schema->Semantics || form.NextIP <= form.IP) {
         error = "invalid/unclassified instruction form";
         return false;
+    }
+    for (unsigned i = 0; i < form.FixedOperandCount; ++i) {
+        if (form.OperandTypes[i] != schema->Operands[i]) {
+            error = "operand types contradict classified schema";
+            return false;
+        }
     }
     if (m_Session && m_Session != form.Session) {
         error = "mixed script sessions in corpus";
         return false;
     }
     if (form.ThreadForm == NativeScriptThreadForm::Main &&
-        (form.BaseIP || form.MissionIndex != -1 || form.UsesMissionCleanup || form.ExclusiveMission || form.External)) {
+        (form.BaseIP || form.MissionIndex != -1 || form.StreamedIndex != -1 || form.StreamedGeneration ||
+            form.UsesMissionCleanup || form.ExclusiveMission || form.External)) {
         error = "invalid main-thread form";
         return false;
     }
     if (form.ThreadForm == NativeScriptThreadForm::Mission &&
-        (form.BaseIP != 200000 || form.MissionIndex < 0 || !form.UsesMissionCleanup || !form.ExclusiveMission || form.External)) {
+        (form.BaseIP != 200000 || form.MissionIndex < 0 || form.StreamedIndex != -1 ||
+            form.StreamedGeneration || !form.UsesMissionCleanup || !form.ExclusiveMission || form.External)) {
         error = "invalid mission-thread form";
         return false;
     }
-    if (form.ThreadForm == NativeScriptThreadForm::Streamed && !form.External) {
+    if (form.ThreadForm == NativeScriptThreadForm::Streamed &&
+        (!form.External || form.MissionIndex != -1 || form.StreamedIndex < 0 || !form.StreamedGeneration)) {
         error = "invalid streamed-thread form";
         return false;
     }
@@ -104,10 +122,12 @@ bool NativeScriptCorpusManifest::ObserveInPlace(const NativeScriptInstructionFor
             error = "invalid array operand form";
             return false;
         }
+        const bool argument = form.OperandTypes[i] == NativeScriptOperandType::Argument;
         const bool floating = form.OperandTypes[i] == NativeScriptOperandType::Float ||
             form.OperandTypes[i] == NativeScriptOperandType::FloatOutput ||
             form.OperandTypes[i] == NativeScriptOperandType::InOutFloat;
-        if (array && (form.ArrayFlags[i] & 0x7F) != (floating ? 1 : 0)) {
+        if (array && (argument ? (form.ArrayFlags[i] & 0x7F) > 1 :
+            (form.ArrayFlags[i] & 0x7F) != (floating ? 1 : 0))) {
             error = "array element type contradicts schema";
             return false;
         }
@@ -150,14 +170,17 @@ NativeScriptCorpusSummary NativeScriptCorpusManifest::Summary() const {
     result.Sites = m_Sites.size();
     result.Threads = m_Threads.size();
     std::set<std::uint16_t> opcodes;
-    using OperandKey = std::tuple<std::uint16_t, std::uint8_t,
-        std::array<NativeScriptOperandType, 16>, std::array<std::uint8_t, 16>,
-        std::array<std::uint8_t, 16>, std::array<std::uint8_t, 16>>;
+    using OperandKey = std::tuple<std::uint16_t, std::uint8_t, std::uint8_t, bool,
+        std::array<NativeScriptOperandType, NativeScriptMaxOperands>,
+        std::array<std::uint8_t, NativeScriptMaxOperands>,
+        std::array<std::uint8_t, NativeScriptMaxOperands>,
+        std::array<std::uint8_t, NativeScriptMaxOperands>>;
     std::set<OperandKey> forms;
     for (const auto& site : m_Sites) {
         result.Encounters += site.Visits;
         opcodes.insert(site.Form.RawOpcode);
         forms.emplace(site.Form.RawOpcode, site.Form.OperandCount,
+            site.Form.FixedOperandCount, site.Form.VariadicArguments,
             site.Form.OperandTypes, site.Form.OperandTags,
             site.Form.ArrayCounts, site.Form.ArrayFlags);
         if (site.Form.ThreadForm == NativeScriptThreadForm::Main) ++result.MainSites;
@@ -178,11 +201,13 @@ std::uint64_t NativeScriptCorpusManifest::Fingerprint() const noexcept {
         Hash(hash, thread.Generation); Hash(hash, thread.MissionIndex); Hash(hash, std::uint8_t(thread.Form));
         Hash(hash, std::uint8_t(thread.UsesMissionCleanup)); Hash(hash, std::uint8_t(thread.ExclusiveMission));
         Hash(hash, std::uint8_t(thread.External));
+        if (thread.External) { Hash(hash, thread.StreamedIndex); Hash(hash, thread.StreamedGeneration); }
     }
     for (const auto& site : m_Sites) {
         const auto& form = site.Form;
         Hash(hash, form.ThreadIndex); Hash(hash, form.ThreadGeneration); Hash(hash, form.IP); Hash(hash, form.NextIP);
         Hash(hash, form.Opcode); Hash(hash, form.RawOpcode); Hash(hash, form.OperandCount);
+        if (form.VariadicArguments) { Hash(hash, form.FixedOperandCount); Hash(hash, std::uint8_t(1)); }
         Hash(hash, std::uint8_t(form.Semantics)); Hash(hash, std::uint8_t(form.ThreadForm));
         for (unsigned i = 0; i < form.OperandCount; ++i) {
             Hash(hash, std::uint8_t(form.OperandTypes[i])); Hash(hash, form.OperandTags[i]);

@@ -14,17 +14,19 @@ enum class NativeScriptThreadForm : std::uint8_t { Main, Mission, Streamed };
 struct NativeScriptInstructionForm {
     std::uint64_t Session = 0, Sequence = 0, ThreadGeneration = 0;
     std::uint32_t ThreadIndex = 0, IP = 0, NextIP = 0, BaseIP = 0, LocalCount = 0;
-    std::int32_t MissionIndex = -1;
+    std::int32_t MissionIndex = -1, StreamedIndex = -1;
+    std::uint64_t StreamedGeneration = 0;
     std::uint16_t Opcode = 0, RawOpcode = 0;
-    std::array<NativeScriptOperandType, 16> OperandTypes{};
-    std::array<std::uint8_t, 16> OperandTags{};
+    std::array<NativeScriptOperandType, NativeScriptMaxOperands> OperandTypes{};
+    std::array<std::uint8_t, NativeScriptMaxOperands> OperandTags{};
     // Tag7/8 carry declared length and flags (index bank + element type).
     // Scalar operands keep both zero.
-    std::array<std::uint8_t, 16> ArrayCounts{}, ArrayFlags{};
-    std::uint8_t OperandCount = 0;
+    std::array<std::uint8_t, NativeScriptMaxOperands> ArrayCounts{}, ArrayFlags{};
+    std::uint8_t OperandCount = 0, FixedOperandCount = 0;
     NativeScriptSemanticCoverage Semantics = NativeScriptSemanticCoverage::Unsupported;
     NativeScriptThreadForm ThreadForm = NativeScriptThreadForm::Main;
-    bool Negated = false, UsesMissionCleanup = false, ExclusiveMission = false, External = false;
+    bool VariadicArguments = false, Negated = false, UsesMissionCleanup = false;
+    bool ExclusiveMission = false, External = false;
     bool operator==(const NativeScriptInstructionForm&) const = default;
 };
 
@@ -37,7 +39,8 @@ struct NativeScriptCorpusSite {
 struct NativeScriptCorpusThread {
     std::uint32_t ThreadIndex = 0, BaseIP = 0, LocalCount = 0;
     std::uint64_t Generation = 0;
-    std::int32_t MissionIndex = -1;
+    std::int32_t MissionIndex = -1, StreamedIndex = -1;
+    std::uint64_t StreamedGeneration = 0;
     NativeScriptThreadForm Form = NativeScriptThreadForm::Main;
     bool UsesMissionCleanup = false, ExclusiveMission = false, External = false;
     bool operator==(const NativeScriptCorpusThread&) const = default;
