@@ -110,8 +110,40 @@ void WorldResponse() {
     Check(NativeSourceApplyPedCollision(ped, contact, result) == Status::Ok && ped == retained && result.Applied && result.ReportCount == 1,
         "source reports collision even when infinite mass blocks force");
 }
+void CollisionSteps() {
+    auto ped = Ped(); ped.Mass = 70; ped.Elasticity = 0.05f;
+    NativeSourcePedCollisionStepPlan plan{99, true, false};
+    Check(NativeSourceCalculatePedCollisionSteps(ped, 1, true, false, plan) == Status::Ok && plan.Count == 2 &&
+        plan.PreCheckAtFullSpeed && !plan.PreCheckAtHalfSpeed && ped.Elasticity == 0.05f, "stationary player has minimum two, precheck flags untouched");
+    Check(NativeSourceCalculatePedCollisionSteps(ped, 1, true, true, plan) == Status::Ok && plan.Count == 4, "standing entity raises minimum to four");
+    ped.MoveSpeed[0] = 1;
+    Check(NativeSourceCalculatePedCollisionSteps(ped, 1, true, false, plan) == Status::Ok && plan.Count == 4, "player steps are ceil(distance/0.3), not capped at two");
+    Check(NativeSourceCalculatePedCollisionSteps(ped, 1, true, true, plan) == Status::Ok && plan.Count == 7, "standing entity doubles distance, not a four-step cap");
+    ped.MoveSpeed[0] = 0.299f;
+    Check(NativeSourceCalculatePedCollisionSteps(ped, 1, false, false, plan) == Status::Ok && plan.Count == 1 && ped.Elasticity == 0.05f, "NPC squared-distance early return retains elasticity");
+    ped.MoveSpeed[0] = 0.3f;
+    Check(NativeSourceCalculatePedCollisionSteps(ped, 1, false, false, plan) == Status::Ok && plan.Count == 2 && ped.Elasticity == 0.1f, "NPC exact squared threshold takes fast path and doubles elasticity");
+    ped.MoveSpeed[0] = 1; ped.Elasticity = 0.05f;
+    Check(NativeSourceCalculatePedCollisionSteps(ped, 1, false, false, plan) == Status::Ok && plan.Count == 5 && ped.Elasticity == 0.1f, "NPC source one-and-half distance multiplier");
+    ped.Attached = true; ped.MoveSpeed[0] = 100;
+    Check(NativeSourceCalculatePedCollisionSteps(ped, 1, true, true, plan) == Status::Ok && plan.Count == 1 && ped.Elasticity == 0.1f, "attached source early return overrides player minimum and leaves elasticity");
+    ped.Attached = false;
+    const auto retained = ped;
+    Check(NativeSourceCalculatePedCollisionSteps(ped, 1, true, false, plan) == Status::Ok && ped == retained && plan.Count == 78,
+        "source 334-step integer narrows to low byte 78 rather than saturating");
+    const auto old = plan;
+    Check(NativeSourceCalculatePedCollisionSteps(ped, -1, true, false, plan) == Status::InvalidInput && ped == retained && plan == old, "invalid timestep leaves body and plan intact");
+    ped.MoveSpeed = {}; ped.Elasticity = 0.05f;
+    Check(NativeSourceCalculatePedCollisionSteps(ped, 0, true, false, plan) == Status::Ok && plan.Count == 2, "zero-delta player retains source minimum, not invented zero steps");
+    ped.MoveSpeed[0] = 76.8f;
+    Check(NativeSourceCalculatePedCollisionSteps(ped, 1, true, false, plan) == Status::Ok && plan.Count == 0,
+        "source count256 low byte is zero, preserved for the collision driver's branch semantics");
+    ped.MoveSpeed[0] = 1e9f;
+    Check(NativeSourceCalculatePedCollisionSteps(ped, 1, true, false, plan) == Status::Ok && plan.Count == 0,
+        "masked int32 FISTP overflow has defined integer-indefinite low byte, not C++ UB");
+}
 }
 int main() {
-    Translation(); Pair(); WorldResponse();
+    Translation(); Pair(); WorldResponse(); CollisionSteps();
     std::printf("source-physical-ok checks=%zu source-force-and-dynamic-ped-pair no-narrowphase-or-world-route\n", s_Checks);
 }

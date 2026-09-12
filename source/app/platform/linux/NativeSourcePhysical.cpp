@@ -1,5 +1,6 @@
 #include "NativeSourcePhysical.h"
 #include <cmath>
+#include <limits>
 
 namespace {
 using Status = NativeSourcePhysicalStatus;
@@ -47,6 +48,41 @@ NativeSourcePhysicalStatus NativeSourceApplyMoveSpeed(NativeSourcePhysicalState&
     else for (std::size_t i = 0; i < 3; ++i) candidate.Position[i] += state.MoveSpeed[i] * timeStep;
     if (!Finite(candidate.Position)) return Status::Overflow;
     state = candidate;
+    return Status::Ok;
+}
+NativeSourcePhysicalStatus NativeSourceCalculatePedCollisionSteps(NativeSourcePhysicalState& state,
+    float timeStep, bool hasPlayerData, bool standingOnEntity, NativeSourcePedCollisionStepPlan& out) {
+    if (!Valid(state) || !std::isfinite(timeStep) || timeStep < 0) return Status::InvalidInput;
+    if (!state.IsPed) return Status::Unsupported;
+    auto plan = out;
+    plan.Count = 1;
+    if (state.Attached) { out = plan; return Status::Ok; }
+    const auto& v = state.MoveSpeed;
+    // Retail x87 evaluates products/sums at double precision, then spills the
+    // squared magnitude, sqrt, distance and ceil argument to explicit floats.
+    const float squared = float(double(v[0]) * v[0] + double(v[1]) * v[1] + double(v[2]) * v[2]);
+    if (!std::isfinite(squared)) return Status::Overflow;
+    if (!hasPlayerData && double(squared) * timeStep * timeStep < double(0.09f)) { out = plan; return Status::Ok; }
+    const float speed = float(std::sqrt(double(squared)));
+    const float distance = speed * timeStep;
+    if (!std::isfinite(distance)) return Status::Overflow;
+    const double scale = hasPlayerData ? (standingOnEntity ? 2.0 : 1.0) : 1.5;
+    const float argument = float(double(distance) * scale / double(0.3f));
+    if (!std::isfinite(argument)) return Status::Overflow;
+    double count = std::ceil(double(argument));
+    if (hasPlayerData) {
+        const double minimum = standingOnEntity ? 4.0 : 2.0;
+        if (count < minimum) count = minimum;
+    }
+    const float elasticity = hasPlayerData ? state.Elasticity : float(double(state.Elasticity) * 2.0);
+    if (!std::isfinite(elasticity)) return Status::Overflow;
+    // FISTP int32 followed by AL. Masked out-of-range FISTP produces the
+    // integer-indefinite 0x80000000, whose low byte is also zero. Do not use
+    // undefined C++ floating-to-integer conversion or clamp the source count.
+    plan.Count = count > double(std::numeric_limits<std::int32_t>::max()) ? 0 :
+        static_cast<std::uint8_t>(static_cast<std::uint32_t>(count));
+    state.Elasticity = elasticity;
+    out = plan;
     return Status::Ok;
 }
 NativeSourcePhysicalStatus NativeSourceApplyPedPair(NativeSourcePhysicalState& a, NativeSourcePhysicalState& b,
