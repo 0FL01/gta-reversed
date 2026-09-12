@@ -6,7 +6,9 @@
 */
 #pragma once
 
-enum eSurfaceType : uint8 {
+#include <cstdint>
+
+enum eSurfaceType : std::uint8_t {
     SURFACE_NONE                = 0xFF, // NOTSA
     SURFACE_DEFAULT             = 0,
     SURFACE_TARMAC              = 1,

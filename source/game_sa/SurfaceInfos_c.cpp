@@ -1,8 +1,14 @@
+#ifndef GTA_SA_CORE_SURFACE_NAMES
 #include "StdInc.h"
 
 #include "SurfaceInfos_c.h"
 #include "Skidmark.h"
+#endif
 
+#include "SurfaceNameLookup.h"
+#include <cstring>
+
+#ifndef GTA_SA_CORE_SURFACE_NAMES
 void SurfaceInfos_c::InjectHooks()
 {
     RH_ScopedClass(SurfaceInfos_c);
@@ -57,12 +63,12 @@ void SurfaceInfos_c::InjectHooks()
     RH_ScopedInstall(IsAudioTile, 0x55EB30);
     RH_ScopedInstall(GetAdhesiveLimit, 0x55EB50);
 }
+#endif
 
-// 0x55D220
-SurfaceId SurfaceInfos_c::GetSurfaceIdFromName(Const char* cName)
+eSurfaceType GetSourceSurfaceIdFromName(const char* cName)
 {
     static constexpr struct { const char* name; const eSurfaceType type; } mapping[] = {
-        { cDefaultName,             SURFACE_DEFAULT                },
+        { "DEFAULT",                SURFACE_DEFAULT                },
         { "TARMAC",                 SURFACE_TARMAC                 },
         { "TARMAC_FUCKED",          SURFACE_TARMAC_FUCKED          },
         { "TARMAC_REALLYFUCKED",    SURFACE_TARMAC_REALLYFUCKED    },
@@ -243,10 +249,17 @@ SurfaceId SurfaceInfos_c::GetSurfaceIdFromName(Const char* cName)
         { "RAILTRACK",              SURFACE_RAILTRACK              }
     };
     for (const auto& [name, type] : mapping) {
-        if (strcmp(cName, name) == 0)
+        if (std::strcmp(cName, name) == 0)
             return type;
     }
     return SURFACE_DEFAULT;
+}
+
+#ifndef GTA_SA_CORE_SURFACE_NAMES
+// 0x55D220
+SurfaceId SurfaceInfos_c::GetSurfaceIdFromName(Const char* cName)
+{
+    return GetSourceSurfaceIdFromName(cName);
 }
 
 // 0x55D0E0
@@ -668,3 +681,4 @@ float SurfaceInfos_c::GetAdhesiveLimit(CColPoint* colPoint)
     auto& surfaceB = m_surfaces[colPoint->m_nSurfaceTypeB];
     return m_adhesiveLimits[surfaceB.ucAdhesionGroup][surfaceA.ucAdhesionGroup];
 }
+#endif
