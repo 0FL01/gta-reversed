@@ -16,6 +16,43 @@ void Check(bool condition,const std::string& message) {
     ++s_Checks; if (!condition) throw std::runtime_error(message);
 }
 NativeGarageMatrix Matrix() { return {{10,20,30},{{{1,0,0},{0,1,0},{0,0,1}}}}; }
+std::string AdhesiveMatrix() {
+    std::string text;
+    for (int row=0;row<6;++row) { text+="ignored"; for (int column=0;column<=row;++column) text+=" 1"; text+='\n'; }
+    return text;
+}
+std::string SurfaceRow(const char* name,const char* group) {
+    std::string text=std::string(name)+" "+group+" 1 0 DEFAULT NONE";
+    for (int i=0;i<29;++i) text+=" 0";
+    return text+" NONE\n";
+}
+NativeSourceSurfaces Surfaces() {
+    NativeSourceSurfaces surfaces; std::string error;
+    Check(surfaces.LoadBytes(AdhesiveMatrix(),SurfaceRow("DEFAULT","RUBBER")+SurfaceRow("TARMAC","HARD")+
+        SurfaceRow("CAR","HARD")+SurfaceRow("WHEELBASE","ROAD"),error),error);
+    return surfaces;
+}
+std::shared_ptr<NativeCollisionModel> CollisionFloor() {
+    auto model=std::make_shared<NativeCollisionModel>();
+    model->Name="automobile-floor"; model->Version=2; model->Flags=2;
+    model->Min={-4,-4,-.125f}; model->Max={4,4,.125f}; model->BoundRadius=6;
+    model->Vertices={{-4,-4,0},{4,-4,0},{4,4,0},{-4,4,0}};
+    model->Faces={{{0,1,2},{1,0,0,10}},{{0,2,3},{1,0,0,10}}};
+    return model;
+}
+std::shared_ptr<NativeCollisionModel> CollisionWall(float y) {
+    auto model=std::make_shared<NativeCollisionModel>();
+    model->Name="automobile-wall"; model->Version=2; model->Flags=2;
+    model->Min={-4,y-.125f,-2}; model->Max={4,y+.125f,3}; model->BoundRadius=6;
+    model->Boxes.push_back({model->Min,model->Max,{1,0,0,10}});
+    return model;
+}
+NativeSourceAutomobileTarget Target(std::shared_ptr<const NativeCollisionModel> model) {
+    NativeSourceAutomobileTarget target;
+    target.Identity=9001; target.Collision=std::move(model); target.Kind=NativeSourceAutomobileContactKind::Building;
+    target.InWorld=target.UsesCollision=target.Static=target.Collidable=true;
+    return target;
+}
 }
 
 int main(int argc,char** argv) try {
@@ -151,7 +188,16 @@ int main(int argc,char** argv) try {
     Check(wheels->MoveForce[0]<0&&std::isfinite(wheels->MoveForce[1]),"source wheel lateral/drive forces accumulated");
     Check(std::ranges::any_of(wheels->WheelStates,[](auto state){return state!=NativeSourceWheelState::Normal;}),
         "source wheel traction state transition");
-    const auto beforeBadWheels=wheels; contacts[0].Adhesion=-1;
+    Check(wheels->MoveSpeed[0]<0&&wheels->ForwardSpeed==wheels->MoveSpeed[1]&&std::isfinite(wheels->TurnSpeed[2]),
+        "source wheel forces update owned linear/angular speed");
+    auto zeroContacts=contacts;
+    for (auto& contact:zeroContacts) contact.Speed={};
+    Check(automobile.ProcessPlayerControls(0,0,0,false,false,0,1,error)==NativeSourceAutomobileStatus::Ready,error);
+    Check(automobile.ProcessWheels(zeroContacts,NativeTransmission::TimeStep,error)==NativeSourceAutomobileStatus::Ready,error);
+    auto zeroForces=automobile.LastCommitted();
+    Check(zeroForces->MoveForce==NativeSourcePhysicalVector{}&&zeroForces->TurnForce==NativeSourcePhysicalVector{}&&
+        zeroForces->WheelAlreadySkidding,"per-call force trace resets and source skid scratch persists");
+    const auto beforeBadWheels=zeroForces; contacts[0].Adhesion=-1;
     Check(automobile.ProcessWheels(contacts,1,error)==NativeSourceAutomobileStatus::InvalidInput&&
         automobile.LastCommitted()==beforeBadWheels,"invalid wheel contact retains publication");
     const std::array collisionContacts{
@@ -165,6 +211,53 @@ int main(int argc,char** argv) try {
     const auto beforeBadContacts=collided; auto badContacts=collisionContacts; badContacts[0].Depth=-1;
     Check(automobile.ProcessContacts(badContacts,error)==NativeSourceAutomobileStatus::InvalidInput&&
         automobile.LastCommitted()==beforeBadContacts,"invalid collision retains publication");
+
+    // Actual Landstal COL supplies A's authored18 spheres/10 triangles and
+    // the DFF-derived suspension lines; only the isolated targets are fixtures.
+    auto modelCar=automobile.LastCommitted();
+    Check(modelCar->Assets->Collision->Spheres.size()==18&&modelCar->Assets->Collision->Faces.size()==10,
+        "actual Landstal source collision primitives retained");
+    auto floor=Target(CollisionFloor());
+    floor.Transform.Position={10,20,29.5f};
+    Check(automobile.ProcessCollision(floor,Surfaces(),NativeTransmission::TimeStep,error)==NativeSourceAutomobileStatus::Ready,error);
+    auto grounded=automobile.LastCommitted();
+    Check(std::ranges::any_of(grounded->SuspensionCompression,[](float value){return value<1;}),
+        "source suspension lines hit loaded collision floor");
+    Check(std::ranges::any_of(grounded->WheelContactPoints,[](const auto& point){return point.SurfaceB.Material==1;}),
+        "source wheel contact retains target material");
+    auto wall=Target(CollisionWall(1.9f)); wall.Transform.Position=Matrix().Position;
+    auto beforeWall=*grounded; beforeWall.MoveSpeed={0,1,0}; beforeWall.ForwardSpeed=1;
+    // Construct a second exact owner at the same source identity and drive it
+    // to a deterministic wall-facing speed through public source transitions.
+    NativeSourceAutomobile impact;
+    Check(impact.Construct(78,*landstal,asset,handling,NativeVehicleCreatedBy::Mission,Matrix(),error)==NativeSourceAutomobileStatus::Ready,error);
+    const auto preDriverStatus=impact.LastCommitted();
+    Check(impact.SetStatus(NativeVehicleStatus::Player,error)==NativeSourceAutomobileStatus::InvalidInput&&
+        impact.LastCommitted()==preDriverStatus,"player status requires driver owner");
+    Check(impact.SetupSuspension(measure,error)==NativeSourceAutomobileStatus::Ready&&
+        impact.SetDriver(1003,error)==NativeSourceAutomobileStatus::Ready,error);
+    Check(impact.SetStatus(NativeVehicleStatus::Player,error)==NativeSourceAutomobileStatus::Ready,
+        "entering driver owns source player automobile status");
+    const auto playerStatus=impact.LastCommitted();
+    Check(impact.SetStatus(static_cast<NativeVehicleStatus>(0xfe),error)==NativeSourceAutomobileStatus::InvalidInput&&
+        impact.LastCommitted()==playerStatus,"unknown source status retains publication");
+    Check(impact.ProcessPlayerControls(255,0,0,false,false,0,1,error)==NativeSourceAutomobileStatus::Ready,error);
+    for (int i=0;i<8;++i) Check(impact.AdvanceDrive(NativeTransmission::TimeStep,true,error)==NativeSourceAutomobileStatus::Ready,error);
+    const auto preImpact=impact.LastCommitted();
+    Check(preImpact->ForwardSpeed>0&&preImpact->MoveSpeed[1]==preImpact->ForwardSpeed,"accelerated owner carries source forward velocity");
+    NativeSourceSurfaces unloadedSurfaces;
+    Check(impact.ProcessCollision(wall,unloadedSurfaces,NativeTransmission::TimeStep,error)==NativeSourceAutomobileStatus::InvalidInput&&
+        impact.LastCommitted()==preImpact,"missing source surface owner retains automobile publication");
+    Check(impact.ProcessCollision(wall,Surfaces(),NativeTransmission::TimeStep,error)==NativeSourceAutomobileStatus::Ready,error);
+    auto hit=impact.LastCommitted();
+    Check(hit->ContactCount>0&&hit->HasHitWall&&hit->Contacts[0].Kind==NativeSourceAutomobileContactKind::Building,
+        "real Landstal spheres detect ordered wall contact");
+    Check(hit->VehicleCollisionProcessed,"non-simple source automobile marks collision processed");
+    Check(hit->ForwardSpeed<preImpact->ForwardSpeed&&hit->MoveSpeed[1]<preImpact->MoveSpeed[1],
+        "source static collision response opposes incoming automobile speed");
+    const auto beforeBadCollision=impact.LastCommitted(); auto badTarget=wall; badTarget.Kind=NativeSourceAutomobileContactKind::Vehicle;
+    Check(impact.ProcessCollision(badTarget,Surfaces(),1,error)==NativeSourceAutomobileStatus::Unsupported&&
+        impact.LastCommitted()==beforeBadCollision,"unsupported dynamic response retains publication");
     Check(automobile.AddPassenger(2001,0,error)==NativeSourceAutomobileStatus::Ready,error);
     Check(automobile.AddPassenger(2002,2,error)==NativeSourceAutomobileStatus::Ready,error);
     auto occupied=automobile.LastCommitted();

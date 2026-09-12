@@ -5,6 +5,8 @@
 #include "NativeVehiclePool.h"
 #include "NativeTransmission.h"
 #include "NativeSourcePhysical.h"
+#include "NativeSourceModelContact.h"
+#include "NativeSourceSurfaces.h"
 
 #include <array>
 #include <memory>
@@ -19,6 +21,14 @@ struct NativeSourceWheelContact {
     bool OnGround{};
 };
 enum class NativeSourceAutomobileContactKind : std::uint8_t { Building, Vehicle, Object };
+struct NativeSourceAutomobileTarget {
+    std::uint64_t Identity{};
+    NativeSourceAutomobileContactKind Kind = NativeSourceAutomobileContactKind::Building;
+    std::shared_ptr<const NativeCollisionModel> Collision;
+    NativeSourceGroundTransform Transform;
+    bool InWorld{}, UsesCollision{}, Static{};
+    bool DisableCollisionForce{}, Collidable{};
+};
 struct NativeSourceAutomobileContact {
     NativeSourceAutomobileContactKind Kind{};
     NativeSourcePhysicalVector Point{},Normal{};
@@ -56,8 +66,14 @@ struct NativeSourceAutomobileState {
     std::array<SuspensionLine,4> SuspensionLines{};
     float FrontHeightAboveRoad{},RearHeightAboveRoad{};
     std::array<NativeSourceWheelState,4> WheelStates{};
+    std::array<NativeSourceContactPoint,4> WheelContactPoints{};
+    NativeSourcePhysicalVector MoveSpeed{},TurnSpeed{},FrictionMoveSpeed{},FrictionTurnSpeed{};
+    // Per-call trace of source-applied wheel/collision impulses, not velocity.
     NativeSourcePhysicalVector MoveForce{},TurnForce{};
-    bool VehicleCollisionProcessed{},HasHitWall{};
+    // Vehicle.cpp's process-static scratch, projected into this bounded
+    // single-Automobile owner instead of introducing hidden process state.
+    bool WheelAlreadySkidding{};
+    bool VehicleCollisionProcessed{},HasHitWall{},HasContacted{};
     std::array<NativeSourceAutomobileContact,32> Contacts{};
     std::uint8_t ContactCount{};
     NativeTransmission::State Transmission;
@@ -83,6 +99,7 @@ public:
     NativeSourceAutomobileStatus SetDriver(std::uint64_t occupant, std::string& error);
     NativeSourceAutomobileStatus AddPassenger(std::uint64_t occupant, std::uint8_t seat, std::string& error);
     NativeSourceAutomobileStatus RemoveOccupant(std::uint64_t occupant, std::string& error);
+    NativeSourceAutomobileStatus SetStatus(NativeVehicleStatus, std::string& error);
     NativeSourceAutomobileStatus ProcessPlayerControls(std::uint8_t accelerate, std::uint8_t brake,
         std::int16_t steering, bool handbrake, bool automaticHandbrake, float forwardVelocity,
         float timeStep, std::string& error);
@@ -93,6 +110,11 @@ public:
         float timeStep, std::string& error);
     NativeSourceAutomobileStatus ProcessContacts(std::span<const NativeSourceAutomobileContact>,
         std::string& error);
+    // Bounded ordinary ProcessEntityCollision + static-building Physical
+    // response. Uses the exact retained model COL and suspension lines; no
+    // world/pool discovery, damage/audio/RNG, dynamic response or render input.
+    NativeSourceAutomobileStatus ProcessCollision(const NativeSourceAutomobileTarget&,
+        const NativeSourceSurfaces&, float timeStep, std::string& error);
     std::shared_ptr<const NativeSourceAutomobileState> LastCommitted() const noexcept { return m_State; }
 
 private:
