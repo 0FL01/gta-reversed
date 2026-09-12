@@ -25,7 +25,7 @@ def build():
     line = next(c for c in commands if ' -o mad-sa-linux ' in c)
     link = shlex.split(next(p for p in line.split('&&') if ' -o mad-sa-linux ' in p))
     units = ['StreamPager', 'NativeCollisionAssets', 'NativeGarages', 'NativeScriptSchema',
-              'NativeScriptCorpus', 'NativeScriptSession', 'NativeScriptEntities',
+              'NativeScriptCorpus', 'NativeScriptSession', 'NativeScriptServiceTransaction', 'NativeScriptEntities',
              'RealtimeGameplay', 'RealtimeScriptHost', 'NativePlacementProbe']
     excluded = units + ['MainLinux', 'Realtime']
     link = [a for a in link if not any(a.endswith('/'+n+'.cpp.o') for n in excluded)]
@@ -55,7 +55,8 @@ def build():
         for name, obj, result, parameters, arguments in specs:
             symbols = subprocess.check_output(['nm', '--defined-only', obj], cwd=directory, text=True).splitlines()
             symbol, = [line.split()[-1] for line in symbols if len(line.split()) == 3 and line.split()[1] == 'T'
-                       and name in line.split()[-1] and not line.split()[-1].endswith('.cold')]
+                       and (line.split()[-1].startswith('_Z' + str(len(name)) + name) or line.split()[-1] == name)
+                       and not line.split()[-1].endswith('.cold')]
             wrappers += [f'{result} Real{name}({parameters}) asm("__real_{symbol}");',
                          f'{result} Wrap{name}({parameters}) asm("__wrap_{symbol}");',
                          f'{result} Wrap{name}({parameters}) {{ NativePlacementProbe_ParserThread(); return Real{name}({arguments}); }}']
@@ -77,8 +78,23 @@ def build():
                'std::vector<NativePlacementIdentity>*) {\n    const float kRadius = s_options.radius;')
         if baseline.count(old) != 1:
             raise RuntimeError('pinned pager baseline signature changed; review offline comparison')
+        # P2-A04 moved this unchanged composition body from Assets.cpp to the
+        # current StreamPager.cpp. The older pager baseline predates that move,
+        # while this probe deliberately links the current Assets.cpp, so append
+        # the same body to keep the offline algorithm comparison link-complete.
+        context_loader = '''
+std::shared_ptr<const NativeCollisionContext> NativeCollisionContext::LoadBeforeWorker(
+    const char* gameDir, float radius, std::string& error) {
+    if (!std::isfinite(radius) || radius <= 0) { error="invalid source COL residency radius"; return {}; }
+    auto context=std::make_shared<NativeCollisionContext>();
+    context->Radius=radius;
+    if (!StreamPager_CollisionPopulation(context->Population,error) ||
+        !context->Assets.Load(gameDir,context->Population,error)) return {};
+    return context;
+}
+'''
         baseline_source = OUTPUT / 'placement-StreamPager-baseline.cpp'
-        baseline_source.write_text(baseline.replace(old, new))
+        baseline_source.write_text(baseline.replace(old, new) + context_loader)
         baseline_obj = OUTPUT / 'placement-StreamPager-baseline.o'
         subprocess.run(flags + ['-ffunction-sections', '-fdata-sections', '-c', str(baseline_source), '-o', str(baseline_obj)],
                        cwd=directory, stdout=log, stderr=subprocess.STDOUT, check=True)

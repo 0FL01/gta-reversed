@@ -28,7 +28,7 @@ def build(host):
     # Rebuild the coupled placement/COL ABI into artifacts as well; parent may
     # still be integrating those headers while its normal objects are older.
     units = ['StreamPager', 'NativeCollisionAssets', 'RealtimeGameplay', 'NativeGarages',
-              'NativeScriptSchema', 'NativeScriptCorpus', 'NativeScriptSession',
+               'NativeScriptSchema', 'NativeScriptCorpus', 'NativeScriptSession', 'NativeScriptServiceTransaction',
               'NativeScriptEntities', 'RealtimeScriptHost', 'NativeGaragesProbe']
     if host:
         units += ['RealtimeScriptHostProbe', 'RealtimeScriptHostGpuProbe', 'NativeEntryExitsProbe']

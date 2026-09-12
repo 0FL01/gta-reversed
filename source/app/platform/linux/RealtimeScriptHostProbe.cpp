@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <numbers>
+#include <stdexcept>
 #include <rw.h>
 
 void RealtimeScriptHostGpuPrepare(const char* dir);
@@ -315,12 +316,13 @@ int main(int argc, char** argv) {
         // startup. Callback only transfers CPU ownership: no parser invocation.
         const auto resident = host.Publication();
         unsigned callbacks = 0;
-        host.SetLiveWorldLoader([&](const NativeScriptSceneRequest& request, RealtimeScriptWorldPublication& output) {
+        host.SetLiveWorldLoader([&](const NativeScriptSceneRequest& request, const NativeScriptServiceTicket&,
+            RealtimeScriptWorldPublication& output) {
             ++callbacks;
-            if (request.Position != resident.Center) return NativeScriptServiceResult{NativeScriptServiceStatus::Error, "not resident"};
+            if (request.Position != resident.Center) return NativeScriptAsyncPrepareResult{NativeScriptAsyncPrepareStatus::Error, "not resident"};
             output = resident;
-            return NativeScriptServiceResult{NativeScriptServiceStatus::Ready, {}};
-        }, [](const NativeScriptRequestId&) {});
+            return NativeScriptAsyncPrepareResult{NativeScriptAsyncPrepareStatus::Prepared, {}};
+        }, [](const NativeScriptServiceTicket&) {});
         const NativeScriptSceneRequest liveRequest{{999, 1000, 1000}, resident.Center};
         Check(host.LoadScene(liveRequest).Status == NativeScriptServiceStatus::Ready && callbacks == 1 &&
             host.WorldRevision() == revision + 1 && host.Publication().Scene == resident.Scene,
@@ -331,11 +333,18 @@ int main(int argc, char** argv) {
             host.WorldRevision() == revision + 1, "ready world request replay neither reloads nor republishes");
         bool workerReady = false;
         unsigned polls = 0;
-        host.SetLiveWorldLoader([&](const NativeScriptSceneRequest&, RealtimeScriptWorldPublication& publication) {
+        std::vector<NativeScriptServiceTicket> workerTickets;
+        unsigned cancellations = 0;
+        NativeScriptServiceTicket cancelledTicket;
+        host.SetLiveWorldLoader([&](const NativeScriptSceneRequest&, const NativeScriptServiceTicket& ticket,
+            RealtimeScriptWorldPublication& publication) {
+            workerTickets.push_back(ticket);
             ++polls; publication = resident; // even a populated Pending result must not publish
-            return NativeScriptServiceResult{workerReady ? NativeScriptServiceStatus::Ready : NativeScriptServiceStatus::Pending, {}};
-        }, [](NativeScriptRequestId) {});
+            return NativeScriptAsyncPrepareResult{workerReady ? NativeScriptAsyncPrepareStatus::Prepared : NativeScriptAsyncPrepareStatus::Pending, {}};
+        }, [&](const NativeScriptServiceTicket& ticket) { ++cancellations; cancelledTicket = ticket; });
         const auto stableRevision = host.WorldRevision(), entityRevision = entities.Revision();
+        const auto transactionAttempts = host.WorldTransaction().Attempts;
+        const auto transactionCommits = host.WorldTransaction().Commits;
         const NativeScriptSceneRequest deferred{{999, 8, 8}, resident.Center};
         Check(host.LoadScene(deferred).Status == NativeScriptServiceStatus::Pending &&
             host.LoadScene(deferred).Status == NativeScriptServiceStatus::Pending && polls == 2 && host.WorldRevision() == stableRevision &&
@@ -353,20 +362,48 @@ int main(int argc, char** argv) {
         Check(host.DeactivateGarage({deferred.Id,garageName}).Status==NativeScriptServiceStatus::Error &&
             host.Garages().Revision()==garageRevision && !(host.Garages().Entries()[13].Flags&2),
             "pending world identity cannot mutate registered garage or publish a journal effect");
+        Check(host.CancelPendingWorld(deferred.Id,error) && host.CancelPendingWorld(deferred.Id,error) &&
+            cancellations==1 && cancelledTicket==workerTickets[0] &&
+            host.WorldTransaction().Phase==NativeScriptServiceTransactionPhase::Cancelling,
+            "pending world cancel notifies one exact attempt and is idempotent");
+        Check(host.LoadScene(deferred).Status==NativeScriptServiceStatus::Pending && polls==2 &&
+            host.WorldRevision()==stableRevision,"cancelling world never polls or publishes fake readiness");
+        auto staleTicket=cancelledTicket; ++staleTicket.Attempt;
+        Check(!host.AcknowledgeWorldCancellation(staleTicket,error) &&
+            host.AcknowledgeWorldCancellation(cancelledTicket,error),
+            "only the cancelled attempt can acknowledge worker retirement");
         workerReady = true;
         Check(host.LoadScene(deferred).Status == NativeScriptServiceStatus::Ready && host.LoadScene(deferred).Status == NativeScriptServiceStatus::Ready &&
-            polls == 3 && host.WorldRevision() == stableRevision + 1, "Ready publishes once and replay skips completed worker request");
+            polls == 3 && workerTickets[2].Owner==cancelledTicket.Owner && workerTickets[2].Attempt==cancelledTicket.Attempt+1 &&
+            host.WorldRevision() == stableRevision + 1 && host.WorldTransaction().Attempts==transactionAttempts+2 &&
+            host.WorldTransaction().Cancellations==1 && host.WorldTransaction().Commits==transactionCommits+1,
+            "cancelled request retries with a new attempt, commits once and replays without worker readiness");
         Check(host.CreateLockedProperty({deferred.Id, property.AuthoredPosition, property.Text}).Result.Status == NativeScriptServiceStatus::Error &&
             entities.Revision() == entityRevision, "completed world identity cannot be reused by entity service");
         const NativeScriptRequestId firstPropertyId{host.Events().front().Id.Session, 171, 200868};
         Check(entities.OwnsRequest(firstPropertyId) && host.SetCameraBehindPlayer({firstPropertyId}).Status == NativeScriptServiceStatus::Error,
             "actual property service identity cannot be reused by camera service");
-        host.SetLiveWorldLoader([&](const NativeScriptSceneRequest&, RealtimeScriptWorldPublication& publication) {
+        unsigned discardedPrepared = 0;
+        const auto transactionFailures = host.WorldTransaction().Failures;
+        host.SetLiveWorldLoader([&](const NativeScriptSceneRequest&, const NativeScriptServiceTicket&,
+            RealtimeScriptWorldPublication& publication) {
             publication = resident; publication.Center.Z += 1;
-            return NativeScriptServiceResult{NativeScriptServiceStatus::Ready, {}};
-        }, [](NativeScriptRequestId) {});
+            return NativeScriptAsyncPrepareResult{NativeScriptAsyncPrepareStatus::Prepared, {}};
+        }, [&](const NativeScriptServiceTicket&) { ++discardedPrepared; });
         Check(host.LoadScene({{999, 9, 9}, resident.Center}).Status == NativeScriptServiceStatus::Error && host.WorldRevision() == stableRevision + 1 &&
-            host.Publication().Scene == resident.Scene, "invalid Ready world publication cannot replace resident state");
+            host.Publication().Scene == resident.Scene && discardedPrepared==1 &&
+            host.WorldTransaction().Phase==NativeScriptServiceTransactionPhase::Idle &&
+            host.WorldTransaction().Failures==transactionFailures+1,
+            "invalid Prepared world is retired as failed and never exposed as Ready");
+        host.SetLiveWorldLoader([&](const NativeScriptSceneRequest&, const NativeScriptServiceTicket&,
+            RealtimeScriptWorldPublication&) -> NativeScriptAsyncPrepareResult {
+            throw std::runtime_error("fixture worker failure");
+        }, [&](const NativeScriptServiceTicket&) { ++discardedPrepared; });
+        Check(host.LoadScene({{999, 10, 10}, resident.Center}).Status==NativeScriptServiceStatus::Error &&
+            host.WorldRevision()==stableRevision+1 && discardedPrepared==2 &&
+            host.WorldTransaction().Phase==NativeScriptServiceTransactionPhase::Idle &&
+            host.WorldTransaction().Failures==transactionFailures+2,
+            "worker exception retires the exact attempt without fake publication");
         // Real assets / production consumer with explicitly generated frame and
         // balance fixtures. These are not a claim that SCM awarded player cash.
         const NativeScriptForSalePropertyRequest fixtureRequest{{902,1,1},{0,0,2},30004,sale->Text};

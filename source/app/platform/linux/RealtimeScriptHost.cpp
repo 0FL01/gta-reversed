@@ -1,8 +1,10 @@
 #include "app/platform/linux/RealtimeScriptHost.h"
 #include <algorithm>
 #include <cassert>
+#include <bit>
 #include <cmath>
 #include <filesystem>
+#include <limits>
 #include <utility>
 #include <type_traits>
 
@@ -19,15 +21,31 @@ using uint64 = std::uint64_t;
 namespace {
 static_assert(std::is_nothrow_copy_assignable_v<RealtimeScriptHostEvent>);
 static_assert(std::is_nothrow_move_constructible_v<RealtimeScriptHostEvent>);
+static_assert(std::is_nothrow_move_assignable_v<RealtimeScriptWorldPublication>);
 NativeScriptServiceResult Ready() { return {NativeScriptServiceStatus::Ready, {}}; }
+NativeScriptServiceResult Pending(std::string message = {}) { return {NativeScriptServiceStatus::Pending, std::move(message)}; }
 NativeScriptServiceResult Error(std::string message) { return {NativeScriptServiceStatus::Error, std::move(message)}; }
 NativeScriptServiceResult Unsupported(std::string message) { return {NativeScriptServiceStatus::Unsupported, std::move(message)}; }
 bool Finite(NativeScriptPosition p) { return std::isfinite(p.X) && std::isfinite(p.Y) && std::isfinite(p.Z); }
+NativeScriptServiceIdentity WorldIdentity(const NativeScriptSceneRequest& request, bool requireGround) {
+    NativeScriptServiceIdentity identity;
+    identity.Id = request.Id;
+    identity.Opcode = requireGround ? 0x03CB : 0x04E4;
+    identity.ArgumentCount = requireGround ? 3 : 2;
+    identity.Arguments[0] = std::bit_cast<std::uint32_t>(request.Position.X);
+    identity.Arguments[1] = std::bit_cast<std::uint32_t>(request.Position.Y);
+    if (requireGround) identity.Arguments[2] = std::bit_cast<std::uint32_t>(request.Position.Z);
+    return identity;
+}
 }
 
 RealtimeScriptHost::RealtimeScriptHost(RealtimeGameplay& gameplay): m_Gameplay(gameplay) {}
 RealtimeScriptHost::~RealtimeScriptHost() {
-    if (m_PendingLoad && m_Cancel) m_Cancel(*m_PendingLoad);
+    if (!m_PendingLoad || !m_Cancel) return;
+    NativeScriptServiceTicket ticket;
+    if (m_WorldTransaction.RequestCancel(m_WorldTransaction.State().Identity, ticket) !=
+        NativeScriptServiceTransactionStatus::Started) return;
+    try { m_Cancel(ticket); } catch (...) {}
 }
 bool RealtimeScriptHost::SeedSourceRngAfterRwInit(std::string& error) {
     const auto readiness = m_SourceRng.Readiness();
@@ -142,8 +160,48 @@ bool RealtimeScriptHost::PrepareInitialGarageWorldBeforeWorker(std::string& erro
 } catch (const std::exception& e) { error = e.what(); return false; }
 void RealtimeScriptHost::SetLiveWorldLoader(WorldLoader loader, CancelLoad cancel) {
     assert(!m_PendingLoad);
+    assert(m_WorldTransaction.State().Phase == NativeScriptServiceTransactionPhase::Idle);
     assert(!loader || cancel); // every asynchronous owner has cancellation
     m_Loader = std::move(loader); m_Cancel = std::move(cancel);
+}
+bool RealtimeScriptHost::CancelPendingWorld(const NativeScriptRequestId& id, std::string& error) {
+    if (m_InWorldService) {
+        error = "world cancellation cannot reenter a service callback";
+        return false;
+    }
+    if (!m_PendingLoad || *m_PendingLoad != id || !m_Cancel) {
+        error = "no matching asynchronous world request to cancel";
+        return false;
+    }
+    NativeScriptServiceTicket ticket;
+    const auto status = m_WorldTransaction.RequestCancel(m_WorldTransaction.State().Identity, ticket);
+    if (status == NativeScriptServiceTransactionStatus::Existing) { error.clear(); return true; }
+    if (status != NativeScriptServiceTransactionStatus::Started) {
+        error = "world transaction rejected cancellation";
+        return false;
+    }
+    m_PendingWorldPublication.reset();
+    try {
+        m_Cancel(ticket);
+    } catch (const std::exception& exception) {
+        error = "world cancellation exception: " + std::string(exception.what());
+        return false;
+    } catch (...) {
+        error = "unknown world cancellation exception";
+        return false;
+    }
+    error.clear();
+    return true;
+}
+bool RealtimeScriptHost::AcknowledgeWorldCancellation(
+    const NativeScriptServiceTicket& ticket, std::string& error) {
+    if (m_InWorldService || !m_PendingLoad || m_WorldTransaction.AcknowledgeCancel(ticket) !=
+        NativeScriptServiceTransactionStatus::Ok) {
+        error = "stale or invalid world cancellation acknowledgement";
+        return false;
+    }
+    error.clear();
+    return true;
 }
 void RealtimeScriptHost::SetRadarSpriteReady(RadarSpriteReady ready) { m_RadarSpriteReady = std::move(ready); }
 NativeScriptServiceResult RealtimeScriptHost::PrepareContactBlipRequest(NativeScriptContactBlipRequest& request) const {
@@ -217,31 +275,82 @@ void RealtimeScriptHost::Commit(RealtimeScriptHostEvent event) {
 NativeScriptServiceResult RealtimeScriptHost::PublishWorld(const NativeScriptSceneRequest& request, bool requireGround) {
     if (!m_Initialized) return Error("world service requires initialized host");
     if (!Finite(request.Position)) return Error("nonfinite world request");
-    if (m_PendingLoad && *m_PendingLoad != request.Id) return Error("another world request is pending");
-    if (m_PendingLoad && (m_PendingPosition != request.Position || m_PendingGround != requireGround))
+    if (m_InWorldService) return Error("world service callback reentry rejected");
+    m_InWorldService = true;
+    struct ResetCallGuard {
+        bool& Value;
+        ~ResetCallGuard() { Value = false; }
+    } resetCall{m_InWorldService};
+    const auto identity = WorldIdentity(request, requireGround);
+    NativeScriptServiceTicket ticket;
+    const auto admission = m_WorldTransaction.Begin(identity, ticket);
+    if (admission == NativeScriptServiceTransactionStatus::Conflict)
         return Error("pending world request ID reused with changed command/position");
+    if (admission == NativeScriptServiceTransactionStatus::Busy)
+        return Error("another world request is pending");
+    if (admission == NativeScriptServiceTransactionStatus::AlreadyCommitted) return Ready();
+    if (admission != NativeScriptServiceTransactionStatus::Started &&
+        admission != NativeScriptServiceTransactionStatus::Existing)
+        return Error("world transaction admission rejected");
+    m_PendingLoad = request.Id;
+    if (m_WorldTransaction.State().Phase == NativeScriptServiceTransactionPhase::Cancelling)
+        return Pending("world cancellation acknowledgement pending");
+
+    const bool wasPrepared = m_WorldTransaction.State().Phase == NativeScriptServiceTransactionPhase::Prepared;
+    const auto releaseFailure = [&](std::string message, bool notifyDiscard) {
+        if (notifyDiscard && m_Cancel) try { m_Cancel(ticket); } catch (...) {}
+        m_WorldTransaction.Fail(ticket); m_WorldTransaction.Release(ticket);
+        m_PendingWorldPublication.reset(); m_PendingLoad.reset();
+        return Error(std::move(message));
+    };
     RealtimeScriptWorldPublication publication;
-    if (m_PendingWorldPublication) {
+    if (wasPrepared) {
+        if (!m_PendingWorldPublication)
+            return releaseFailure("prepared world transaction lost its owned publication", bool(m_Loader));
         publication = *m_PendingWorldPublication;
     } else if (m_Loader) {
-        auto result = m_Loader(request, publication);
-        if (result.Status == NativeScriptServiceStatus::Pending) {
-            m_PendingLoad = request.Id; m_PendingPosition = request.Position; m_PendingGround = requireGround;
+        NativeScriptAsyncPrepareResult result;
+        try {
+            result = m_Loader(request, ticket, publication);
+        } catch (const std::exception& exception) {
+            return releaseFailure("world preparation exception: " + std::string(exception.what()), true);
+        } catch (...) {
+            return releaseFailure("unknown world preparation exception", true);
         }
-        else m_PendingLoad.reset();
-        if (result.Status != NativeScriptServiceStatus::Ready) return result;
-        if (publication.Overrides != m_InitialPlacementOverrides) return Error("world loader placement snapshot mismatch");
+        if (result.Status == NativeScriptAsyncPrepareStatus::Pending) {
+            if (m_WorldTransaction.MarkPending(ticket) != NativeScriptServiceTransactionStatus::Ok)
+                return releaseFailure("world transaction rejected Pending", true);
+            return Pending(std::move(result.Message));
+        }
+        if (result.Status == NativeScriptAsyncPrepareStatus::Error) {
+            return releaseFailure(std::move(result.Message), false);
+        }
+        if (result.Status != NativeScriptAsyncPrepareStatus::Prepared)
+            return releaseFailure("world worker returned an invalid preparation status", true);
+        if (m_WorldTransaction.MarkPrepared(ticket) != NativeScriptServiceTransactionStatus::Ok)
+            return releaseFailure("world transaction rejected Prepared", true);
     } else {
-        if (m_Sealed) return Unsupported("startup sealed: collision/scene needs live worker world loader");
+        if (m_Sealed) {
+            m_WorldTransaction.Fail(ticket); m_WorldTransaction.Release(ticket); m_PendingLoad.reset();
+            return Unsupported("startup sealed: collision/scene needs live worker world loader");
+        }
         char err[512]{};
         auto scene = std::make_shared<WorldShotScene>();
         const auto p = request.Position;
         publication.Overrides = m_InitialPlacementOverrides;
-        if (!StreamPager_Update(p.X, p.Y, p.Z, *scene, publication.Frame, err, sizeof(err), publication.Overrides)) return Error(err);
+        if (!StreamPager_Update(p.X, p.Y, p.Z, *scene, publication.Frame, err, sizeof(err), publication.Overrides)) {
+            m_WorldTransaction.Fail(ticket); m_WorldTransaction.Release(ticket); m_PendingLoad.reset();
+            return Error(err);
+        }
         publication.Scene = std::move(scene); publication.Center = p;
+        if (m_WorldTransaction.MarkPrepared(ticket) != NativeScriptServiceTransactionStatus::Ok)
+            return Error("world transaction rejected synchronous preparation");
     }
+    if (publication.Overrides != m_InitialPlacementOverrides)
+        return releaseFailure("world loader placement snapshot mismatch", bool(m_Loader));
     if (!publication.Scene || publication.Center != request.Position || publication.Frame.instances <= 0 ||
-        publication.Frame.tris <= 0 || publication.Scene->meshes.empty()) return Error("world loader did not supply requested resident scene");
+        publication.Frame.tris <= 0 || publication.Scene->meshes.empty())
+        return releaseFailure("world loader did not supply requested resident scene", bool(m_Loader));
     std::shared_ptr<const RealtimeGameplayWorld> world = publication.Collision;
     std::string error;
     // Pure owned data, including when a live loader supplies the render scene.
@@ -250,26 +359,35 @@ NativeScriptServiceResult RealtimeScriptHost::PublishWorld(const NativeScriptSce
         auto snapshot = std::make_shared<NativeCollisionSnapshot>();
         auto rebuilt = std::make_shared<RealtimeGameplayWorld>();
         if (!m_CollisionContext->Snapshot(request.Position.X, request.Position.Y, *snapshot, error, publication.Overrides) ||
-            !rebuilt->Rebuild(*snapshot, error)) return Error(error);
+            !rebuilt->Rebuild(*snapshot, error)) return releaseFailure(error, bool(m_Loader));
         world = std::move(rebuilt);
         publication.SourceCollision = std::move(snapshot);
     }
     if (!world->TriangleCount() && !world->SphereCount() && !world->BoxCount())
-        return Error("loaded region has no source COL primitives");
+        return releaseFailure("loaded region has no source COL primitives", bool(m_Loader));
     float ground;
     const auto p = request.Position;
     if (requireGround && !world->Ground(p.X, p.Y, p.Z + 1.0f, p.Z - 150.0f, ground))
-        return Error("LOAD_SCENE has no actual resident ground at requested position");
+        return releaseFailure("LOAD_SCENE has no actual resident ground at requested position", bool(m_Loader));
     publication.Collision = world;
     const auto residency = ReconcileCarGeneratorsBeforeWorldCommit(m_WorldRevision + 1, publication.SourceCollision);
-    if (residency.Status != NativeCarGeneratorResidencyStatus::Ready) {
+    if (residency.Status == NativeCarGeneratorResidencyStatus::PendingCleanup) {
         m_PendingWorldPublication = publication;
-        m_PendingLoad = request.Id; m_PendingPosition = request.Position; m_PendingGround = requireGround;
-        return {residency.Status == NativeCarGeneratorResidencyStatus::PendingCleanup ?
-            NativeScriptServiceStatus::Pending : NativeScriptServiceStatus::Error, residency.Detail};
+        return Pending(residency.Detail);
     }
-    m_PendingWorldPublication.reset(); m_PendingLoad.reset();
+    if (residency.Status != NativeCarGeneratorResidencyStatus::Ready)
+        return releaseFailure(residency.Detail, bool(m_Loader));
+    if (m_WorldRevision == std::numeric_limits<std::uint64_t>::max())
+        return releaseFailure("world publication revision exhausted", bool(m_Loader));
+    if (m_WorldTransaction.State().Revision > std::numeric_limits<std::uint64_t>::max() - 2 ||
+        m_WorldTransaction.State().Commits == std::numeric_limits<std::uint64_t>::max())
+        return releaseFailure("world transaction commit sequence exhausted", bool(m_Loader));
+    if (m_WorldTransaction.Commit(ticket) != NativeScriptServiceTransactionStatus::Ok)
+        return Error("world transaction could not record committed publication");
     m_World = std::move(world); m_Publication = std::move(publication); ++m_WorldRevision;
+    if (m_WorldTransaction.Release(ticket) != NativeScriptServiceTransactionStatus::Ok)
+        return Error("world transaction could not release committed publication");
+    m_PendingWorldPublication.reset(); m_PendingLoad.reset();
     return Ready();
 }
 NativeScriptServiceResult RealtimeScriptHost::RequestCollision(const NativeScriptCollisionRequest& request) {
@@ -452,6 +570,17 @@ NativeCarGeneratorResidencyResult RealtimeScriptHost::ReconcileCarGeneratorsBefo
     }
     return m_CarGeneratorResidency.Reconcile(m_CarGenerators, generation, std::move(sourceCollision),
         State().TimeMs, cleanup, &m_Vehicles);
+}
+NativeCarGeneratorResidencyResult RealtimeScriptHost::ReconcilePendingWorldCleanup(
+    const NativeCarGeneratorResidencyCleanup& cleanup) {
+    if (!m_PendingLoad || !m_PendingWorldPublication ||
+        m_WorldTransaction.State().Phase != NativeScriptServiceTransactionPhase::Prepared) {
+        NativeCarGeneratorResidencyResult result;
+        result.Detail = "generator cleanup requires the exact pending Prepared world";
+        return result;
+    }
+    return ReconcileCarGeneratorsBeforeWorldCommit(
+        m_WorldRevision + 1, m_PendingWorldPublication->SourceCollision, &cleanup);
 }
 
 NativeScriptReferenceResult<NativeScriptCarGeneratorRef> RealtimeScriptHost::CreateCarGenerator(

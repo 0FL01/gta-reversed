@@ -12,6 +12,9 @@ namespace {
 std::atomic<bool> s_WorkerOwnsParsers{false};
 std::atomic<size_t> s_WorkerParserCalls{0};
 std::thread::id s_MainThread;
+struct PlacementCleanup final : NativeCarGeneratorResidencyCleanup {
+    bool Complete(const NativeCarGeneratorRemovalObligation&) const noexcept override { return true; }
+};
 void Require(bool ok, const std::string& message) {
     if (!ok) { std::fprintf(stderr, "placement probe: %s\n", message.c_str()); std::exit(2); }
 }
@@ -260,10 +263,10 @@ int main(int argc, char** argv) {
     Require(!host.PrepareInitialGarageWorldBeforeWorker(error) && host.WorldRevision() == 3 && host.Publication().SourceCollision == prepared.SourceCollision,
         "even repeated preparation rejected after SealStartup without parser entry");
     const auto revision = host.WorldRevision();
-    host.SetLiveWorldLoader([&](const auto&, auto& publication) {
+    host.SetLiveWorldLoader([&](const auto&, const NativeScriptServiceTicket&, auto& publication) {
         publication = oldPublication; publication.Overrides.reset();
-        return NativeScriptServiceResult{NativeScriptServiceStatus::Ready,{}};
-    }, [](const auto&) {});
+        return NativeScriptAsyncPrepareResult{NativeScriptAsyncPrepareStatus::Prepared,{}};
+    }, [](const NativeScriptServiceTicket&) {});
     Require(host.RequestCollision({{90002,1,1},oldPublication.Center.X,oldPublication.Center.Y}).Status == NativeScriptServiceStatus::Error &&
         host.WorldRevision() == revision && host.Publication().Scene == oldPublication.Scene, "mixed override/render publication rejected atomically");
     realtime_streaming::Worker worker(true, context, overrides);
@@ -293,24 +296,35 @@ int main(int argc, char** argv) {
     worker.Release();
     const auto p = firstDoor.SourcePose.Position;
     bool requested = false;
-    host.SetLiveWorldLoader([&](const NativeScriptSceneRequest& request, RealtimeScriptWorldPublication& publication) {
+    host.SetLiveWorldLoader([&](const NativeScriptSceneRequest& request, const NativeScriptServiceTicket&,
+        RealtimeScriptWorldPublication& publication) {
         if (!requested) { worker.Request({request.Position.X, request.Position.Y, request.Position.Z}, true); requested = true; }
         auto ready = worker.TakeReady();
-        if (!ready) return NativeScriptServiceResult{NativeScriptServiceStatus::Pending,{}};
+        if (!ready) return NativeScriptAsyncPrepareResult{NativeScriptAsyncPrepareStatus::Pending,{}};
         Require(ready->Error.empty(), ready->Error);
         publication.Scene = std::make_shared<const WorldShotScene>(std::move(ready->Scene));
         publication.Center = request.Position; publication.Frame = ready->Frame; publication.Overrides = ready->Overrides;
         publication.SourceCollision = ready->SourceCollision;
         worker.Release();
-        return NativeScriptServiceResult{NativeScriptServiceStatus::Ready,{}};
-    }, [&](const auto&) { worker.Request({}, false); });
+        return NativeScriptAsyncPrepareResult{NativeScriptAsyncPrepareStatus::Prepared,{}};
+    }, [&](const NativeScriptServiceTicket&) { worker.Request({}, false); });
     NativeScriptServiceResult result;
+    bool cleanupApplied = false;
     do {
         result = host.RequestCollision({{90001,1,1},p[0],p[1]});
+        if (result.Status == NativeScriptServiceStatus::Pending && requested && !cleanupApplied &&
+            host.WorldTransaction().Phase == NativeScriptServiceTransactionPhase::Prepared) {
+            PlacementCleanup cleanup;
+            const auto reconciled = host.ReconcilePendingWorldCleanup(cleanup);
+            Require(reconciled.Status == NativeCarGeneratorResidencyStatus::Ready,
+                "fixture proves generator model ownership was never acquired before live publication");
+            cleanupApplied = true;
+        }
         Require(std::chrono::steady_clock::now() < deadline, "live world timeout");
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     } while (result.Status == NativeScriptServiceStatus::Pending);
     Require(result.Status == NativeScriptServiceStatus::Ready, result.Message);
+    Require(cleanupApplied, "live world publication exercised explicit generator cleanup acknowledgement");
     Require(host.Publication().Overrides == overrides && Hash(*oldPublication.Scene) == oldHash && Hash(first->Scene) == oldHash, "later publication and retained older world lifetime");
     Require(oldPublication.Overrides == constructorOverrides && oldPublication.SourceCollision->Overrides == constructorOverrides &&
         std::ranges::all_of(constructorOverrides->Entries(), [](const auto& p) { return p.CollisionEnabled; }) &&

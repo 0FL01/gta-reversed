@@ -3,6 +3,7 @@
 #pragma once
 
 #include "app/platform/linux/NativeScriptSession.h"
+#include "app/platform/linux/NativeScriptServiceTransaction.h"
 #include "app/platform/linux/NativeScriptEntities.h"
 #include "app/platform/linux/NativeEntryExits.h"
 #include "app/platform/linux/NativeGarages.h"
@@ -52,8 +53,9 @@ struct RealtimeScriptPlayerInfo {
 
 class RealtimeScriptHost final : public NativeScriptServices {
 public:
-    using WorldLoader = std::function<NativeScriptServiceResult(const NativeScriptSceneRequest&, RealtimeScriptWorldPublication&)>;
-    using CancelLoad = std::function<void(const NativeScriptRequestId&)>;
+    using WorldLoader = std::function<NativeScriptAsyncPrepareResult(
+        const NativeScriptSceneRequest&, const NativeScriptServiceTicket&, RealtimeScriptWorldPublication&)>;
+    using CancelLoad = std::function<void(const NativeScriptServiceTicket&)>;
     using RadarSpriteReady = std::function<bool(std::int32_t)>;
     explicit RealtimeScriptHost(RealtimeGameplay& gameplay);
     ~RealtimeScriptHost() override;
@@ -81,9 +83,18 @@ public:
     // Failure leaves the publication, overrides and revision intact.
     bool PrepareInitialGarageWorldBeforeWorker(std::string& error);
     // Install a worker handoff/poll callback under exclusive host ownership. Callback
-    // must only hand off owned results; never parse on the GL/main thread.
+    // must only hand off owned results; never parse on the GL/main thread. Its
+    // Prepared is internal: only this host can return script Ready after validating
+    // and committing the publication. Every worker request is keyed by the supplied
+    // owner/attempt ticket, including cancellation and stale-result rejection.
     // SealStartup MUST precede launching the worker, even when no loader exists.
     void SetLiveWorldLoader(WorldLoader loader, CancelLoad cancel);
+    // Cancellation is two-phase: notify the worker exactly once, then wait for
+    // its ticket acknowledgement before the same SCM request may start a new
+    // attempt. Late results from the cancelled ticket are always stale.
+    bool CancelPendingWorld(const NativeScriptRequestId& id, std::string& error);
+    bool AcknowledgeWorldCancellation(const NativeScriptServiceTicket& ticket, std::string& error);
+    const NativeScriptServiceTransactionState& WorldTransaction() const { return m_WorldTransaction.State(); }
     void SealStartup();
     NativeScriptResult RunPass(std::size_t quota);
     bool AdvanceTime(std::uint32_t nowMs, std::string& error);
@@ -126,6 +137,12 @@ public:
     NativeCarGeneratorResidencyResult ReconcileCarGeneratorsBeforeWorldCommit(
         std::uint64_t generation, std::shared_ptr<const NativeCollisionSnapshot> sourceCollision,
         const NativeCarGeneratorResidencyCleanup* cleanup = nullptr);
+    // Complete obligations for the exact privately held Prepared world. The
+    // caller cannot substitute a callback snapshot: this host rebuilds and owns
+    // source COL before reconciliation. Ready here only unblocks the next same-ID
+    // service poll; it does not publish the world or return script Ready.
+    NativeCarGeneratorResidencyResult ReconcilePendingWorldCleanup(
+        const NativeCarGeneratorResidencyCleanup& cleanup);
     std::shared_ptr<const NativeVehiclePoolSnapshot> PublishVehicles(std::uint64_t frame, std::string& error);
     const RealtimeScriptPlayerInfo& PlayerInfo() const { return m_PlayerInfo; }
     // Register the main-thread presentation consumer. Production wiring must
@@ -188,11 +205,10 @@ private:
     RealtimeScriptWorldPublication m_Publication;
     WorldLoader m_Loader;
     CancelLoad m_Cancel;
+    NativeScriptServiceTransaction m_WorldTransaction;
     RadarSpriteReady m_RadarSpriteReady;
     std::optional<NativeScriptRequestId> m_PendingLoad;
     std::optional<RealtimeScriptWorldPublication> m_PendingWorldPublication;
-    NativeScriptPosition m_PendingPosition;
-    bool m_PendingGround = false;
     std::optional<NativeScriptPosition> m_CollisionRegion, m_LoadedScene;
     std::vector<RealtimeScriptHostEvent> m_Events;
     // One real persistent player binding, deliberately bounded to player0.
@@ -201,5 +217,5 @@ private:
     bool m_PedActive = false;
     RealtimeScriptGroup m_Group;
     std::uint64_t m_WorldRevision = 0;
-    bool m_Initialized = false, m_Sealed = false, m_InitialGarageWorldPrepared = false;
+    bool m_Initialized = false, m_Sealed = false, m_InitialGarageWorldPrepared = false, m_InWorldService = false;
 };
