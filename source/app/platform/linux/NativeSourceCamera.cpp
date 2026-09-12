@@ -119,12 +119,7 @@ NativeSourceCameraStatus NativeSourceCamera::Restore(std::uint32_t nowMs, const 
         target = {NativeSourceCameraTargetKind::Ped, player.PedIdentity};
     if (inputSequence && inputSequence < m_Published->InputSequence) return Status::InvalidInput;
     if (mode == m_Published->Mode && target == m_Published->Target) {
-        const auto status = Advance(nowMs);
-        if (status != Status::Ok || !inputSequence || inputSequence == m_Published->InputSequence) return status;
-        auto snapshot = *m_Published;
-        snapshot.Generation++; snapshot.InputSequence = inputSequence;
-        try { return Publish(std::move(snapshot), std::vector<NativeSourceCameraEvent>(m_Events)); }
-        catch (...) { return Status::Overflow; }
+        return Advance(nowMs, inputSequence);
     }
     if (m_Published->Transition.Active) return Status::TransitionOutstanding;
     return StartTransition(nowMs, mode, target, activeSourceFront, switchType,
@@ -148,7 +143,10 @@ NativeSourceCameraStatus NativeSourceCamera::StartTransition(std::uint32_t nowMs
     if (inputSequence && inputSequence < m_Published->InputSequence) return Status::InvalidInput;
     if (m_Published->Transition.Active) return Status::TransitionOutstanding;
     if (m_NextSequence == std::numeric_limits<std::uint64_t>::max()) return Status::Overflow;
-    auto snapshot = *m_Published; auto events = m_Events;
+    NativeSourceCameraSnapshot snapshot;
+    std::vector<NativeSourceCameraEvent> events;
+    try { snapshot = *m_Published; events = m_Events; }
+    catch (...) { return Status::Overflow; }
     const auto from = snapshot.Mode;
     snapshot.Generation++; snapshot.TimeMs = nowMs; snapshot.Mode = mode; snapshot.Target = target;
     if (inputSequence) snapshot.InputSequence = inputSequence;
@@ -171,7 +169,7 @@ NativeSourceCameraStatus NativeSourceCamera::StartTransition(std::uint32_t nowMs
     snapshot.Transition = transition;
     try { events.push_back({m_NextSequence, NativeSourceCameraEventKind::Transition, from, mode, target, switchType,
         nowMs, transition.DurationMs, transition.TargetDurationMs, transition.StopMoving,
-        transition.StopCatchUp, transition.TransitionBeta}); }
+        transition.StopCatchUp, transition.TransitionBeta, inputSequence}); }
     catch (...) { return Status::Overflow; }
     const auto status = Publish(std::move(snapshot), std::move(events));
     if (status == Status::Ok) ++m_NextSequence;
@@ -179,26 +177,30 @@ NativeSourceCameraStatus NativeSourceCamera::StartTransition(std::uint32_t nowMs
 }
 
 NativeSourceCameraStatus NativeSourceCamera::Advance(std::uint32_t nowMs) {
+    return Advance(nowMs, 0);
+}
+
+NativeSourceCameraStatus NativeSourceCamera::Advance(std::uint32_t nowMs, std::uint64_t inputSequence) {
     if (!m_Published) return Status::NotLoaded;
     if (nowMs < m_Published->TimeMs) return Status::BackwardTime;
-    auto snapshot = *m_Published;
+    if (inputSequence && inputSequence < m_Published->InputSequence) return Status::InvalidInput;
+    NativeSourceCameraSnapshot snapshot;
+    std::vector<NativeSourceCameraEvent> events;
+    try { snapshot = *m_Published; events = m_Events; }
+    catch (...) { return Status::Overflow; }
+    bool completed = false;
     if (snapshot.Transition.Active && nowMs - snapshot.Transition.StartMs >= snapshot.Transition.DurationMs) {
         if (m_NextSequence == std::numeric_limits<std::uint64_t>::max()) return Status::Overflow;
-        auto events = m_Events;
-        snapshot.Generation++; snapshot.TimeMs = nowMs;
         snapshot.Transition.Active = snapshot.Transition.JustStarted = false;
         try { events.push_back({m_NextSequence, NativeSourceCameraEventKind::TransitionComplete,
             snapshot.Mode, snapshot.Mode, snapshot.Target, NativeSourceCameraSwitch::Interpolation, nowMs}); }
         catch (...) { return Status::Overflow; }
-        const auto status = Publish(std::move(snapshot), std::move(events));
-        if (status == Status::Ok) ++m_NextSequence;
-        return status;
+        completed = true;
     }
     snapshot.Generation++; snapshot.TimeMs = nowMs;
     snapshot.Transition.JustStarted = false;
-    try {
-        return Publish(std::move(snapshot), std::vector<NativeSourceCameraEvent>(m_Events));
-    } catch (...) {
-        return Status::Overflow;
-    }
+    if (inputSequence) snapshot.InputSequence = inputSequence;
+    const auto status = Publish(std::move(snapshot), std::move(events));
+    if (status == Status::Ok && completed) ++m_NextSequence;
+    return status;
 }

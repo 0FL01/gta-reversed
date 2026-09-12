@@ -36,6 +36,7 @@ struct NativeSourceCameraEvent {
     NativeSourceCameraSwitch Switch = NativeSourceCameraSwitch::Interpolation;
     std::uint32_t TimeMs{}, DurationMs{}, TargetDurationMs{};
     float StopMoving{}, StopCatchUp{}, TransitionBeta{};
+    std::uint64_t InputSequence{};
     bool operator==(const NativeSourceCameraEvent&) const = default;
 };
 struct NativeSourceCameraSnapshot {
@@ -82,6 +83,7 @@ public:
 
 private:
     NativeSourceCameraStatus Publish(NativeSourceCameraSnapshot&&, std::vector<NativeSourceCameraEvent>&&);
+    NativeSourceCameraStatus Advance(std::uint32_t nowMs, std::uint64_t inputSequence);
     std::shared_ptr<const NativeSourceCameraSnapshot> m_Published;
     std::vector<NativeSourceCameraEvent> m_Events;
     std::uint64_t m_NextSequence = 1;

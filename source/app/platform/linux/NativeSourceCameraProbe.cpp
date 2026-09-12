@@ -1,7 +1,9 @@
 #include "NativeSourceCamera.h"
 
+#include <bit>
 #include <cmath>
 #include <cstdlib>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <type_traits>
@@ -149,7 +151,7 @@ int main() {
         exiting->Target == NativeSourceCameraTarget{NativeSourceCameraTargetKind::Ped, 11},
         "exit selects ped follow owner");
     Check(exiting->Transition.DurationMs == 1350 && exiting->Events.back().Sequence == 5 &&
-        exiting->InputSequence == 17,
+        exiting->InputSequence == 17 && exiting->Events.back().InputSequence == 17,
         "ordinary exit duration and journal");
     Check(camera.Advance(2804) == NativeSourceCameraStatus::Ok &&
         !camera.LastCommitted()->Transition.Active && camera.Events().back().Sequence == 6,
@@ -199,6 +201,19 @@ int main() {
     Check(camera.ResolveView() == NativeSourceCameraViewStatus::Unsupported,
         "transition success does not fake source camera eye");
 
+    std::cout << "source-camera-transition-v1\n";
+    for (const auto& event : oldEpochCopy.Events) {
+        std::cout << "seq=" << event.Sequence << " kind=" << unsigned(event.Kind)
+                  << " from=" << unsigned(event.From) << " to=" << unsigned(event.To)
+                  << " target_kind=" << unsigned(event.Target.Kind) << " target=" << event.Target.Identity
+                  << " switch=" << unsigned(event.Switch) << " time=" << event.TimeMs
+                  << " duration=" << event.DurationMs << " target_duration=" << event.TargetDurationMs
+                  << " stop=" << std::hex << std::setw(8) << std::setfill('0')
+                  << std::bit_cast<std::uint32_t>(event.StopMoving)
+                  << " catch=" << std::setw(8) << std::bit_cast<std::uint32_t>(event.StopCatchUp)
+                  << " beta=" << std::setw(8) << std::bit_cast<std::uint32_t>(event.TransitionBeta)
+                  << std::dec << " input=" << event.InputSequence << '\n';
+    }
     std::cout << "sa-core-camera-ok checks=" << g_Checks
               << " modes=4,18 ordinary_ms=1350 bike_exit_ms=800 pointer_feedback=0\n";
 }
