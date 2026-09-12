@@ -25,9 +25,9 @@ std::string Matrix() {
     return text;
 }
 
-std::string Material(const std::string& name, const std::string& group) {
+std::string Material(const std::string& name, const std::string& group, int soft = 0, int steep = 0) {
     std::string text = name + " " + group + " +1 -0.5 DEFAULT NONE";
-    for (int field = 0; field < 29; ++field) text += " 0";
+    for (int field = 0; field < 29; ++field) text += " " + std::to_string(field == 0 ? soft : field == 7 ? steep : 0);
     return text + " NONE ignored_tail\n";
 }
 }
@@ -102,6 +102,13 @@ int main(int argc, char** argv) {
         Check(surfaces.Snapshot().AdhesionGroups[62] == 2, "last known group wins");
 
         Check(surfaces.AdhesiveLimit(62, 1, limit) == Status::Ok && limit == 21, "material-bound physical coefficient");
+        Check(surfaces.LoadBytes(Matrix(), Material("PED", "ROAD", 1, -1), error), "surface response flags load");
+        NativeSourceSurfaceProperties properties;
+        Check(surfaces.Describe(62, properties) == Status::Ok && properties == NativeSourceSurfaceProperties{2, true, true},
+              "source bool casts and response properties");
+        const auto retainedProperties = properties;
+        Check(surfaces.Describe(255, properties) == Status::InvalidMaterial && properties == retainedProperties,
+              "invalid response material retains output");
         NativeSourcePhysicalState body;
         body.Mass = 70;
         body.IsPed = body.DisableTurnForce = true;
@@ -118,6 +125,10 @@ int main(int argc, char** argv) {
             const auto real = surfaces.Snapshot();
             Check(real.MaterialRows == 179 && real.Loaded, "real source material rows");
             for (const auto group : real.AdhesionGroups) Check(group < 6, "real material group range");
+            for (std::uint16_t material = 0; material < 179; ++material) {
+                Check(surfaces.Describe(material, properties) == Status::Ok && properties.AdhesionGroup < 6,
+                      "real source response-property coverage");
+            }
             for (std::uint16_t a = 0; a < 179; ++a) {
                 Check(surfaces.AdhesiveLimit(62, a, limit) == Status::Ok && std::isfinite(limit) && limit >= 0,
                       "real ped-to-material coefficient coverage");

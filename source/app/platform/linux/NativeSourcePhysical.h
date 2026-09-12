@@ -46,6 +46,10 @@ struct NativeSourcePedCollisionStepPlan {
 // retains every state/output; a successful no-contact clears the result.
 NativeSourcePhysicalStatus NativeSourceApplyMoveForce(NativeSourcePhysicalState&, NativeSourcePhysicalVector force);
 NativeSourcePhysicalStatus NativeSourceApplyGravity(NativeSourcePhysicalState&, float timeStep);
+// Translational part of Physical.cpp:1425-1448. Caller supplies the owned
+// source air-resistance field and confirms no cull-zone multiplier. Turn speed
+// is outside this translation-only state.
+NativeSourcePhysicalStatus NativeSourceApplyAirResistance(NativeSourcePhysicalState&, float resistance, float timeStep);
 NativeSourcePhysicalStatus NativeSourceApplyMoveSpeed(NativeSourcePhysicalState&, float timeStep);
 // Retail CPed::SpecialEntityCalcCollisionSteps 0x5FFBD0. Player minimums
 // are TWO / FOUR (standing on an entity), not maximum caps. NPC fast-path

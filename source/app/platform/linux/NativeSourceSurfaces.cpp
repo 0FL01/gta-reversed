@@ -137,6 +137,8 @@ bool NativeSourceSurfaces::LoadBytes(std::string_view adhesive, std::string_view
             const auto id = GetSourceSurfaceIdFromName(std::string(fields[0]).c_str());
             const auto found = std::find(groups.begin(), groups.end(), fields[1]);
             if (found != groups.end()) candidate.AdhesionGroups[id] = static_cast<std::uint8_t>(found - groups.begin());
+            candidate.SoftLanding[id] = Number<std::int32_t>(fields[6]) != 0;
+            candidate.SteepSlope[id] = Number<std::int32_t>(fields[13]) != 0;
             ++candidate.MaterialRows;
         });
         candidate.Loaded = true;
@@ -154,5 +156,12 @@ NativeSourceSurfaceStatus NativeSourceSurfaces::AdhesiveLimit(std::uint16_t a, s
     if (a >= m_Data.AdhesionGroups.size() || b >= m_Data.AdhesionGroups.size()) return NativeSourceSurfaceStatus::InvalidMaterial;
     // SurfaceInfos_c::GetAdhesiveLimit / retail 0x5772F0: B first, A second.
     out = m_Data.AdhesiveLimits[m_Data.AdhesionGroups[b]][m_Data.AdhesionGroups[a]];
+    return NativeSourceSurfaceStatus::Ok;
+}
+
+NativeSourceSurfaceStatus NativeSourceSurfaces::Describe(std::uint16_t material, NativeSourceSurfaceProperties& out) const noexcept {
+    if (!m_Data.Loaded) return NativeSourceSurfaceStatus::NotLoaded;
+    if (material >= m_Data.AdhesionGroups.size()) return NativeSourceSurfaceStatus::InvalidMaterial;
+    out = {m_Data.AdhesionGroups[material], m_Data.SoftLanding[material], m_Data.SteepSlope[material]};
     return NativeSourceSurfaceStatus::Ok;
 }

@@ -44,6 +44,19 @@ void Translation() {
     s.MoveSpeed[0] = std::numeric_limits<float>::max();
     const auto huge = s;
     Check(NativeSourceApplyMoveSpeed(s, 2) == Status::Overflow && s == huge, "overflow retains full body");
+    s = Ped(); s.MoveSpeed = {3, 4, 0};
+    Check(NativeSourceApplyAirResistance(s, 0.01f, 1) == Status::Ok && s.MoveSpeed == NativeSourcePhysicalVector{2.85f, 3.8f, 0},
+        "ped low-resistance magnitude branch");
+    s = Ped(); s.MoveSpeed = {1, 2, 3};
+    Check(NativeSourceApplyAirResistance(s, 0.5f, 2) == Status::Ok && s.MoveSpeed == NativeSourcePhysicalVector{0.25f, 0.5f, 0.75f},
+        "high-resistance power branch");
+    const auto resisted = s;
+    Check(NativeSourceApplyAirResistance(s, -1, 1) == Status::InvalidInput && s == resisted,
+        "invalid air resistance retains body");
+    s = Ped(); s.MoveSpeed[0] = 200;
+    const auto invalidPower = s;
+    Check(NativeSourceApplyAirResistance(s, 0.01f, 0.5f) == Status::Overflow && s == invalidPower,
+        "nonfinite source power result retains body");
 }
 void Pair() {
     NativeSourcePhysicalContact contact{{1, 2, 3}, {1, 0, 0}, 7, 9};

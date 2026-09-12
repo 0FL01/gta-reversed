@@ -55,6 +55,28 @@ NativeSourcePhysicalStatus NativeSourceApplyGravity(NativeSourcePhysicalState& s
     state = candidate;
     return Status::Ok;
 }
+NativeSourcePhysicalStatus NativeSourceApplyAirResistance(NativeSourcePhysicalState& state, float resistance, float timeStep) {
+    if (!Valid(state) || !std::isfinite(resistance) || resistance < 0 || !std::isfinite(timeStep) || timeStep < 0)
+        return Status::InvalidInput;
+    const float squared = state.MoveSpeed[0] * state.MoveSpeed[0] + state.MoveSpeed[1] * state.MoveSpeed[1] +
+        state.MoveSpeed[2] * state.MoveSpeed[2];
+    if (!std::isfinite(squared)) return Status::Overflow;
+    float factor;
+    if (resistance <= 0.1f) {
+        const float magnitude = float(std::sqrt(double(squared)));
+        const float speedMagnitude = magnitude * resistance;
+        if (!std::isfinite(magnitude) || !std::isfinite(speedMagnitude)) return Status::Overflow;
+        factor = float(std::pow(double(1.0f - speedMagnitude), double(timeStep)));
+    } else {
+        factor = float(std::pow(double(resistance), double(timeStep)));
+    }
+    if (!std::isfinite(factor)) return Status::Overflow;
+    auto candidate = state;
+    for (std::size_t i = 0; i < 3; ++i) candidate.MoveSpeed[i] *= factor;
+    if (!Finite(candidate.MoveSpeed)) return Status::Overflow;
+    state = candidate;
+    return Status::Ok;
+}
 NativeSourcePhysicalStatus NativeSourceApplyMoveSpeed(NativeSourcePhysicalState& state, float timeStep) {
     if (!Valid(state) || !std::isfinite(timeStep) || timeStep < 0) return Status::InvalidInput;
     auto candidate = state;
