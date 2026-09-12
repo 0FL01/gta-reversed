@@ -48,7 +48,6 @@ int main() {
     Check(spawn->Mode == NativeSourceCameraMode::FollowPed, "source initial follow-ped mode");
     Check(spawn->Target == NativeSourceCameraTarget{NativeSourceCameraTargetKind::Ped, 11},
         "source initial target ped");
-    Check(spawn->ActiveFront == std::array<float, 3>{0, 0, -1}, "source CCam initial front");
     Check(!spawn->Transition.Active && spawn->LookingAtPlayer && !spawn->LookingAtVector,
         "source initial ownership flags");
     Check(spawn->Events.size() == 1 && spawn->Events[0].Sequence == 1 &&
@@ -85,8 +84,19 @@ int main() {
     Check(camera.Restore(102, invalid) == NativeSourceCameraStatus::InvalidInput,
         "unknown player state rejected");
     Check(camera.LastCommitted() == behind, "invalid restore retains publication");
+    Check(camera.StartTransition(102, NativeSourceCameraMode::CamOnAString,
+        {NativeSourceCameraTargetKind::Vehicle, 22}, {0, 0, 1},
+        NativeSourceCameraSwitch::Interpolation, false) == NativeSourceCameraStatus::InvalidInput,
+        "vertical transition front rejected");
+    Check(camera.StartTransition(102, NativeSourceCameraMode::FollowPed,
+        {NativeSourceCameraTargetKind::Vehicle, 22}, {1, 0, 0},
+        NativeSourceCameraSwitch::Interpolation, false) == NativeSourceCameraStatus::InvalidInput,
+        "mode-target mismatch rejected");
+    Check(camera.LastCommitted() == behind, "bad explicit transition retains publication");
 
-    Check(camera.Restore(102, Player(NativeSourceCameraPlayerState::EnterCar, true)) ==
+    Check(camera.StartTransition(102, NativeSourceCameraMode::CamOnAString,
+        {NativeSourceCameraTargetKind::Vehicle, 22}, {1, 0, 0},
+        NativeSourceCameraSwitch::Interpolation, false) ==
         NativeSourceCameraStatus::Ok, "enter-car transition accepted");
     auto entering = camera.LastCommitted();
     Check(entering->Mode == NativeSourceCameraMode::CamOnAString, "enter selects car string mode");
@@ -98,8 +108,8 @@ int main() {
         entering->Transition.TargetDurationMs == 600, "ordinary source transition durations");
     Check(Near(entering->Transition.StopMoving, 0.25f) &&
         Near(entering->Transition.StopCatchUp, 0.75f), "ordinary source transition fractions");
-    Check(Near(entering->Transition.TransitionBeta, 235.0f * 3.14159265358979323846f / 180.0f),
-        "spawn-front transition beta");
+    Check(Near(entering->Transition.TransitionBeta, 415.0f * 3.14159265358979323846f / 180.0f),
+        "explicit active-front transition beta");
     Check(entering->Events.size() == 3 && entering->Events.back().Sequence == 3 &&
         entering->Events.back().From == NativeSourceCameraMode::FollowPed &&
         entering->Events.back().To == NativeSourceCameraMode::CamOnAString,
@@ -126,8 +136,9 @@ int main() {
         NativeSourceCameraStatus::Ok, "steady in-car owner accepted");
     Check(camera.LastCommitted()->Events.size() == 4 && camera.LastCommitted()->TimeMs == 1453,
         "steady owner advances without event");
-    Check(camera.Restore(1454, Player(NativeSourceCameraPlayerState::ExitCar, true),
-        NativeSourceCameraSwitch::Interpolation, 17) ==
+    Check(camera.StartTransition(1454, NativeSourceCameraMode::FollowPed,
+        {NativeSourceCameraTargetKind::Ped, 11}, {1, 0, 0},
+        NativeSourceCameraSwitch::Interpolation, false, 17) ==
         NativeSourceCameraStatus::Ok, "exit transition accepted");
     auto exiting = camera.LastCommitted();
     Check(exiting->Mode == NativeSourceCameraMode::FollowPed &&
@@ -140,12 +151,16 @@ int main() {
         !camera.LastCommitted()->Transition.Active && camera.Events().back().Sequence == 6,
         "ordinary exit completes");
 
-    Check(camera.Restore(2805, Player(NativeSourceCameraPlayerState::InVehicle, true),
-        NativeSourceCameraSwitch::JumpCut) == NativeSourceCameraStatus::Ok, "jump-cut enter accepted");
+    Check(camera.StartTransition(2805, NativeSourceCameraMode::CamOnAString,
+        {NativeSourceCameraTargetKind::Vehicle, 22}, {1, 0, 0},
+        NativeSourceCameraSwitch::JumpCut, false) == NativeSourceCameraStatus::Ok,
+        "jump-cut enter accepted");
     Check(!camera.LastCommitted()->Transition.Active && camera.LastCommitted()->Mode ==
         NativeSourceCameraMode::CamOnAString && camera.Events().back().Switch ==
         NativeSourceCameraSwitch::JumpCut, "jump-cut changes owner without interpolation");
-    Check(camera.Restore(2806, Player(NativeSourceCameraPlayerState::ExitCar, true, true)) ==
+    Check(camera.StartTransition(2806, NativeSourceCameraMode::FollowPed,
+        {NativeSourceCameraTargetKind::Ped, 11}, {1, 0, 0},
+        NativeSourceCameraSwitch::Interpolation, true) ==
         NativeSourceCameraStatus::Ok, "bike exit transition accepted");
     Check(camera.LastCommitted()->Transition.DurationMs == 800 &&
         Near(camera.LastCommitted()->Transition.StopMoving, 0.02f) &&

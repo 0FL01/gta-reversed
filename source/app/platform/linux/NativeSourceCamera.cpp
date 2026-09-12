@@ -126,6 +126,25 @@ NativeSourceCameraStatus NativeSourceCamera::Restore(std::uint32_t nowMs, const 
         catch (...) { return Status::Overflow; }
     }
     if (m_Published->Transition.Active) return Status::TransitionOutstanding;
+    return StartTransition(nowMs, mode, target, {0, 0, -1}, switchType,
+        player.PlayerWasOnBike, inputSequence);
+}
+
+NativeSourceCameraStatus NativeSourceCamera::StartTransition(std::uint32_t nowMs,
+    NativeSourceCameraMode mode, NativeSourceCameraTarget target, std::array<float, 3> front,
+    NativeSourceCameraSwitch switchType, bool playerWasOnBike, std::uint64_t inputSequence) {
+    if (!m_Published) return Status::NotLoaded;
+    if (nowMs < m_Published->TimeMs) return Status::BackwardTime;
+    if ((mode != NativeSourceCameraMode::FollowPed && mode != NativeSourceCameraMode::CamOnAString) ||
+        !target.Identity || target.Kind == NativeSourceCameraTargetKind::None ||
+        (mode == NativeSourceCameraMode::FollowPed && target.Kind != NativeSourceCameraTargetKind::Ped) ||
+        (mode == NativeSourceCameraMode::CamOnAString && target.Kind != NativeSourceCameraTargetKind::Vehicle) ||
+        !Finite(front) || (front[0] == 0 && front[1] == 0))
+        return Status::InvalidInput;
+    if (switchType != NativeSourceCameraSwitch::Interpolation && switchType != NativeSourceCameraSwitch::JumpCut)
+        return Status::InvalidInput;
+    if (inputSequence && inputSequence < m_Published->InputSequence) return Status::InvalidInput;
+    if (m_Published->Transition.Active) return Status::TransitionOutstanding;
     if (m_NextSequence == std::numeric_limits<std::uint64_t>::max()) return Status::Overflow;
     auto snapshot = *m_Published; auto events = m_Events;
     const auto from = snapshot.Mode;
@@ -138,9 +157,9 @@ NativeSourceCameraStatus NativeSourceCamera::Restore(std::uint32_t nowMs, const 
         transition.Active = transition.JustStarted = true;
         transition.UseTransitionBeta = true;
         transition.TargetDurationMs = 600;
-        const float angle = SourceAtan(snapshot.ActiveFront[0], snapshot.ActiveFront[1]);
+        const float angle = SourceAtan(front[0], front[1]);
         transition.TransitionBeta = angle + (std::abs(angle) <= Pi * 0.5f ? Pi * (235.0f / 180.0f) : Pi * (55.0f / 180.0f));
-        if (player.PlayerWasOnBike && mode == NativeSourceCameraMode::FollowPed &&
+        if (playerWasOnBike && mode == NativeSourceCameraMode::FollowPed &&
             from == NativeSourceCameraMode::CamOnAString) {
             transition.DurationMs = 800; transition.StopMoving = 0.02f; transition.StopCatchUp = 0.98f;
         } else {

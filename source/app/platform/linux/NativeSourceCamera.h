@@ -44,7 +44,6 @@ struct NativeSourceCameraSnapshot {
     NativeSourceCameraMode Mode = NativeSourceCameraMode::FollowPed;
     NativeSourceCameraTarget Target;
     NativeSourceCameraTransition Transition;
-    std::array<float, 3> ActiveFront{0, 0, -1};
     std::uint64_t InputSequence{};
     bool LookingAtPlayer = true, LookingAtVector{}, DirectlyBehind{}, DirectlyInFront{};
     float PedOrientationForBehindOrInFront{};
@@ -70,6 +69,9 @@ public:
     NativeSourceCameraStatus Restore(std::uint32_t nowMs, const NativeSourceCameraPlayer&,
         NativeSourceCameraSwitch = NativeSourceCameraSwitch::Interpolation,
         std::uint64_t inputSequence = 0);
+    NativeSourceCameraStatus StartTransition(std::uint32_t nowMs, NativeSourceCameraMode,
+        NativeSourceCameraTarget, std::array<float, 3> activeFront,
+        NativeSourceCameraSwitch, bool playerWasOnBike, std::uint64_t inputSequence = 0);
     NativeSourceCameraStatus Advance(std::uint32_t nowMs);
     std::shared_ptr<const NativeSourceCameraSnapshot> LastCommitted() const noexcept { return m_Published; }
     std::span<const NativeSourceCameraEvent> Events() const noexcept { return m_Events; }
