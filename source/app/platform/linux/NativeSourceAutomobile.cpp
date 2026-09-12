@@ -6,6 +6,7 @@
 #include <exception>
 #include <numbers>
 #include <ranges>
+#include <string_view>
 
 namespace {
 using Status = NativeSourceAutomobileStatus;
@@ -72,7 +73,11 @@ NativeSourceAutomobileStatus NativeSourceAutomobile::Construct(std::uint64_t ide
     next.TractionLoss=float(handling.tractionLoss); next.TractionBias=float(handling.tractionBias);
     next.BrakeDeceleration=float(handling.brakeDeceleration); next.BrakeBias=float(handling.brakeBias);
     next.SteeringLockDegrees=float(handling.steeringLockDegrees); next.Abs=handling.Abs;
-    next.HandlingFlags=handling.HandlingFlags;
+    next.HandlingFlags=handling.HandlingFlags; next.ModelFlags=handling.ModelFlags;
+    next.SuspensionForce=float(handling.suspensionForce); next.SuspensionDamping=float(handling.suspensionDamping);
+    next.SuspensionHighSpeedDamping=float(handling.suspensionHighSpeedDamping);
+    next.SuspensionUpper=float(handling.suspensionUpper); next.SuspensionLower=float(handling.suspensionLower);
+    next.SuspensionBias=float(handling.suspensionBias); next.SuspensionAntiDive=float(handling.suspensionAntiDive);
     next.MaxVelocityKmh=float(handling.vmaxFileKmh); next.EngineAcceleration=float(handling.accelFile);
     next.EngineInertia=float(handling.inertia); next.Gears=std::uint8_t(handling.gears);
     next.DriveType=handling.driveType; next.EngineType=handling.engineType;
@@ -165,5 +170,36 @@ NativeSourceAutomobileStatus NativeSourceAutomobile::AdvanceDrive(float timeStep
     next.ForwardSpeed=transmission.AirResistance(next.ForwardSpeed,timeStep);
     if (!std::isfinite(next.ForwardSpeed)) { error="automobile drive overflow"; return Status::InvalidInput; }
     next.Revision++;
+    return Publish(std::move(next),error);
+}
+
+NativeSourceAutomobileStatus NativeSourceAutomobile::SetupSuspension(const CarPoseMeasure& measure,
+    std::string& error) {
+    if (!m_State || std::string_view(measure.model)!=m_State->ModelName || measure.wheels!=4 ||
+        !std::isfinite(measure.frontY)||!std::isfinite(measure.rearY)||!std::isfinite(measure.wheelR)||
+        measure.wheelR<=0||m_State->SuspensionForce<=0||m_State->SuspensionUpper<m_State->SuspensionLower) {
+        error="invalid automobile suspension identity"; return Status::InvalidInput;
+    }
+    const auto named=[&](std::string_view name)->const NativeGeneratedVehicleFrame* {
+        const auto found=std::ranges::find_if(m_State->Assets->Frames,[&](const auto& frame){return frame.Name==name;});
+        return found==m_State->Assets->Frames.end()?nullptr:&*found;
+    };
+    const std::array<std::string_view,4> names{"wheel_lf_dummy","wheel_lb_dummy","wheel_rf_dummy","wheel_rb_dummy"};
+    std::array<const NativeGeneratedVehicleFrame*,4> wheels{};
+    for (std::size_t i=0;i<4;++i) {
+        wheels[i]=named(names[i]);
+        if (!wheels[i]) { error="missing source wheel dummy"; return Status::InvalidInput; }
+    }
+    auto next=*m_State; next.Revision++;
+    const float wheelR=float(measure.wheelR),spring=next.SuspensionUpper-next.SuspensionLower;
+    for (std::size_t i=0;i<4;++i) {
+        const float x=wheels[i]->ModelBind[9],y=wheels[i]->ModelBind[10],z=wheels[i]->ModelBind[11];
+        next.SuspensionLines[i]={{x,y,z+next.SuspensionUpper},{x,y,z+next.SuspensionLower-wheelR/2},
+            spring,next.SuspensionUpper-next.SuspensionLower+wheelR/2};
+    }
+    const auto height=[&](std::size_t i) {
+        return (1-1/(next.SuspensionForce*4))*spring+wheelR/2-next.SuspensionLines[i].Start[2];
+    };
+    next.FrontHeightAboveRoad=height(0); next.RearHeightAboveRoad=height(1);
     return Publish(std::move(next),error);
 }

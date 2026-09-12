@@ -38,6 +38,10 @@ struct HandlingParams {
     bool Abs = false; // (U)
     double steeringLockDegrees = 0.0; // (V)
     std::uint32_t HandlingFlags = 0; // (ag)
+    double suspensionForce=0, suspensionDamping=0, suspensionHighSpeedDamping=0;
+    double suspensionUpper=0, suspensionLower=0, suspensionBias=0, suspensionAntiDive=0;
+    double seatOffset=0, collisionDamageMultiplier=0;
+    std::uint32_t ModelFlags = 0; // (af)
     // SI values for the integrator (derived, formula logged by caller).
     double vmaxMs = 0.0; // vmaxFileKmh * (1000/3600)
     double accelSi = 0.0; // == accelFile (ms-2)

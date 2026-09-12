@@ -192,7 +192,8 @@ bool Handling_Load(const char* gameDir, const char* model, HandlingParams& out, 
     }
     // Column map (see file header above): toks[0]=name.
     double mass = 0, turnMass = 0, drag = 0, com[3]{}, submerged = 0, traction[3]{},
-        vmax = 0, accel = 0, inertia = 0, brake=0, brakeBias=0, steering=0;
+        vmax = 0, accel = 0, inertia = 0, brake=0, brakeBias=0, steering=0,
+        suspension[7]{}, seatOffset=0, collisionDamage=0;
     int gears = 0, abs=0;
     if (!ParseDouble(matchToks[1], mass) || !ParseDouble(matchToks[2], turnMass) ||
         !ParseDouble(matchToks[3], drag) || !ParseDouble(matchToks[4],com[0]) ||
@@ -203,7 +204,11 @@ bool Handling_Load(const char* gameDir, const char* model, HandlingParams& out, 
         !ParseDouble(matchToks[12], vmax) || !ParseDouble(matchToks[13], accel) ||
         !ParseDouble(matchToks[14], inertia) || !ParseDouble(matchToks[17],brake) ||
         !ParseDouble(matchToks[18],brakeBias) || !ParseInt(matchToks[19],abs) ||
-        !ParseDouble(matchToks[20],steering)) {
+        !ParseDouble(matchToks[20],steering) || !ParseDouble(matchToks[21],suspension[0]) ||
+        !ParseDouble(matchToks[22],suspension[1]) || !ParseDouble(matchToks[23],suspension[2]) ||
+        !ParseDouble(matchToks[24],suspension[3]) || !ParseDouble(matchToks[25],suspension[4]) ||
+        !ParseDouble(matchToks[26],suspension[5]) || !ParseDouble(matchToks[27],suspension[6]) ||
+        !ParseDouble(matchToks[28],seatOffset) || !ParseDouble(matchToks[29],collisionDamage)) {
         SetErr(err, errSize, "bad handling numbers");
         return false;
     }
@@ -214,7 +219,9 @@ bool Handling_Load(const char* gameDir, const char* model, HandlingParams& out, 
     if (!(mass > 0.0) || !(turnMass > 0.0) || drag < 0 || submerged < 0 ||
         !(traction[0] > 0) || !(traction[1] > 0) || traction[2] < 0 || traction[2] > 1 ||
         !(vmax > 0.0) || !(accel > 0.0) || !(brake > 0) || brakeBias < 0 || brakeBias > 1 ||
-        (abs!=0 && abs!=1) || !(steering > 0) || steering > 90 || gears < 1 || gears > 6) {
+        (abs!=0 && abs!=1) || !(steering > 0) || steering > 90 || !(suspension[0]>0) ||
+        suspension[3]<suspension[4] || suspension[5]<0 || suspension[5]>1 || collisionDamage<0 ||
+        gears < 1 || gears > 6) {
         SetErr(err, errSize, "handling values out of range");
         return false;
     }
@@ -233,6 +240,11 @@ bool Handling_Load(const char* gameDir, const char* model, HandlingParams& out, 
     out.tractionLoss=traction[1]; out.tractionBias=traction[2];
     out.brakeDeceleration=brake; out.brakeBias=brakeBias; out.Abs=abs!=0;
     out.steeringLockDegrees=steering;
+    out.suspensionForce=suspension[0]; out.suspensionDamping=suspension[1];
+    out.suspensionHighSpeedDamping=suspension[2]; out.suspensionUpper=suspension[3];
+    out.suspensionLower=suspension[4]; out.suspensionBias=suspension[5];
+    out.suspensionAntiDive=suspension[6]; out.seatOffset=seatOffset;
+    out.collisionDamageMultiplier=collisionDamage;
     // SI: km/h -> m/s via the game's own 0.277778 (1000/3600) factor;
     // accel file is already ms-2 (handling.cfg units header).
     out.vmaxMs = vmax * (1000.0 / 3600.0);
@@ -243,9 +255,12 @@ bool Handling_Load(const char* gameDir, const char* model, HandlingParams& out, 
     (void)std::snprintf(out.accelTok, sizeof(out.accelTok), "%s", matchToks[13].c_str());
     (void)std::snprintf(out.gearsTok, sizeof(out.gearsTok), "%s", matchToks[11].c_str());
     char* end=nullptr;
-    const auto flags=std::strtoul(matchToks[31].c_str(),&end,16);
+    const auto modelFlags=std::strtoul(matchToks[31].c_str(),&end,16);
     if (!end || *end!='\0') { SetErr(err,errSize,"bad handling flags"); return false; }
     (void)std::snprintf(out.handlingFlagsTok, sizeof(out.handlingFlagsTok), "%s", matchToks[31].c_str());
+    out.ModelFlags=std::uint32_t(modelFlags);
+    end=nullptr; const auto flags=std::strtoul(matchToks[32].c_str(),&end,16);
+    if (!end || *end!='\0') { SetErr(err,errSize,"bad transmission handling flags"); return false; }
     out.HandlingFlags=std::uint32_t(flags);
     (void)UpperInPlace(out.model, sizeof(out.model));
     return true;

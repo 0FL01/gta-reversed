@@ -4,6 +4,7 @@
 #include "NativeGeneratedVehicleAssets.h"
 #include "NativeVehiclePool.h"
 #include "NativeTransmission.h"
+#include "NativeSourcePhysical.h"
 
 #include <array>
 #include <memory>
@@ -31,8 +32,14 @@ struct NativeSourceAutomobileState {
     float BrakeDeceleration{}, BrakeBias{}, SteeringLockDegrees{};
     bool Abs{};
     std::uint32_t HandlingFlags{};
+    std::uint32_t ModelFlags{};
+    float SuspensionForce{}, SuspensionDamping{}, SuspensionHighSpeedDamping{};
+    float SuspensionUpper{}, SuspensionLower{}, SuspensionBias{}, SuspensionAntiDive{};
     float RawSteerAngle{}, SteerAngle{}, GasPedal{}, BrakePedal{};
     bool Handbrake{}, DoingBurnout{};
+    struct SuspensionLine { NativeSourcePhysicalVector Start{},End{}; float SpringLength{},LineLength{}; bool operator==(const SuspensionLine&) const=default; };
+    std::array<SuspensionLine,4> SuspensionLines{};
+    float FrontHeightAboveRoad{},RearHeightAboveRoad{};
     NativeTransmission::State Transmission;
     float ForwardSpeed{};
     float Elasticity = 0.05f, BrakeCount = 20, TireTemperature = 1;
@@ -61,6 +68,7 @@ public:
         float timeStep, std::string& error);
     NativeSourceAutomobileStatus AdvanceDrive(float timeStep, bool drivenWheelsOnGround,
         std::string& error);
+    NativeSourceAutomobileStatus SetupSuspension(const CarPoseMeasure&, std::string& error);
     std::shared_ptr<const NativeSourceAutomobileState> LastCommitted() const noexcept { return m_State; }
 
 private:

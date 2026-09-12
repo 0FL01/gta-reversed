@@ -67,6 +67,12 @@ int main(int argc,char** argv) try {
         constructed->BrakeBias==float(handling.brakeBias)&&constructed->Abs==handling.Abs&&
         constructed->SteeringLockDegrees==float(handling.steeringLockDegrees)&&
         constructed->HandlingFlags==handling.HandlingFlags,"source brake/steering/flag handling");
+    Check(constructed->ModelFlags==handling.ModelFlags&&constructed->SuspensionForce==float(handling.suspensionForce)&&
+        constructed->SuspensionDamping==float(handling.suspensionDamping)&&
+        constructed->SuspensionHighSpeedDamping==float(handling.suspensionHighSpeedDamping)&&
+        constructed->SuspensionUpper==float(handling.suspensionUpper)&&constructed->SuspensionLower==float(handling.suspensionLower)&&
+        constructed->SuspensionBias==float(handling.suspensionBias)&&constructed->SuspensionAntiDive==float(handling.suspensionAntiDive),
+        "source complete suspension handling");
     Check(constructed->Elasticity==0.05f&&constructed->BrakeCount==20&&constructed->TireTemperature==1,
         "source automobile literal initial state");
     Check(constructed->WheelRotation==std::array<float,4>{}&&constructed->WheelSpeed==std::array<float,4>{}&&
@@ -75,6 +81,19 @@ int main(int argc,char** argv) try {
         constructed->Occupants.PassengerCount==0,"source occupant initial state");
     Check(constructed->Assets==asset,"exact asset owner retained");
     const auto constructedCopy=*constructed;
+
+    CarPoseMeasure measure{};
+    Check(CarPose_Measure(argv[1],"landstal",measure,message,sizeof(message)),message);
+    Check(automobile.SetupSuspension(measure,error)==NativeSourceAutomobileStatus::Ready,error);
+    auto suspended=automobile.LastCommitted();
+    Check(suspended->SuspensionLines[0].Start[1]==float(measure.frontY)&&
+        suspended->SuspensionLines[1].Start[1]==float(measure.rearY),"source front/rear wheel dummy suspension identity");
+    Check(suspended->SuspensionLines[0].SpringLength==suspended->SuspensionUpper-suspended->SuspensionLower&&
+        suspended->SuspensionLines[0].LineLength==suspended->SuspensionUpper-suspended->SuspensionLower+float(measure.wheelR)/2,
+        "source suspension line arithmetic");
+    auto wrongMeasure=measure; std::strcpy(wrongMeasure.model,"rustler");
+    Check(automobile.SetupSuspension(wrongMeasure,error)==NativeSourceAutomobileStatus::InvalidInput&&
+        automobile.LastCommitted()==suspended,"mismatched suspension asset atomic");
 
     auto wrong=*landstal; wrong.ModelId=476;
     Check(automobile.Construct(88,wrong,asset,handling,NativeVehicleCreatedBy::Mission,Matrix(),error)==
@@ -91,11 +110,11 @@ int main(int argc,char** argv) try {
     auto nonfinite=Matrix(); nonfinite.Position[0]=__builtin_nanf("");
     Check(automobile.Construct(88,*landstal,asset,handling,NativeVehicleCreatedBy::Mission,nonfinite,error)==
         NativeSourceAutomobileStatus::InvalidInput,"nonfinite matrix rejected");
-    Check(automobile.LastCommitted()==constructed&&*constructed==constructedCopy,"construction failures retain publication");
+    Check(automobile.LastCommitted()==suspended&&*constructed==constructedCopy,"construction failures retain publication");
 
     Check(automobile.SetDriver(1001,error)==NativeSourceAutomobileStatus::Ready,error);
     auto driver=automobile.LastCommitted();
-    Check(driver->Revision==2&&driver->Occupants.Driver==1001,"exact driver identity attached");
+    Check(driver->Revision==3&&driver->Occupants.Driver==1001,"exact driver identity attached");
     Check(automobile.SetDriver(1002,error)==NativeSourceAutomobileStatus::Occupied,"second driver rejected");
     Check(automobile.LastCommitted()==driver,"driver collision atomic");
     Check(automobile.ProcessPlayerControls(255,0,128,false,false,0,1,error)==NativeSourceAutomobileStatus::Ready,error);
