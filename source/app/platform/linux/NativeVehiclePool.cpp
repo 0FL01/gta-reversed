@@ -63,6 +63,12 @@ bool ValidState(const NativeVehicleState& state, std::string& error) {
 NativeScriptReferenceResult<NativeVehicleRef> AllocationError(std::string message) {
     return {{NativeScriptServiceStatus::Error, std::move(message)}, {}};
 }
+NativeVehicleEvent Event(std::size_t sequence, std::uint64_t revision,
+    NativeVehicleEventKind kind, const NativeVehicleRecord& record) {
+    return {sequence, revision, kind, record.Reference, record.Producer, record.ProducerIndex,
+        record.State.ModelId, record.State.Type, record.State.Status, record.State.CreatedBy,
+        record.State.InWorld, record.State.Matrix};
+}
 } // namespace
 
 NativeVehiclePool::NativeVehiclePool() {
@@ -129,7 +135,7 @@ NativeScriptReferenceResult<NativeVehicleRef> NativeVehiclePool::Allocate(const 
         .State = request.State,
     };
     const auto revision = m_Revision + 1;
-    m_Events.push_back({m_Events.size() + 1, revision, NativeVehicleEventKind::Allocated, record});
+    m_Events.push_back(Event(m_Events.size() + 1, revision, NativeVehicleEventKind::Allocated, record));
     m_SlotGenerations[slot] = generation;
     m_Slots[slot] = std::move(record);
     m_Revision = revision;
@@ -150,7 +156,7 @@ bool NativeVehiclePool::Update(NativeVehicleRef reference, const NativeVehicleSt
     auto next = *current;
     next.State = state;
     const auto revision = m_Revision + 1;
-    m_Events.push_back({m_Events.size() + 1, revision, NativeVehicleEventKind::Updated, next});
+    m_Events.push_back(Event(m_Events.size() + 1, revision, NativeVehicleEventKind::Updated, next));
     m_Slots[static_cast<std::size_t>(reference.Value >> 8)] = std::move(next);
     m_Revision = revision;
     error.clear();
@@ -168,7 +174,7 @@ bool NativeVehiclePool::Release(NativeVehicleRef reference, std::string& error) 
     }
     const auto slot = static_cast<std::size_t>(reference.Value >> 8);
     const auto revision = m_Revision + 1;
-    m_Events.push_back({m_Events.size() + 1, revision, NativeVehicleEventKind::Released, *current});
+    m_Events.push_back(Event(m_Events.size() + 1, revision, NativeVehicleEventKind::Released, *current));
     m_Slots[slot].reset();
     m_Revision = revision;
     error.clear();

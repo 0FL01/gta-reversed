@@ -218,6 +218,33 @@ NativeSourceAutomobileStatus NativeSourceAutomobile::AdvanceDrive(float timeStep
     return Publish(std::move(next),error);
 }
 
+NativeSourceAutomobileStatus NativeSourceAutomobile::AdvancePosition(float timeStep,
+    std::string& error) {
+    if (!m_State || !std::isfinite(timeStep) || timeStep <= 0 || !Finite(m_State->MoveSpeed) ||
+        !Finite(m_State->FrictionMoveSpeed) || !Finite(m_State->FrictionTurnSpeed)) {
+        error="invalid automobile position step"; return Status::InvalidInput;
+    }
+    auto next=*m_State;
+    const auto velocity=Add(next.MoveSpeed,next.FrictionMoveSpeed);
+    const auto delta=Scale(velocity,timeStep);
+    for (std::size_t axis=0;axis<3;++axis) next.Matrix.Position[axis]+=delta[axis];
+    next.FrictionMoveSpeed={}; next.FrictionTurnSpeed={};
+    if (!Finite(next.Matrix)||!Finite(velocity)||!Finite(delta)) {
+        error="automobile position overflow"; return Status::InvalidInput;
+    }
+    next.Revision++;
+    return Publish(std::move(next),error);
+}
+
+NativeSourceAutomobileStatus NativeSourceAutomobile::EndControlFrame(std::string& error) {
+    if (!m_State) { error="automobile not constructed"; return Status::InvalidInput; }
+    auto next=*m_State;
+    next.SuspensionCompression.fill(1.0f);
+    next.VehicleCollisionProcessed=false;
+    next.Revision++;
+    return Publish(std::move(next),error);
+}
+
 NativeSourceAutomobileStatus NativeSourceAutomobile::SetupSuspension(const CarPoseMeasure& measure,
     std::string& error) {
     if (!m_State || std::string_view(measure.model)!=m_State->ModelName || measure.wheels!=4 ||

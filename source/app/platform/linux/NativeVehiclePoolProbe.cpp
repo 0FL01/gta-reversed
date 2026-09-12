@@ -114,6 +114,9 @@ void TransactionTests() {
     const auto first = Allocate(fixture.Pool, State());
     Require(first.Value == 1 && fixture.Pool.AtSlot(0) == fixture.Pool.Resolve(first),
         "first source slot and seven-bit generation");
+    Require(fixture.Pool.Events().back().Reference == first &&
+        fixture.Pool.Events().back().ModelId == 400,
+        "pool journal retains value provenance without runtime resource ownership");
     const auto before = fixture.Publish();
     auto moved = State();
     moved.Matrix.Position[0] = 7.0f;

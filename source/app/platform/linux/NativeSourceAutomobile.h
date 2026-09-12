@@ -105,6 +105,11 @@ public:
         float timeStep, std::string& error);
     NativeSourceAutomobileStatus AdvanceDrive(float timeStep, bool drivenWheelsOnGround,
         std::string& error);
+    // CPhysical::ApplyFriction (ordinary translational accumulator) followed by
+    // ApplyMoveSpeed. Rotation/world collision remain their existing owners.
+    NativeSourceAutomobileStatus AdvancePosition(float timeStep, std::string& error);
+    // ProcessControl's end-of-frame reset before the next ProcessEntityCollision.
+    NativeSourceAutomobileStatus EndControlFrame(std::string& error);
     NativeSourceAutomobileStatus SetupSuspension(const CarPoseMeasure&, std::string& error);
     NativeSourceAutomobileStatus ProcessWheels(const std::array<NativeSourceWheelContact,4>&,
         float timeStep, std::string& error);

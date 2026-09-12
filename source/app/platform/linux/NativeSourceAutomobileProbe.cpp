@@ -178,6 +178,19 @@ int main(int argc,char** argv) try {
     Check(automobile.ProcessPlayerControls(0,255,0,false,false,launch->ForwardSpeed,1,error)==NativeSourceAutomobileStatus::Ready,error);
     Check(automobile.AdvanceDrive(NativeTransmission::TimeStep,true,error)==NativeSourceAutomobileStatus::Ready,error);
     Check(automobile.LastCommitted()->ForwardSpeed<launch->ForwardSpeed,"source brake decelerates common automobile");
+    const auto beforePosition=automobile.LastCommitted();
+    Check(automobile.AdvancePosition(1,error)==NativeSourceAutomobileStatus::Ready,error);
+    Check(automobile.LastCommitted()->Matrix.Position!=beforePosition->Matrix.Position&&
+        automobile.LastCommitted()->FrictionMoveSpeed==NativeSourcePhysicalVector{}&&
+        automobile.LastCommitted()->FrictionTurnSpeed==NativeSourcePhysicalVector{},
+        "source physical position step consumes friction accumulators");
+    Check(automobile.EndControlFrame(error)==NativeSourceAutomobileStatus::Ready&&
+        automobile.LastCommitted()->SuspensionCompression==std::array<float,4>{1,1,1,1}&&
+        !automobile.LastCommitted()->VehicleCollisionProcessed,
+        "source control frame resets wheel contact and collision flag");
+    const auto afterPosition=automobile.LastCommitted();
+    Check(automobile.AdvancePosition(0,error)==NativeSourceAutomobileStatus::InvalidInput&&
+        automobile.LastCommitted()==afterPosition,"invalid position step retains publication");
     const auto beforeBadDrive=automobile.LastCommitted();
     Check(automobile.AdvanceDrive(0,true,error)==NativeSourceAutomobileStatus::InvalidInput&&
         automobile.LastCommitted()==beforeBadDrive,"invalid drive step retains publication");

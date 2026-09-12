@@ -129,7 +129,16 @@ struct NativeVehicleEvent {
     std::uint64_t Sequence = 0;
     std::uint64_t Revision = 0;
     NativeVehicleEventKind Kind = NativeVehicleEventKind::Allocated;
-    NativeVehicleRecord Record;
+    NativeVehicleRef Reference;
+    NativeVehicleProducer Producer = NativeVehicleProducer::Count;
+    std::int32_t ProducerIndex = -1;
+    std::int32_t ModelId = -1;
+    NativeVehicleType Type = NativeVehicleType::Unsupported;
+    NativeVehicleStatus Status = NativeVehicleStatus::Unsupported;
+    NativeVehicleCreatedBy CreatedBy = NativeVehicleCreatedBy::Unsupported;
+    bool InWorld = false;
+    NativeGarageMatrix Matrix;
+    bool operator==(const NativeVehicleEvent&) const = default;
 };
 
 struct NativeVehicleCensus {

@@ -65,8 +65,10 @@ def build():
                     'void NativeVehicleAssetQueueProbe_Offset(const char*);']
         for name, obj, result, parameters, arguments, kind, extra in specs:
             symbols = subprocess.check_output(['nm', '--defined-only', obj], cwd=directory, text=True).splitlines()
-            symbol, = [line.split()[-1] for line in symbols if len(line.split()) == 3 and line.split()[1] == 'T'
-                       and name in line.split()[-1] and not line.split()[-1].endswith('.cold')]
+            matches = [line.split()[-1] for line in symbols if len(line.split()) == 3 and line.split()[1] == 'T'
+                       and (line.split()[-1].startswith('_Z' + str(len(name)) + name) or line.split()[-1] == name)
+                       and not line.split()[-1].endswith('.cold')]
+            symbol, = matches
             wrappers += [f'{result} Real{name}({parameters}) asm("__real_{symbol}");',
                          f'{result} Wrap{name}({parameters}) asm("__wrap_{symbol}");',
                          f'{result} Wrap{name}({parameters}) {{ NativeVehicleAssetQueueProbe_Trace({kind}); {extra} return Real{name}({arguments}); }}']
