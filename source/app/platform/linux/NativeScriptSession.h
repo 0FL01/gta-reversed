@@ -57,6 +57,10 @@ struct NativeScriptGroupRef { std::int32_t Value = -1; };
 struct NativeScriptPedRef { std::int32_t Value = -1; };
 struct NativeScriptPickupRef { std::int32_t Value = -1; };
 struct NativeScriptBlipRef { std::int32_t Value = -1; };
+struct NativeScriptObjectRef {
+    std::int32_t Value = -1;
+    bool operator==(const NativeScriptObjectRef&) const = default;
+};
 // Source generator slot references: zero is valid; -1 is allocation failure.
 struct NativeScriptCarGeneratorRef { std::int32_t Value = -1; };
 template<typename Ref> struct NativeScriptReferenceResult {
@@ -75,6 +79,11 @@ struct NativeScriptCarGeneratorSwitchRequest {
     NativeScriptRequestId Id;
     NativeScriptCarGeneratorRef Generator;
     std::int32_t Count = 0;
+};
+struct NativeScriptCarGeneratorOwnedRequest {
+    NativeScriptRequestId Id;
+    NativeScriptCarGeneratorRef Generator;
+    bool Owned = false;
 };
 struct NativeScriptPlayerLookupRequest {
     NativeScriptRequestId Id;
@@ -104,6 +113,74 @@ struct NativeScriptPickupRequest {
     // Negative model operands index the immutable SCM used-object table.
     // Positive IDs have an empty name. The host resolves names against IDE.
     std::array<char, 24> UsedObjectName{};
+};
+struct NativeScriptObjectRequest {
+    NativeScriptRequestId Id;
+    std::int32_t ModelId = -1; // source operand; negative values index UsedObjects
+    NativeScriptPosition Position;
+    std::array<char, 24> UsedObjectName{};
+};
+struct NativeScriptObjectHeadingRequest {
+    NativeScriptRequestId Id;
+    NativeScriptObjectRef Object;
+    float Degrees = 0;
+};
+struct NativeScriptObjectCleanupRequest {
+    NativeScriptRequestId Id;
+    NativeScriptObjectRef Object;
+};
+struct NativeScriptObjectDamageRequest {
+    NativeScriptRequestId Id;
+    NativeScriptObjectRef Object;
+    std::int32_t Effect = 0;
+};
+struct NativeScriptObjectFreezeRequest {
+    NativeScriptRequestId Id;
+    NativeScriptObjectRef Object;
+    bool Frozen = false;
+};
+struct NativeScriptObjectDynamicRequest {
+    NativeScriptRequestId Id;
+    NativeScriptObjectRef Object;
+    bool Dynamic = false;
+};
+struct NativeScriptObjectVelocityRequest {
+    NativeScriptRequestId Id;
+    NativeScriptObjectRef Object;
+    NativeScriptPosition Velocity;
+};
+struct NativeScriptObjectProofRequest {
+    NativeScriptRequestId Id;
+    NativeScriptObjectRef Object;
+    std::uint8_t Proofs = 0; // source five boolean proof parameters, bits 0..4
+};
+struct NativeScriptObjectRotateRequest {
+    NativeScriptRequestId Id;
+    NativeScriptObjectRef Object;
+    NativeScriptPosition Rotation;
+    bool Relative = false;
+};
+struct NativeScriptObjectAreaRequest {
+    NativeScriptRequestId Id;
+    NativeScriptObjectRef Object;
+    std::int32_t Area = 0;
+};
+struct NativeScriptObjectLodRequest {
+    NativeScriptRequestId Id;
+    NativeScriptObjectRef Child, Parent;
+};
+struct NativeScriptObjectCoordinatesRequest {
+    NativeScriptRequestId Id;
+    NativeScriptObjectRef Object;
+    NativeScriptPosition Offset;
+};
+struct NativeScriptObjectCoordinatesResult {
+    NativeScriptServiceResult Result;
+    NativeScriptPosition Position;
+};
+struct NativeScriptObjectHeadingResult {
+    NativeScriptServiceResult Result;
+    float Degrees = 0;
 };
 struct NativeScriptContactBlipRequest {
     NativeScriptRequestId Id;
@@ -135,6 +212,11 @@ struct NativeScriptEntryExitFlagRequest {
 struct NativeScriptGarageRequest {
     NativeScriptRequestId Id;
     std::array<char, 8> Name{};
+};
+struct NativeScriptGarageTypeRequest {
+    NativeScriptRequestId Id;
+    std::array<char, 8> Name{};
+    std::int32_t Type = 0;
 };
 
 enum class NativeRestartKind { Hospital, Police };
@@ -183,15 +265,33 @@ public:
     // Original ordinary creation can complete with -1 when the source pool
     // has no free/reclaimable slot. This is not an allocated pickup reference.
     virtual NativeScriptReferenceResult<NativeScriptPickupRef> CreatePickup(const NativeScriptPickupRequest&) { return {}; }
+    virtual NativeScriptReferenceResult<NativeScriptObjectRef> CreateObjectNoOffset(const NativeScriptObjectRequest&) { return {}; }
+    virtual NativeScriptReferenceResult<NativeScriptObjectRef> CreateObject(const NativeScriptObjectRequest&) { return {}; }
+    virtual NativeScriptServiceResult SetObjectHeading(const NativeScriptObjectHeadingRequest&) { return {}; }
+    virtual NativeScriptServiceResult MarkObjectNoLongerNeeded(const NativeScriptObjectCleanupRequest&) { return {}; }
+    virtual NativeScriptServiceResult SetObjectCollisionDamageEffect(const NativeScriptObjectDamageRequest&) { return {}; }
+    virtual NativeScriptServiceResult FreezeObjectPosition(const NativeScriptObjectFreezeRequest&) { return {}; }
+    virtual NativeScriptServiceResult SetObjectDynamic(const NativeScriptObjectDynamicRequest&) { return {}; }
+    virtual NativeScriptServiceResult SetObjectVelocity(const NativeScriptObjectVelocityRequest&) { return {}; }
+    virtual NativeScriptServiceResult SetObjectProofs(const NativeScriptObjectProofRequest&) { return {}; }
+    virtual NativeScriptServiceResult RotateObject(const NativeScriptObjectRotateRequest&) { return {}; }
+    virtual NativeScriptServiceResult SetObjectRotation(const NativeScriptObjectRotateRequest&) { return {}; }
+    virtual NativeScriptServiceResult SetObjectAreaVisible(const NativeScriptObjectAreaRequest&) { return {}; }
+    virtual NativeScriptServiceResult ConnectObjectLods(const NativeScriptObjectLodRequest&) { return {}; }
+    virtual NativeScriptObjectCoordinatesResult GetObjectCoordinates(const NativeScriptObjectCoordinatesRequest&) { return {}; }
+    virtual NativeScriptObjectCoordinatesResult GetObjectOffsetInWorld(const NativeScriptObjectCoordinatesRequest&) { return {}; }
+    virtual NativeScriptObjectHeadingResult GetObjectHeading(const NativeScriptObjectCoordinatesRequest&) { return {}; }
     virtual NativeScriptReferenceResult<NativeScriptBlipRef> CreateContactBlip(const NativeScriptContactBlipRequest&) { return {}; }
     virtual NativeScriptReferenceResult<NativeScriptBlipRef> CreateCoordinateBlip(const NativeScriptCoordinateBlipRequest&) { return {}; }
     virtual NativeScriptServiceResult SetBlipDisplay(const NativeScriptBlipDisplayRequest&) { return {}; }
     virtual NativeScriptServiceResult SetEntryExitFlag(const NativeScriptEntryExitFlagRequest&) { return {}; }
     virtual NativeScriptServiceResult DeactivateGarage(const NativeScriptGarageRequest&) { return {}; }
+    virtual NativeScriptServiceResult ChangeGarageType(const NativeScriptGarageTypeRequest&) { return {}; }
     virtual NativeScriptServiceResult AddRestart(const NativeScriptRestartRequest&) { return {}; }
     virtual NativeScriptServiceResult AddStuntJump(const NativeScriptStuntJumpRequest&) { return {}; }
     virtual NativeScriptReferenceResult<NativeScriptCarGeneratorRef> CreateCarGenerator(const NativeScriptCarGeneratorRequest&) { return {}; }
     virtual NativeScriptServiceResult SwitchCarGenerator(const NativeScriptCarGeneratorSwitchRequest&) { return {}; }
+    virtual NativeScriptServiceResult SetCarGeneratorOwned(const NativeScriptCarGeneratorOwnedRequest&) { return {}; }
     virtual NativeScriptPickupCollectedResult HasPickupBeenCollected(const NativeScriptPickupReferenceRequest&);
     virtual NativeScriptServiceResult RemoveScriptPickup(const NativeScriptPickupReferenceRequest&);
 };
@@ -388,7 +488,8 @@ private:
         std::int32_t Int(unsigned i) const;
         float Float(unsigned i) const;
     };
-    bool Decode(std::size_t thread, std::uint32_t ip, Instruction& instruction, std::string& error) const;
+    bool Decode(std::size_t thread, std::uint32_t ip, Instruction& instruction, std::string& error,
+        bool validateRuntimeValues = true) const;
     bool ScriptStorage(std::size_t thread, std::uint32_t ip, std::span<const std::uint8_t>& bytes,
         std::uint32_t& base, std::string& error) const;
     bool IsGlobal(std::uint16_t byteOffset) const;
@@ -408,6 +509,7 @@ private:
     std::size_t m_PassCursor = 0;
     std::array<std::uint32_t, 6> m_Headers{};
     std::array<std::uint32_t, 6> m_HeaderTargets{};
+    mutable std::string m_TargetError;
     std::uint64_t m_SessionId = 0, m_CommandSequence = 0;
     bool m_Loaded = false, m_Pending = false, m_InService = false;
     bool m_Faulted = false;

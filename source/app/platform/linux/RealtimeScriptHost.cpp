@@ -2,7 +2,9 @@
 #include <algorithm>
 #include <cassert>
 #include <bit>
+#include <cctype>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <limits>
 #include <utility>
@@ -245,6 +247,14 @@ NativeScriptServiceResult RealtimeScriptHost::AddRestart(const NativeScriptResta
     if (result.Status == NativeScriptServiceStatus::Ready) Commit(event);
     return result;
 }
+NativeScriptServiceResult RealtimeScriptHost::ChangeGarageType(const NativeScriptGarageTypeRequest& request) {
+    if (!m_Initialized) return Error("garage type change requires initialized host");
+    RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=0x02FA, .StateArgument=request.Type, .Name=request.Name};
+    if (auto old = Replay(event)) return *old;
+    const auto result = m_Garages.ChangeType(request.Name, request.Type);
+    if (result.Status == NativeScriptServiceStatus::Ready) Commit(event);
+    return result;
+}
 
 NativeScriptServiceResult RealtimeScriptHost::AddStuntJump(const NativeScriptStuntJumpRequest& request) {
     if (!m_Initialized) return Error("stunt-jump registration requires initialized host");
@@ -268,6 +278,261 @@ NativeScriptServiceResult RealtimeScriptHost::AddStuntJump(const NativeScriptStu
     Commit(event);
     return Ready();
 }
+NativeScriptReferenceResult<NativeScriptObjectRef> RealtimeScriptHost::CreateObjectInternal(
+    const NativeScriptObjectRequest& request, bool noOffset) {
+    NativeScriptReferenceResult<NativeScriptObjectRef> result;
+    if (!m_Initialized) {
+        result.Result = Error("object creation requires initialized host");
+        return result;
+    }
+    if (m_PendingLoad) {
+        result.Result = Error("object creation cannot cross pending world request");
+        return result;
+    }
+    std::array<char, 24> name = request.UsedObjectName;
+    if (request.ModelId >= 0) {
+        const auto model = m_CollisionContext->Population.Models.find(request.ModelId);
+        if (model == m_CollisionContext->Population.Models.end()) {
+            result.Result = Unsupported("object model is absent from the source IDE");
+            return result;
+        }
+        name.fill('\0');
+        const auto copy = std::min(model->second.Name.size(), name.size() - 1);
+        std::copy_n(model->second.Name.data(), copy, name.data());
+    }
+    const auto length = std::find(name.begin(), name.end(), '\0');
+    if (length == name.begin()) {
+        result.Result = Error("object model name is missing");
+        return result;
+    }
+    const std::string modelName(name.data(), std::size_t(length - name.begin()));
+    const auto lookup = m_CollisionContext->Assets.LookupModel(modelName);
+    if (lookup.Status == NativeCollisionModelStatus::Unsupported) {
+        result.Result = Unsupported("object model source identity is unsupported");
+        return result;
+    }
+    int32 resolvedModel = request.ModelId;
+    if (resolvedModel < 0) {
+        resolvedModel = -1;
+        for (const auto& [modelId, ide] : m_CollisionContext->Population.Models) {
+            if (ide.Name.size() != modelName.size()) continue;
+            bool equal = true;
+            for (std::size_t i = 0; i < modelName.size(); ++i) {
+                if (std::tolower(static_cast<unsigned char>(ide.Name[i])) !=
+                    std::tolower(static_cast<unsigned char>(modelName[i]))) { equal = false; break; }
+            }
+            if (equal) { resolvedModel = modelId; break; }
+        }
+        if (resolvedModel < 0) {
+            result.Result = Unsupported("object model has no source IDE identity");
+            return result;
+        }
+    }
+    RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=std::uint16_t(noOffset ? 0x029B : 0x0107),
+        .Arguments={request.Position.X, request.Position.Y, request.Position.Z}, .Index=request.ModelId};
+    event.ModelName = name;
+    if (auto old = Replay(event)) {
+        if (old->Status != NativeScriptServiceStatus::Ready) { result.Result = *old; return result; }
+        const auto previous = std::ranges::find(m_Events, request.Id, &RealtimeScriptHostEvent::Id);
+        if (previous == m_Events.end()) { result.Result = Error("object replay event is missing"); return result; }
+        result.Result = *old;
+        result.Reference = {previous->Reference};
+        return result;
+    }
+    const NativeScriptObjectSource source{resolvedModel, name,
+        lookup.Status == NativeCollisionModelStatus::Ready ? lookup.Model : nullptr};
+    const auto created = m_Objects.Create(request, source, noOffset);
+    if (created.Result.Status != NativeScriptServiceStatus::Ready) {
+        result.Result = created.Result;
+        return result;
+    }
+    event.Reference = created.Reference.Value;
+    Commit(event);
+    return created;
+}
+NativeScriptReferenceResult<NativeScriptObjectRef> RealtimeScriptHost::CreateObjectNoOffset(
+    const NativeScriptObjectRequest& request) { return CreateObjectInternal(request, true); }
+NativeScriptReferenceResult<NativeScriptObjectRef> RealtimeScriptHost::CreateObject(
+    const NativeScriptObjectRequest& request) { return CreateObjectInternal(request, false); }
+NativeScriptServiceResult RealtimeScriptHost::SetObjectHeading(const NativeScriptObjectHeadingRequest& request) {
+    if (!m_Initialized) return Error("object heading requires initialized host");
+    RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=0x0177,
+        .Arguments={request.Degrees}, .Index=request.Object.Value};
+    if (auto old = Replay(event)) return *old;
+    std::string error;
+    if (m_Objects.SetHeading(request.Object, request.Degrees, error) != NativeScriptObjectStatus::Ok) return Error(error);
+    Commit(event);
+    return Ready();
+}
+NativeScriptServiceResult RealtimeScriptHost::MarkObjectNoLongerNeeded(const NativeScriptObjectCleanupRequest& request) {
+    if (!m_Initialized) return Error("object cleanup requires initialized host");
+    RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=0x01C7, .Index=request.Object.Value};
+    if (auto old = Replay(event)) return *old;
+    std::string error;
+    if (m_Objects.MarkNoLongerNeeded(request.Object, error) != NativeScriptObjectStatus::Ok) return Error(error);
+    Commit(event);
+    return Ready();
+}
+NativeScriptServiceResult RealtimeScriptHost::SetObjectCollisionDamageEffect(const NativeScriptObjectDamageRequest& request) {
+    if (!m_Initialized) return Error("object collision damage requires initialized host");
+    RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=0x07F7, .Index=request.Object.Value,
+        .StateArgument=request.Effect};
+    if (auto old = Replay(event)) return *old;
+    std::string error;
+    if (m_Objects.SetCollisionDamageEffect(request.Object, request.Effect, error) != NativeScriptObjectStatus::Ok) return Error(error);
+    Commit(event);
+    return Ready();
+}
+NativeScriptServiceResult RealtimeScriptHost::FreezeObjectPosition(const NativeScriptObjectFreezeRequest& request) {
+    if (!m_Initialized) return Error("object freeze requires initialized host");
+    RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=0x0550, .Index=request.Object.Value,
+        .StateArgument=request.Frozen ? 1 : 0};
+    if (auto old = Replay(event)) return *old;
+    std::string error;
+    if (m_Objects.SetStatic(request.Object, request.Frozen, error) != NativeScriptObjectStatus::Ok) return Error(error);
+    Commit(event);
+    return Ready();
+}
+NativeScriptServiceResult RealtimeScriptHost::SetObjectDynamic(const NativeScriptObjectDynamicRequest& request) {
+    if (!m_Initialized) return Error("object dynamic state requires initialized host");
+    RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=0x0392, .Index=request.Object.Value,
+        .StateArgument=request.Dynamic ? 1 : 0};
+    if (auto old = Replay(event)) return *old;
+    std::string error;
+    if (m_Objects.SetStatic(request.Object, !request.Dynamic, error) != NativeScriptObjectStatus::Ok) return Error(error);
+    Commit(event);
+    return Ready();
+}
+NativeScriptServiceResult RealtimeScriptHost::SetObjectVelocity(const NativeScriptObjectVelocityRequest& request) {
+    if (!m_Initialized) return Error("object velocity requires initialized host");
+    RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=0x0381,
+        .Arguments={request.Velocity.X, request.Velocity.Y, request.Velocity.Z}, .Index=request.Object.Value};
+    if (auto old = Replay(event)) return *old;
+    std::string error;
+    if (m_Objects.SetVelocity(request.Object, request.Velocity, error) != NativeScriptObjectStatus::Ok) return Error(error);
+    Commit(event);
+    return Ready();
+}
+NativeScriptServiceResult RealtimeScriptHost::SetObjectProofs(const NativeScriptObjectProofRequest& request) {
+    if (!m_Initialized) return Error("object proofs require initialized host");
+    RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=0x09CA, .Index=request.Object.Value,
+        .StateArgument=request.Proofs};
+    if (auto old = Replay(event)) return *old;
+    std::string error;
+    if (m_Objects.SetProofs(request.Object, request.Proofs, error) != NativeScriptObjectStatus::Ok) return Error(error);
+    Commit(event);
+    return Ready();
+}
+NativeScriptServiceResult RealtimeScriptHost::RotateObject(const NativeScriptObjectRotateRequest& request) {
+    if (!m_Initialized) return Error("object rotation requires initialized host");
+    RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=0x034D,
+        .Arguments={request.Rotation.X, request.Rotation.Y, request.Rotation.Z}, .Index=request.Object.Value,
+        .StateArgument=request.Relative ? 1 : 0};
+    if (auto old = Replay(event)) return *old;
+    std::string error;
+    if (m_Objects.SetRotation(request.Object, request.Rotation, request.Relative, error) != NativeScriptObjectStatus::Ok) return Error(error);
+    Commit(event);
+    return Ready();
+}
+NativeScriptServiceResult RealtimeScriptHost::SetObjectRotation(const NativeScriptObjectRotateRequest& request) {
+    if (!m_Initialized) return Error("object rotation requires initialized host");
+    RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=0x0453,
+        .Arguments={request.Rotation.X, request.Rotation.Y, request.Rotation.Z}, .Index=request.Object.Value};
+    if (auto old = Replay(event)) return *old;
+    std::string error;
+    if (m_Objects.SetRotation(request.Object, request.Rotation, false, error) != NativeScriptObjectStatus::Ok) return Error(error);
+    Commit(event);
+    return Ready();
+}
+NativeScriptServiceResult RealtimeScriptHost::SetObjectAreaVisible(const NativeScriptObjectAreaRequest& request) {
+    if (!m_Initialized) return Error("object area requires initialized host");
+    RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=0x0566, .Index=request.Object.Value,
+        .StateArgument=request.Area};
+    if (auto old = Replay(event)) return *old;
+    std::string error;
+    if (m_Objects.SetArea(request.Object, request.Area, error) != NativeScriptObjectStatus::Ok) return Error(error);
+    Commit(event);
+    return Ready();
+}
+NativeScriptObjectCoordinatesResult RealtimeScriptHost::GetObjectCoordinates(
+    const NativeScriptObjectCoordinatesRequest& request) {
+    NativeScriptObjectCoordinatesResult result;
+    if (!m_Initialized) { result.Result = Error("object coordinates require initialized host"); return result; }
+    const auto* object = m_Objects.Resolve(request.Object);
+    if (!object) { result.Result = Error("stale source object reference"); return result; }
+    RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=0x01BB, .Arguments={object->Position.X, object->Position.Y, object->Position.Z},
+        .Index=request.Object.Value};
+    if (auto old = Replay(event)) {
+        result.Result = *old;
+        if (result.Result.Status == NativeScriptServiceStatus::Ready) {
+            const auto previous = std::ranges::find(m_Events, request.Id, &RealtimeScriptHostEvent::Id);
+            if (previous == m_Events.end()) { result.Result = Error("object coordinate replay event is missing"); return result; }
+            result.Position = {previous->Arguments[0], previous->Arguments[1], previous->Arguments[2]};
+        }
+        return result;
+    }
+    result.Position = object->Position;
+    Commit(event);
+    result.Result = Ready();
+    return result;
+}
+NativeScriptObjectCoordinatesResult RealtimeScriptHost::GetObjectOffsetInWorld(
+    const NativeScriptObjectCoordinatesRequest& request) {
+    NativeScriptObjectCoordinatesResult result;
+    if (!m_Initialized) { result.Result = Error("object offset requires initialized host"); return result; }
+    NativeScriptPosition position;
+    std::string error;
+    if (m_Objects.GetOffsetInWorld(request.Object, request.Offset, position, error) != NativeScriptObjectStatus::Ok) {
+        result.Result = Error(error);
+        return result;
+    }
+    RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=0x0400,
+        .Arguments={position.X, position.Y, position.Z, request.Offset.X, request.Offset.Y, request.Offset.Z},
+        .Index=request.Object.Value};
+    if (auto old = Replay(event)) {
+        result.Result = *old;
+        if (result.Result.Status == NativeScriptServiceStatus::Ready) {
+            const auto previous = std::ranges::find(m_Events, request.Id, &RealtimeScriptHostEvent::Id);
+            if (previous == m_Events.end()) { result.Result = Error("object offset replay event is missing"); return result; }
+            result.Position = {previous->Arguments[0], previous->Arguments[1], previous->Arguments[2]};
+        }
+        return result;
+    }
+    result.Position = position;
+    Commit(event);
+    result.Result = Ready();
+    return result;
+}
+NativeScriptObjectHeadingResult RealtimeScriptHost::GetObjectHeading(const NativeScriptObjectCoordinatesRequest& request) {
+    NativeScriptObjectHeadingResult result;
+    if (!m_Initialized) { result.Result = Error("object heading requires initialized host"); return result; }
+    const auto* object = m_Objects.Resolve(request.Object);
+    if (!object) { result.Result = Error("stale source object reference"); return result; }
+    RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=0x0176, .Arguments={object->HeadingDegrees}, .Index=request.Object.Value};
+    if (auto old = Replay(event)) {
+        result.Result = *old;
+        if (result.Result.Status == NativeScriptServiceStatus::Ready) {
+            const auto previous = std::ranges::find(m_Events, request.Id, &RealtimeScriptHostEvent::Id);
+            if (previous == m_Events.end()) { result.Result = Error("object heading replay event is missing"); return result; }
+            result.Degrees = previous->Arguments[0];
+        }
+        return result;
+    }
+    result.Degrees = object->HeadingDegrees;
+    Commit(event);
+    result.Result = Ready();
+    return result;
+}
+NativeScriptServiceResult RealtimeScriptHost::ConnectObjectLods(const NativeScriptObjectLodRequest& request) {
+    if (!m_Initialized) return Error("object LOD connection requires initialized host");
+    RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=0x0827, .Index=request.Child.Value,
+        .Reference=request.Parent.Value};
+    if (auto old = Replay(event)) return *old;
+    std::string error;
+    if (m_Objects.ConnectLods(request.Child, request.Parent, error) != NativeScriptObjectStatus::Ok) return Error(error);
+    Commit(event);
+    return Ready();
+}
 
 NativeScriptPedRef RealtimeScriptHost::PedRef() const { return {static_cast<std::int32_t>((0u << 8) | m_PedGeneration)}; }
 NativeScriptGroupRef RealtimeScriptHost::GroupRef() const { return {static_cast<std::int32_t>(0u | (std::uint32_t{m_Group.Generation} << 16))}; }
@@ -281,7 +546,7 @@ std::optional<NativeScriptServiceResult> RealtimeScriptHost::Replay(const Realti
     if (m_Entities.OwnsRequest(event.Id)) return Error("service request ID already owned by property/radar service");
     for (const auto& old : m_Events) {
         if (old.Id != event.Id) continue;
-        if (old.Opcode != event.Opcode || old.Arguments != event.Arguments || old.Index != event.Index || old.StateArgument != event.StateArgument || old.Name != event.Name || old.GeneratorArguments != event.GeneratorArguments)
+        if (old.Opcode != event.Opcode || old.Arguments != event.Arguments || old.Index != event.Index || old.StateArgument != event.StateArgument || old.Name != event.Name || old.GeneratorArguments != event.GeneratorArguments || old.ModelName != event.ModelName)
             return Error("service request ID reused with different command/arguments");
         return NativeScriptServiceResult{old.Status, old.Status == NativeScriptServiceStatus::Ready ? "" : "replayed failed service request"};
     }
@@ -639,5 +904,19 @@ NativeScriptServiceResult RealtimeScriptHost::SwitchCarGenerator(const NativeScr
     const auto result = m_CarGenerators.Switch({request.Id, {request.Generator.Value}, request.Count}, State().TimeMs);
     event.Status = result.Status;
     event.Reference = request.Generator.Value; Commit(event);
+    return result;
+}
+NativeScriptServiceResult RealtimeScriptHost::SetCarGeneratorOwned(const NativeScriptCarGeneratorOwnedRequest& request) {
+    if (!m_Initialized) return Error("generator service requires initialized host");
+    if (m_PendingLoad) return Error("generator service cannot cross pending world request");
+    RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=0x0A17,
+        .Index=request.Generator.Value, .StateArgument=request.Owned ? 1 : 0};
+    if (auto result = Replay(event)) return *result;
+    std::string error;
+    const auto result = m_CarGenerators.SetPlayerOwned(
+        {request.Generator.Value}, request.Owned, error);
+    event.Status = result.Status;
+    event.Reference = request.Generator.Value;
+    Commit(event);
     return result;
 }

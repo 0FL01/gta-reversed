@@ -46,6 +46,7 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
         app/platform/linux/NativeScriptServiceTransaction.cpp
         app/platform/linux/NativeScriptPortableSave.cpp
         app/platform/linux/NativeStuntJumps.cpp
+        app/platform/linux/NativeScriptObjects.cpp
         app/platform/linux/NativeScriptEntities.cpp
         app/platform/linux/NativeEntryExits.cpp
         app/platform/linux/NativeRestarts.cpp

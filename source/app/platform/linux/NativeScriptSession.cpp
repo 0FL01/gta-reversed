@@ -436,7 +436,8 @@ bool NativeScriptSession::ScriptStorage(std::size_t threadIndex, uint32 ip, std:
     return false;
 }
 
-bool NativeScriptSession::Decode(std::size_t thread, uint32 ip, Instruction& d, std::string& error) const {
+bool NativeScriptSession::Decode(std::size_t thread, uint32 ip, Instruction& d, std::string& error,
+    bool validateRuntimeValues) const {
     const auto& state = m_Threads[thread];
     std::span<const uint8> bytes;
     uint32 base = 0;
@@ -489,6 +490,10 @@ bool NativeScriptSession::Decode(std::size_t thread, uint32 ip, Instruction& d, 
                 if ((global && !IsGlobal(uint16(bits))) || (!global && bits >= state.Locals.size()) ||
                     (globalIndex && !IsGlobal(uint16(indexVar))) || (!globalIndex && indexVar >= state.Locals.size())) {
                     error = "array base/index variable out of bounds"; return false;
+                }
+                if (!validateRuntimeValues) {
+                    tag = global ? 2 : 3;
+                    return true;
                 }
                 const int32 index = std::bit_cast<int32>(globalIndex ? Word(m_Memory, indexVar) : state.Locals[indexVar]);
                 // Check signed index BEFORE address arithmetic/narrowing. An
@@ -562,6 +567,7 @@ uint32 NativeScriptSession::Target(std::size_t thread, int32 target) const {
 }
 
 bool NativeScriptSession::IsTarget(std::size_t thread, int32 label) const {
+    m_TargetError.clear();
     // RunningScript::UpdatePC interprets every nonnegative label in the shared
     // main ScriptSpace. Mission/streamed-local labels are negative offsets from
     // BaseIP, even though this owner represents their addresses numerically.
@@ -572,7 +578,7 @@ bool NativeScriptSession::IsTarget(std::size_t thread, int32 label) const {
     std::span<const uint8> bytes;
     uint32 base = 0;
     std::string storageError;
-    if (!ScriptStorage(thread, target, bytes, base, storageError)) return false;
+    if (!ScriptStorage(thread, target, bytes, base, storageError)) { m_TargetError = storageError; return false; }
     if (!base && std::find(m_Headers.begin(), m_Headers.end(), target) != m_Headers.end()) return true;
     if (!base && (target < m_Metadata.CodeStart || target >= m_Metadata.MainSize)) return false;
     // Prove an instruction boundary by typed decoding, never searching bytes.
@@ -581,7 +587,7 @@ bool NativeScriptSession::IsTarget(std::size_t thread, int32 label) const {
     while (pos < target) {
         Instruction d;
         std::string error;
-        if (!Decode(thread, pos, d, error)) return false;
+        if (!Decode(thread, pos, d, error, false)) { m_TargetError = error; return false; }
         pos = d.Next;
     }
     return pos == target;
@@ -620,9 +626,11 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
     const auto* schema = NativeScriptLookupSchema(d.Opcode);
     if (!schema || schema->Semantics != NativeScriptSemanticCoverage::Implemented)
         return Fail(thread, NativeScriptStatus::Unsupported, rawOpcode, "opcode form classified; semantics unsupported");
-    auto invalid = [&](const char* message) { return Fail(thread, NativeScriptStatus::Error, rawOpcode, message); };
+    auto invalid = [&](std::string message) { return Fail(thread, NativeScriptStatus::Error, rawOpcode, std::move(message)); };
     std::vector<uint8> mission;
     std::optional<NativeScriptThreadState> newThread;
+    std::optional<NativeScriptPosition> objectCoordinates;
+    std::optional<float> objectHeading;
     int32 streamedLaunch = -1;
     uint32 arithmeticResult = 0;
     if (d.Opcode >= 0x0008 && d.Opcode <= 0x0017) {
@@ -655,7 +663,7 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         if (state.Condition) break; // source doesn't evaluate PC for an untaken branch
         [[fallthrough]];
     case 0x0002:
-        if (!IsTarget(thread, a)) return invalid("GOTO target is not a supported instruction boundary");
+        if (!IsTarget(thread, a)) return invalid("GOTO target is not a supported instruction boundary: " + m_TargetError);
         for (unsigned i = 0; i < m_Headers.size(); ++i) {
             if (state.IP == m_Headers[i] && uint32(a) != m_HeaderTargets[i]) return invalid("modified SCM header target");
         }
@@ -674,7 +682,7 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         break;
     case 0x0050:
         if (state.StackDepth >= state.ReturnStack.size()) return invalid("script return stack overflow");
-        if (!IsTarget(thread, a)) return invalid("GOSUB target is not a supported instruction boundary");
+        if (!IsTarget(thread, a)) return invalid("GOSUB target is not a supported instruction boundary: " + m_TargetError);
         break;
     case 0x0051:
         if (!state.StackDepth) return invalid("script return stack underflow");
@@ -761,7 +769,7 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
 
     int32 reference = -1;
     bool pickupCollected = false;
-    if (d.Opcode == 0x04E4 || d.Opcode == 0x03CB || d.Opcode == 0x0053 || d.Opcode == 0x07AF || d.Opcode == 0x01F5 || d.Opcode == 0x0373 || d.Opcode == 0x0173 || d.Opcode == 0x0517 || d.Opcode == 0x0518 || d.Opcode == 0x0570 || d.Opcode == 0x04CE || d.Opcode == 0x018B || d.Opcode == 0x09B4 || d.Opcode == 0x02B9 || d.Opcode == 0x016C || d.Opcode == 0x016D || d.Opcode == 0x0814 || d.Opcode == 0x0213 || d.Opcode == 0x0214 || d.Opcode == 0x0215 || d.Opcode == 0x014B || d.Opcode == 0x014C) {
+    if (d.Opcode == 0x04E4 || d.Opcode == 0x03CB || d.Opcode == 0x0053 || d.Opcode == 0x07AF || d.Opcode == 0x01F5 || d.Opcode == 0x0373 || d.Opcode == 0x0173 || d.Opcode == 0x0517 || d.Opcode == 0x0518 || d.Opcode == 0x0570 || d.Opcode == 0x04CE || d.Opcode == 0x018B || d.Opcode == 0x09B4 || d.Opcode == 0x02B9 || d.Opcode == 0x02FA || d.Opcode == 0x016C || d.Opcode == 0x016D || d.Opcode == 0x0814 || d.Opcode == 0x029B || d.Opcode == 0x0107 || d.Opcode == 0x0177 || d.Opcode == 0x01C7 || d.Opcode == 0x07F7 || d.Opcode == 0x0550 || d.Opcode == 0x0392 || d.Opcode == 0x09CA || d.Opcode == 0x034D || d.Opcode == 0x0566 || d.Opcode == 0x01BB || d.Opcode == 0x0176 || d.Opcode == 0x0827 || d.Opcode == 0x0381 || d.Opcode == 0x0400 || d.Opcode == 0x0453 || d.Opcode == 0x0A17 || d.Opcode == 0x0213 || d.Opcode == 0x0214 || d.Opcode == 0x0215 || d.Opcode == 0x014B || d.Opcode == 0x014C) {
         const NativeScriptRequestId id{m_SessionId, m_CommandSequence + 1, state.IP};
         NativeScriptServiceResult result;
         // All operands/output bounds have been checked before ANY host call.
@@ -799,6 +807,7 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
             if (d.Opcode == 0x0215) result = services.RemoveScriptPickup({id, {a}});
             if (d.Opcode == 0x09B4) result = services.SetEntryExitFlag({id, d.Float(0), d.Float(1), d.Float(2), d.Int(3), d.Int(4)});
             if (d.Opcode == 0x02B9) result = services.DeactivateGarage({id, d.Text});
+            if (d.Opcode == 0x02FA) result = services.ChangeGarageType({id, d.Text, d.Int(1)});
             if (d.Opcode == 0x016C || d.Opcode == 0x016D) result = services.AddRestart({id,
                 d.Opcode == 0x016C ? NativeRestartKind::Hospital : NativeRestartKind::Police,
                 {d.Float(0), d.Float(1), d.Float(2)}, d.Float(3), d.Int(4)});
@@ -806,6 +815,47 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
                 {d.Float(0), d.Float(1), d.Float(2)}, {d.Float(3), d.Float(4), d.Float(5)},
                 {d.Float(6), d.Float(7), d.Float(8)}, {d.Float(9), d.Float(10), d.Float(11)},
                 {d.Float(12), d.Float(13), d.Float(14)}, d.Int(15)});
+            if (d.Opcode == 0x029B || d.Opcode == 0x0107) {
+                NativeScriptObjectRequest request{id, d.Int(0), {d.Float(1), d.Float(2), d.Float(3)}};
+                if (request.ModelId < 0) {
+                    const auto index = uint64(-int64(request.ModelId));
+                    if (index >= m_Metadata.UsedObjects.size()) return invalid("object used-object index out of bounds");
+                    request.UsedObjectName = m_Metadata.UsedObjects[index];
+                }
+                auto created = d.Opcode == 0x029B ? services.CreateObjectNoOffset(request) : services.CreateObject(request);
+                result = std::move(created.Result); reference = created.Reference.Value;
+            }
+            if (d.Opcode == 0x0177) result = services.SetObjectHeading({id, {a}, d.Float(1)});
+            if (d.Opcode == 0x01C7) result = services.MarkObjectNoLongerNeeded({id, {a}});
+            if (d.Opcode == 0x07F7) result = services.SetObjectCollisionDamageEffect({id, {a}, b});
+            if (d.Opcode == 0x0550) result = services.FreezeObjectPosition({id, {a}, b != 0});
+            if (d.Opcode == 0x0392) result = services.SetObjectDynamic({id, {a}, b != 0});
+            if (d.Opcode == 0x09CA) {
+                const auto proofs = std::uint8_t((d.Int(1) != 0) | ((d.Int(2) != 0) << 1) |
+                    ((d.Int(3) != 0) << 2) | ((d.Int(4) != 0) << 3) | ((d.Int(5) != 0) << 4));
+                result = services.SetObjectProofs({id, {a}, proofs});
+            }
+            if (d.Opcode == 0x034D) result = services.RotateObject({id, {a}, {d.Float(1), d.Float(2), 0}, d.Int(3) != 0});
+            if (d.Opcode == 0x0566) result = services.SetObjectAreaVisible({id, {a}, b});
+            if (d.Opcode == 0x01BB) {
+                auto coordinates = services.GetObjectCoordinates({id, {a}, {}});
+                result = std::move(coordinates.Result);
+                if (result.Status == NativeScriptServiceStatus::Ready) objectCoordinates = coordinates.Position;
+            }
+            if (d.Opcode == 0x0176) {
+                auto heading = services.GetObjectHeading({id, {a}, {}});
+                result = std::move(heading.Result);
+                if (result.Status == NativeScriptServiceStatus::Ready) objectHeading = heading.Degrees;
+            }
+            if (d.Opcode == 0x0827) result = services.ConnectObjectLods({id, {a}, {b}});
+            if (d.Opcode == 0x0381) result = services.SetObjectVelocity({id, {a}, {d.Float(1), d.Float(2), d.Float(3)}});
+            if (d.Opcode == 0x0400) {
+                auto coordinates = services.GetObjectOffsetInWorld({id, {a}, {d.Float(1), d.Float(2), d.Float(3)}});
+                result = std::move(coordinates.Result);
+                if (result.Status == NativeScriptServiceStatus::Ready) objectCoordinates = coordinates.Position;
+            }
+            if (d.Opcode == 0x0453) result = services.SetObjectRotation({id, {a}, {d.Float(1), d.Float(2), d.Float(3)}, false});
+            if (d.Opcode == 0x0A17) result = services.SetCarGeneratorOwned({id, {a}, b != 0});
             if (d.Opcode == 0x0517) {
                 auto created = services.CreateLockedProperty({id, {d.Float(0), d.Float(1), d.Float(2)}, d.Text});
                 result = std::move(created.Result); reference = created.Reference.Value;
@@ -863,7 +913,7 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         }
         // Group generations occupy the high 16 bits, including the sign bit.
         // The host validates liveness; only the invalid sentinel is VM-invalid.
-        if ((d.Opcode == 0x07AF || d.Opcode == 0x01F5 || d.Opcode == 0x0517 || d.Opcode == 0x0518 || d.Opcode == 0x0570 || d.Opcode == 0x04CE) && reference == -1) return invalid("Ready lookup returned invalid script reference");
+        if ((d.Opcode == 0x07AF || d.Opcode == 0x01F5 || d.Opcode == 0x0517 || d.Opcode == 0x0518 || d.Opcode == 0x0570 || d.Opcode == 0x04CE || d.Opcode == 0x029B || d.Opcode == 0x0107) && reference == -1) return invalid("Ready lookup returned invalid script reference");
     }
 
     // Commit point: nothing above changes script-visible state or global bytes.
@@ -982,6 +1032,23 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         break;
     case 0x0053: write(4, uint32(a)); break;
     case 0x0517: case 0x0570: case 0x04CE: write(4, uint32(reference)); break;
+    case 0x029B: case 0x0107: write(4, uint32(reference)); break;
+    case 0x01BB:
+        if (!objectCoordinates) return invalid("object coordinate service returned no value");
+        write(1, std::bit_cast<std::uint32_t>(objectCoordinates->X));
+        write(2, std::bit_cast<std::uint32_t>(objectCoordinates->Y));
+        write(3, std::bit_cast<std::uint32_t>(objectCoordinates->Z));
+        break;
+    case 0x0176:
+        if (!objectHeading) return invalid("object heading service returned no value");
+        write(1, std::bit_cast<std::uint32_t>(*objectHeading));
+        break;
+    case 0x0400:
+        if (!objectCoordinates) return invalid("object world offset service returned no value");
+        write(4, std::bit_cast<std::uint32_t>(objectCoordinates->X));
+        write(5, std::bit_cast<std::uint32_t>(objectCoordinates->Y));
+        write(6, std::bit_cast<std::uint32_t>(objectCoordinates->Z));
+        break;
     case 0x0518: case 0x0213: write(5, uint32(reference)); break;
     case 0x014B: write(12, uint32(reference)); break;
     case 0x07AF: case 0x01F5: write(1, uint32(reference)); break;

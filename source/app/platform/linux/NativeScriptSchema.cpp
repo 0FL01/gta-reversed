@@ -63,9 +63,27 @@ constexpr NativeScriptOpcodeSchema s_Schema[]{
     {0x0814, {O::Float, O::Float, O::Float, O::Float, O::Float, O::Float,
                O::Float, O::Float, O::Float, O::Float, O::Float, O::Float,
                O::Float, O::Float, O::Float, O::Integer}, 16, C::Implemented},
-    // Next observed mission-0 frontier after all source stunt registrations.
-    // Object construction/world/cleanup ownership is not supplied by schema.
-    {0x029B, {O::Integer, O::Float, O::Float, O::Float, O::Output}, 5, C::Unsupported},
+    // CREATE_OBJECT_NO_OFFSET is owned as a source identity/lifetime record;
+    // model streaming/render/world cleanup remain separate consumers.
+    {0x029B, {O::Integer, O::Float, O::Float, O::Float, O::Output}, 5, C::Implemented},
+    {0x0177, {O::Integer, O::Float}, 2, C::Implemented},
+    {0x01C7, {O::Integer}, 1, C::Implemented},
+    {0x07F7, {O::Integer, O::Integer}, 2, C::Implemented},
+    {0x0550, {O::Integer, O::Integer}, 2, C::Implemented},
+    {0x0107, {O::Integer, O::Float, O::Float, O::Float, O::Output}, 5, C::Implemented},
+    {0x0392, {O::Integer, O::Integer}, 2, C::Implemented},
+    {0x09CA, {O::Integer, O::Integer, O::Integer, O::Integer, O::Integer, O::Integer}, 6, C::Implemented},
+    {0x034D, {O::Integer, O::Float, O::Float, O::Integer}, 4, C::Implemented},
+    {0x02FA, {O::String, O::Integer}, 2, C::Implemented},
+    {0x0566, {O::Integer, O::Integer}, 2, C::Implemented},
+    {0x01BB, {O::Integer, O::FloatOutput, O::FloatOutput, O::FloatOutput}, 4, C::Implemented},
+    {0x0176, {O::Integer, O::FloatOutput}, 2, C::Implemented},
+    {0x0827, {O::Integer, O::Integer}, 2, C::Implemented},
+    {0x0381, {O::Integer, O::Float, O::Float, O::Float}, 4, C::Implemented},
+    {0x0400, {O::Integer, O::Float, O::Float, O::Float, O::FloatOutput, O::FloatOutput,
+              O::FloatOutput}, 7, C::Implemented},
+    {0x0453, {O::Integer, O::Float, O::Float, O::Float}, 4, C::Implemented},
+    {0x0A17, {O::Integer, O::Integer}, 2, C::Implemented},
 };
 }
 

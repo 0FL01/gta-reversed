@@ -9,6 +9,7 @@
 #include "app/platform/linux/NativeGarages.h"
 #include "app/platform/linux/NativeRestarts.h"
 #include "app/platform/linux/NativeStuntJumps.h"
+#include "app/platform/linux/NativeScriptObjects.h"
 #include "app/platform/linux/NativeVehiclePool.h"
 #include "app/platform/linux/NativeCarGeneratorResidency.h"
 #include "app/platform/linux/NativeSourceRng.h"
@@ -46,6 +47,7 @@ struct RealtimeScriptHostEvent {
     NativeScriptServiceStatus Status = NativeScriptServiceStatus::Ready;
     RealtimeGameplayState Player{};
     RealtimeGameplayCamera Camera{};
+    std::array<char, 24> ModelName{};
 };
 struct RealtimeScriptPlayerInfo {
     // PlayerInfo.cpp::Clear, source lifetime owned by this new-game host.
@@ -124,6 +126,7 @@ public:
     const NativeGarages& Garages() const { return m_Garages; }
     const NativeRestarts& Restarts() const { return m_Restarts; }
     const NativeStuntJumps& StuntJumps() const { return m_StuntJumps; }
+    const NativeScriptObjects& Objects() const { return m_Objects; }
     // Explicit query inputs carry source area/ENEX authority; city unlock is
     // always read from this host's SCM stats. Returns reset work, never teleport.
     NativeRestartSelection QueryRestart(NativeRestartQuery query) const;
@@ -177,14 +180,33 @@ public:
     NativeScriptServiceResult SetBlipDisplay(const NativeScriptBlipDisplayRequest&) override;
     NativeScriptServiceResult SetEntryExitFlag(const NativeScriptEntryExitFlagRequest&) override;
     NativeScriptServiceResult DeactivateGarage(const NativeScriptGarageRequest&) override;
+    NativeScriptServiceResult ChangeGarageType(const NativeScriptGarageTypeRequest&) override;
     NativeScriptServiceResult AddRestart(const NativeScriptRestartRequest&) override;
     NativeScriptServiceResult AddStuntJump(const NativeScriptStuntJumpRequest&) override;
+    NativeScriptReferenceResult<NativeScriptObjectRef> CreateObjectNoOffset(const NativeScriptObjectRequest&) override;
+    NativeScriptReferenceResult<NativeScriptObjectRef> CreateObject(const NativeScriptObjectRequest&) override;
+    NativeScriptServiceResult SetObjectHeading(const NativeScriptObjectHeadingRequest&) override;
+    NativeScriptServiceResult MarkObjectNoLongerNeeded(const NativeScriptObjectCleanupRequest&) override;
+    NativeScriptServiceResult SetObjectCollisionDamageEffect(const NativeScriptObjectDamageRequest&) override;
+    NativeScriptServiceResult FreezeObjectPosition(const NativeScriptObjectFreezeRequest&) override;
+    NativeScriptServiceResult SetObjectDynamic(const NativeScriptObjectDynamicRequest&) override;
+    NativeScriptServiceResult SetObjectVelocity(const NativeScriptObjectVelocityRequest&) override;
+    NativeScriptServiceResult SetObjectProofs(const NativeScriptObjectProofRequest&) override;
+    NativeScriptServiceResult RotateObject(const NativeScriptObjectRotateRequest&) override;
+    NativeScriptServiceResult SetObjectRotation(const NativeScriptObjectRotateRequest&) override;
+    NativeScriptServiceResult SetObjectAreaVisible(const NativeScriptObjectAreaRequest&) override;
+    NativeScriptObjectCoordinatesResult GetObjectCoordinates(const NativeScriptObjectCoordinatesRequest&) override;
+    NativeScriptObjectCoordinatesResult GetObjectOffsetInWorld(const NativeScriptObjectCoordinatesRequest&) override;
+    NativeScriptObjectHeadingResult GetObjectHeading(const NativeScriptObjectCoordinatesRequest&) override;
+    NativeScriptServiceResult ConnectObjectLods(const NativeScriptObjectLodRequest&) override;
     NativeScriptReferenceResult<NativeScriptCarGeneratorRef> CreateCarGenerator(const NativeScriptCarGeneratorRequest&) override;
     NativeScriptServiceResult SwitchCarGenerator(const NativeScriptCarGeneratorSwitchRequest&) override;
+    NativeScriptServiceResult SetCarGeneratorOwned(const NativeScriptCarGeneratorOwnedRequest&) override;
     NativeScriptPickupCollectedResult HasPickupBeenCollected(const NativeScriptPickupReferenceRequest&) override;
     NativeScriptServiceResult RemoveScriptPickup(const NativeScriptPickupReferenceRequest&) override;
 
 private:
+    NativeScriptReferenceResult<NativeScriptObjectRef> CreateObjectInternal(const NativeScriptObjectRequest&, bool noOffset);
     NativeScriptServiceResult PublishWorld(const NativeScriptSceneRequest& request, bool requireGround = false);
     std::optional<NativeScriptServiceResult> Replay(const RealtimeScriptHostEvent& event);
     void Commit(RealtimeScriptHostEvent event);
@@ -199,6 +221,7 @@ private:
     NativeGarages m_Garages;
     NativeRestarts m_Restarts;
     NativeStuntJumps m_StuntJumps;
+    NativeScriptObjects m_Objects;
     NativeVehiclePool m_Vehicles;
     NativeSourceRng m_SourceRng;
     NativeCarGenerators m_CarGenerators;

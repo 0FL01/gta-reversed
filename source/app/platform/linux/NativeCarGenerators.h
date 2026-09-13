@@ -345,6 +345,7 @@ public:
     NativeScriptReferenceResult<NativeCarGeneratorRef> Create(const NativeCarGeneratorCreateRequest& request,
         std::uint32_t timeMs);
     NativeScriptServiceResult Switch(const NativeCarGeneratorSwitchRequest& request, std::uint32_t timeMs);
+    NativeScriptServiceResult SetPlayerOwned(NativeCarGeneratorRef reference, bool owned, std::string& error);
     bool ActivateStreamedIpl(std::string_view source, std::uint8_t iplId, std::uint32_t timeMs, std::string& error);
     std::size_t RemoveIpl(std::uint8_t iplId);
     void ActivateGenerateEvenIfPlayerIsClose(std::uint8_t frames = 20) { m_GenerateCloseCounter = frames; }

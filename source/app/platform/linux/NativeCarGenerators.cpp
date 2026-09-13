@@ -465,6 +465,19 @@ NativeScriptServiceResult NativeCarGenerators::Switch(const NativeCarGeneratorSw
     return result;
 }
 
+NativeScriptServiceResult NativeCarGenerators::SetPlayerOwned(
+    NativeCarGeneratorRef reference, bool owned, std::string& error) {
+    auto* generator = Resolve(reference);
+    if (!generator) {
+        error = "0A17 car-generator reference is outside the live source registry";
+        return {NativeScriptServiceStatus::Error, error};
+    }
+    generator->PlayerHasAlreadyOwnedCar = owned;
+    ++m_Revision;
+    error.clear();
+    return {NativeScriptServiceStatus::Ready, {}};
+}
+
 NativeScriptServiceResult NativeCarGenerators::RegisterAsset(NativeCarGeneratorAssetRecord& asset,
     uint8 iplId, uint32 timeMs) {
     NativeCarGeneratorCreateRequest request;

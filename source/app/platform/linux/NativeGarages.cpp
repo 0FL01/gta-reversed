@@ -253,6 +253,12 @@ NativeScriptServiceResult NativeGarages::Deactivate(std::span<const char> name) 
     // Original handler explicitly skips a missing name. Never allocate a stub.
     return {NativeScriptServiceStatus::Ready,{}};
 }
+NativeScriptServiceResult NativeGarages::ChangeType(std::span<const char> name, std::int32_t type) {
+    if (!m_Owner) return {NativeScriptServiceStatus::Error,"garage registry not initialized"};
+    if (type < 0 || type > 255) return {NativeScriptServiceStatus::Error,"garage type is out of byte range"};
+    if (const auto ref=Find(name)) { m_Entries[ref->Index].Type=std::uint8_t(type); ++m_Revision; }
+    return {NativeScriptServiceStatus::Ready,{}};
+}
 bool NativeGarages::Contains(const NativeGarageEntry& g, V p, float margin) {
     const float x=p[0]-g.Origin[0],y=p[1]-g.Origin[1];
     const float a=x*g.DirectionA[0]+y*g.DirectionA[1],b=x*g.DirectionB[0]+y*g.DirectionB[1];
@@ -327,6 +333,10 @@ NativeGarageRequirement NativeGarages::Transition(const NativeGarageEntry& g,con
         return NativeGarageRequirement::ImpoundVehicles;
     }
     if (g.DoorState==2 || g.DoorState==3) return NativeGarageRequirement::DoorMotion;
+    // Type 22 is the hidden TRICAS record in int_veg.ipl and is absent from
+    // the reversed eGarageType enum. Keep its unported body strict nearby;
+    // a distant hidden-interior record has no active transition in this view.
+    if ((g.Type==19 || g.Type==22) && DistanceSquared(g,p)>=3600.0f) return NativeGarageRequirement::None;
     if (!Hideout(g.Type)) return NativeGarageRequirement::SourceTypeUpdate;
     if (g.DoorState==1) {
         const auto distance=DistanceSquared(g,p);

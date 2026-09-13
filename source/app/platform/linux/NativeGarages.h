@@ -119,6 +119,7 @@ private:
     NativeGarages& operator=(NativeGarages&&) noexcept = default; // transactional startup publication only
     friend class RealtimeScriptHost;
     NativeScriptServiceResult Deactivate(std::span<const char> name);
+    NativeScriptServiceResult ChangeType(std::span<const char> name, std::int32_t type);
     std::vector<NativeGarageEntry> m_Entries;
     std::vector<NativeGarageDoor> m_Doors;
     std::shared_ptr<const NativeCollisionModel> m_Ped1Collision;
