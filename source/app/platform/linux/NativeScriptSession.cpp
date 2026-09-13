@@ -761,7 +761,7 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
 
     int32 reference = -1;
     bool pickupCollected = false;
-    if (d.Opcode == 0x04E4 || d.Opcode == 0x03CB || d.Opcode == 0x0053 || d.Opcode == 0x07AF || d.Opcode == 0x01F5 || d.Opcode == 0x0373 || d.Opcode == 0x0173 || d.Opcode == 0x0517 || d.Opcode == 0x0518 || d.Opcode == 0x0570 || d.Opcode == 0x04CE || d.Opcode == 0x018B || d.Opcode == 0x09B4 || d.Opcode == 0x02B9 || d.Opcode == 0x016C || d.Opcode == 0x016D || d.Opcode == 0x0213 || d.Opcode == 0x0214 || d.Opcode == 0x0215 || d.Opcode == 0x014B || d.Opcode == 0x014C) {
+    if (d.Opcode == 0x04E4 || d.Opcode == 0x03CB || d.Opcode == 0x0053 || d.Opcode == 0x07AF || d.Opcode == 0x01F5 || d.Opcode == 0x0373 || d.Opcode == 0x0173 || d.Opcode == 0x0517 || d.Opcode == 0x0518 || d.Opcode == 0x0570 || d.Opcode == 0x04CE || d.Opcode == 0x018B || d.Opcode == 0x09B4 || d.Opcode == 0x02B9 || d.Opcode == 0x016C || d.Opcode == 0x016D || d.Opcode == 0x0814 || d.Opcode == 0x0213 || d.Opcode == 0x0214 || d.Opcode == 0x0215 || d.Opcode == 0x014B || d.Opcode == 0x014C) {
         const NativeScriptRequestId id{m_SessionId, m_CommandSequence + 1, state.IP};
         NativeScriptServiceResult result;
         // All operands/output bounds have been checked before ANY host call.
@@ -802,6 +802,10 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
             if (d.Opcode == 0x016C || d.Opcode == 0x016D) result = services.AddRestart({id,
                 d.Opcode == 0x016C ? NativeRestartKind::Hospital : NativeRestartKind::Police,
                 {d.Float(0), d.Float(1), d.Float(2)}, d.Float(3), d.Int(4)});
+            if (d.Opcode == 0x0814) result = services.AddStuntJump({id,
+                {d.Float(0), d.Float(1), d.Float(2)}, {d.Float(3), d.Float(4), d.Float(5)},
+                {d.Float(6), d.Float(7), d.Float(8)}, {d.Float(9), d.Float(10), d.Float(11)},
+                {d.Float(12), d.Float(13), d.Float(14)}, d.Int(15)});
             if (d.Opcode == 0x0517) {
                 auto created = services.CreateLockedProperty({id, {d.Float(0), d.Float(1), d.Float(2)}, d.Text});
                 result = std::move(created.Result); reference = created.Reference.Value;

@@ -59,11 +59,13 @@ constexpr NativeScriptOpcodeSchema s_Schema[]{
     // already-loaded script and copies its tag-zero-terminated arguments.
     {0x0911, {}, 0, C::Implemented},
     {0x0913, {O::Integer}, 1, C::Implemented, true},
-    // First strict P4 frontier. Full form is classified, but World::AddStuntJump
-    // and its registry/runtime owner are deliberately not fabricated here.
+    // Registration is owned separately from runtime update/reward/reset/save.
     {0x0814, {O::Float, O::Float, O::Float, O::Float, O::Float, O::Float,
-              O::Float, O::Float, O::Float, O::Float, O::Float, O::Float,
-              O::Float, O::Float, O::Float, O::Integer}, 16, C::Unsupported},
+               O::Float, O::Float, O::Float, O::Float, O::Float, O::Float,
+               O::Float, O::Float, O::Float, O::Integer}, 16, C::Implemented},
+    // Next observed mission-0 frontier after all source stunt registrations.
+    // Object construction/world/cleanup ownership is not supplied by schema.
+    {0x029B, {O::Integer, O::Float, O::Float, O::Float, O::Output}, 5, C::Unsupported},
 };
 }
 

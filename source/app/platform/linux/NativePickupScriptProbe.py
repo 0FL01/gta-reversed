@@ -32,13 +32,13 @@ def build():
     product_objects = [arg for arg in link if arg.endswith('.cpp.o')]
     subprocess.run(['ninja', '-C', str(BUILD), *product_objects], check=True)
     replaced = ('MainLinux', 'Realtime', 'NativeScriptSchema', 'NativeScriptCorpus',
-                 'NativeScriptSession', 'NativeScriptServiceTransaction', 'RealtimeScriptHost', NAME)
+                 'NativeScriptSession', 'NativeScriptServiceTransaction', 'NativeStuntJumps', 'RealtimeScriptHost', NAME)
     link = [arg for arg in link if not any(arg.endswith('/' + unit + '.cpp.o') for unit in replaced)]
     link[link.index('-o') + 1] = str(OUTPUT / NAME)
     OUTPUT.mkdir(parents=True, exist_ok=True)
     with (OUTPUT / (NAME + '-build.log')).open('w') as log:
         for unit in ('NativeScriptSchema', 'NativeScriptCorpus', 'NativeScriptSession', 'NativeScriptServiceTransaction',
-                      'RealtimeScriptHost', NAME):
+                      'NativeStuntJumps', 'RealtimeScriptHost', NAME):
             obj = OUTPUT / ('pickup-script-' + unit + '.o')
             command = flags + ['-UNDEBUG', '-Wall', '-Wextra', '-Werror', '-ffunction-sections',
                 '-fdata-sections', '-c', str(SOURCE / (unit + '.cpp')), '-o', str(obj)]
@@ -70,6 +70,6 @@ if __name__ == '__main__':
         result.check_returncode()
         summary = re.search(r'^native-pickup-script .*$', result.stdout, re.MULTILINE)
         assert summary and 'failures=0' in summary.group() and 'hud33=actual-GL' in summary.group()
-        assert 'actualCommands=1234 terminal=0814@212669' in summary.group()
+        assert 'actualCommands=1305 terminal=029B@218276' in summary.group()
         assert 'collection=controller-owned ring=20 staleRef=safe' in summary.group()
         assert 'fullboot=0' in summary.group() and 'FAIL' not in result.stdout

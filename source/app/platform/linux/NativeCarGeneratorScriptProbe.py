@@ -29,7 +29,7 @@ def build():
     # integration. Isolated objects also avoid racing the parent's product build.
     units = ['StreamPager', 'NativeCollisionAssets', 'RealtimeGameplay', 'NativePlayerAssets', 'TexSample',
               'Handling', 'Collide', 'IfpAnim', 'CarPose', 'GxtText', 'MenuShot', 'NativePlayerActivity',
-              'NativeGarages', 'NativeVehiclePool', 'NativeScriptSchema', 'NativeScriptCorpus', 'NativeScriptSession', 'NativeScriptServiceTransaction', 'NativeScriptEntities', 'NativeEntryExits',
+               'NativeGarages', 'NativeVehiclePool', 'NativeScriptSchema', 'NativeScriptCorpus', 'NativeScriptSession', 'NativeScriptServiceTransaction', 'NativeStuntJumps', 'NativeScriptEntities', 'NativeEntryExits',
              'RealtimeScriptHost', 'NativeCarGenerators', 'NativeCarGeneratorResidency', 'NativeSourceRng', 'NativeRestarts',
              'NativeCarGeneratorRuntime', 'RealtimeHud', 'RadarMap', NAME]
     OUTPUT.mkdir(parents=True, exist_ok=True)

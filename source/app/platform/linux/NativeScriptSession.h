@@ -147,6 +147,14 @@ struct NativeScriptRestartRequest {
     bool operator==(const NativeScriptRestartRequest&) const = default;
 };
 
+struct NativeScriptStuntJumpRequest {
+    NativeScriptRequestId Id;
+    NativeScriptPosition StartCenter, StartHalfSize;
+    NativeScriptPosition EndCenter, EndHalfSize;
+    NativeScriptPosition Camera;
+    std::int32_t Reward = 0;
+};
+
 // Defined by NativeScriptEntities, which owns the source pickup collection ring.
 // Keep this VM interface non-owning rather than duplicating the shared types.
 struct NativeScriptPickupReferenceRequest;
@@ -181,6 +189,7 @@ public:
     virtual NativeScriptServiceResult SetEntryExitFlag(const NativeScriptEntryExitFlagRequest&) { return {}; }
     virtual NativeScriptServiceResult DeactivateGarage(const NativeScriptGarageRequest&) { return {}; }
     virtual NativeScriptServiceResult AddRestart(const NativeScriptRestartRequest&) { return {}; }
+    virtual NativeScriptServiceResult AddStuntJump(const NativeScriptStuntJumpRequest&) { return {}; }
     virtual NativeScriptReferenceResult<NativeScriptCarGeneratorRef> CreateCarGenerator(const NativeScriptCarGeneratorRequest&) { return {}; }
     virtual NativeScriptServiceResult SwitchCarGenerator(const NativeScriptCarGeneratorSwitchRequest&) { return {}; }
     virtual NativeScriptPickupCollectedResult HasPickupBeenCollected(const NativeScriptPickupReferenceRequest&);

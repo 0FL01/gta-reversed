@@ -551,10 +551,11 @@ static bool ScriptFault(const RealtimeScriptHost& host, const NativeScriptResult
         static_cast<unsigned long long>(generation), result.IP, result.Opcode, result.Executed, result.Message.c_str());
     if (result.ThreadIndex < threads.size()) {
         const auto& thread = threads[result.ThreadIndex];
-        std::printf("play-script-state main=%llu threadCommands=%llu ip=%u previous=%04X@%u hospitals=%zu police=%zu\n",
+        std::printf("play-script-state main=%llu threadCommands=%llu ip=%u previous=%04X@%u hospitals=%zu police=%zu stuntJumps=%zu runtimeUpdate=%d save=%d\n",
             static_cast<unsigned long long>(host.State().Commands), static_cast<unsigned long long>(thread.Commands),
             thread.IP, thread.LastOpcode, thread.LastInstructionIP,
-            host.Restarts().Points(NativeRestartKind::Hospital).size(), host.Restarts().Points(NativeRestartKind::Police).size());
+            host.Restarts().Points(NativeRestartKind::Hospital).size(), host.Restarts().Points(NativeRestartKind::Police).size(),
+            host.StuntJumps().Entries().size(), NativeStuntJumps::Coverage.RuntimeUpdate, NativeStuntJumps::Coverage.SaveLoad);
     }
     std::fflush(stdout);
     return true;

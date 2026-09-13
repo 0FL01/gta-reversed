@@ -170,9 +170,10 @@ int main(int argc, char** argv) try {
         std::printf("strict-terminal status=%d main=%llu mission=%llu ip=%u opcode=%04X hospitals=%zu police=%zu message=%s\n",int(terminal.Status),(unsigned long long)host.State().Commands,(unsigned long long)stopped.Commands,terminal.IP,terminal.Opcode,host.Restarts().Points(Kind::Hospital).size(),host.Restarts().Points(Kind::Police).size(),terminal.Message.c_str());
         std::printf("preceding-instruction opcode=%04X ip=%u write-sequence=%llu variable=%u value=%d\n",stopped.LastOpcode,stopped.LastInstructionIP,(unsigned long long)stopped.LastOutputWrite.Sequence,stopped.LastOutputWrite.Variable,stopped.LastOutputWrite.Value);
         Require(registrations == 15 && host.Restarts().Points(Kind::Hospital).size() == 8 && host.Restarts().Points(Kind::Police).size() == 7 &&
-            terminal.Status == NativeScriptStatus::Unsupported && terminal.Opcode == 0x0814 && terminal.IP == 212669 && stopped.Commands == 1234 &&
-            stopped.LastOpcode == 0x016D && stopped.LastInstructionIP == 212645 && stopped.LastOutputWrite.Sequence == 1128 &&
-            stopped.LastOutputWrite.Variable == 10624 && stopped.LastOutputWrite.Value == 0,"measured exact source restart frontier; next ADD_STUNT_JUMP stays strict");
+            terminal.Status == NativeScriptStatus::Unsupported && terminal.Opcode == 0x029B && terminal.IP == 218276 && stopped.Commands == 1305 &&
+            stopped.LastOpcode == 0x0004 && stopped.LastInstructionIP == 218269 && stopped.LastOutputWrite.Sequence == 1129 &&
+            stopped.LastOutputWrite.Variable == 10628 && stopped.LastOutputWrite.Value == 50 &&
+            host.StuntJumps().Entries().size() == 70,"measured exact source restart+jump registration frontier; object creation stays strict");
         Require(host.RunPass(1000).IP == terminal.IP && host.Session().Threads()[1] == stopped && host.Restarts().Revision() == revision && host.Events().size() == events,"terminal repeat fully atomic");
         ActualQueries(host);
         std::printf("NativeRestartsProbe GL PASS registrations=%zu fullBoot=0 deathArrestLifecycle=0\n",registrations);

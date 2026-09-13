@@ -26,7 +26,7 @@ def build(host):
     line = next(c for c in commands if ' -o mad-sa-linux ' in c)
     link = shlex.split(next(p for p in line.split('&&') if ' -o mad-sa-linux ' in p))
     units = ['StreamPager', 'NativeCollisionAssets', 'RealtimeGameplay', 'NativeGarages',
-               'NativeScriptSchema', 'NativeScriptCorpus', 'NativeScriptSession', 'NativeScriptServiceTransaction',
+                'NativeScriptSchema', 'NativeScriptCorpus', 'NativeScriptSession', 'NativeScriptServiceTransaction', 'NativeStuntJumps',
               'NativeScriptEntities', 'RealtimeScriptHost', 'NativePickupsProbe']
     if host:
         units += ['RealtimeScriptHostProbe', 'RealtimeScriptHostGpuProbe', 'NativeEntryExitsProbe']

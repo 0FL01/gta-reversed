@@ -246,6 +246,29 @@ NativeScriptServiceResult RealtimeScriptHost::AddRestart(const NativeScriptResta
     return result;
 }
 
+NativeScriptServiceResult RealtimeScriptHost::AddStuntJump(const NativeScriptStuntJumpRequest& request) {
+    if (!m_Initialized) return Error("stunt-jump registration requires initialized host");
+    if (m_PendingLoad) return Error("stunt-jump service cannot cross pending world request");
+    RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=0x0814,
+        .Arguments={request.StartCenter.X, request.StartCenter.Y, request.StartCenter.Z,
+            request.StartHalfSize.X, request.StartHalfSize.Y, request.StartHalfSize.Z,
+            request.EndCenter.X, request.EndCenter.Y, request.EndCenter.Z,
+            request.EndHalfSize.X, request.EndHalfSize.Y, request.EndHalfSize.Z,
+            request.Camera.X, request.Camera.Y, request.Camera.Z}, .Index=request.Reward};
+    if (auto old = Replay(event)) return *old;
+    std::size_t index = 0;
+    std::string error;
+    const auto status = m_StuntJumps.Add(
+        {request.StartCenter.X, request.StartCenter.Y, request.StartCenter.Z},
+        {request.StartHalfSize.X, request.StartHalfSize.Y, request.StartHalfSize.Z},
+        {request.EndCenter.X, request.EndCenter.Y, request.EndCenter.Z},
+        {request.EndHalfSize.X, request.EndHalfSize.Y, request.EndHalfSize.Z},
+        {request.Camera.X, request.Camera.Y, request.Camera.Z}, request.Reward, index, error);
+    if (status != NativeStuntJumpStatus::Ok) return Error(error);
+    Commit(event);
+    return Ready();
+}
+
 NativeScriptPedRef RealtimeScriptHost::PedRef() const { return {static_cast<std::int32_t>((0u << 8) | m_PedGeneration)}; }
 NativeScriptGroupRef RealtimeScriptHost::GroupRef() const { return {static_cast<std::int32_t>(0u | (std::uint32_t{m_Group.Generation} << 16))}; }
 const RealtimeGameplay* RealtimeScriptHost::ResolvePed(NativeScriptPedRef ref) const {

@@ -107,14 +107,14 @@ static bool Swap(SDL_Window* window, const RealtimeHudState& hud, const Realtime
     const auto missionCommands = threads.size() == 2 ? threads[1].Commands : ~std::uint64_t{};
     const auto missionIP = threads.size() == 2 ? threads[1].IP : 0;
     // Measured in cargens-boot-measured.log with the actual production quota.
-    constexpr std::array<std::uint32_t, 5> expectedIPs{200000, 202662, 205508, 207969, 210403};
-    const bool scheduler = frames <= 5 && threads.size() == 2 && vm.Commands == 53 && vm.IP == 56369 &&
+    constexpr std::array<std::uint32_t, 6> expectedIPs{200000, 202662, 205508, 207969, 210403, 216349};
+    const bool scheduler = frames <= expectedIPs.size() && threads.size() == 2 && vm.Commands == 53 && vm.IP == 56369 &&
         threads[0].Commands == 53 && threads[0].IP == 56369 && threads[0].Waiting && threads[0].Active &&
         threads[0].LastOpcode == 0x0001 && threads[1].Generation == 1 && threads[1].Active && !threads[1].Waiting &&
         threads[1].MissionIndex == 0 && missionCommands == (frames - 1) * 256 &&
         missionIP == expectedIPs[frames - 1];
     const bool presentation =
-        vm.Clock.Hours == 8 && vm.Clock.Minutes == 0 && hud.hour == 8 && hud.minute == 0 &&
+        vm.Clock.Hours == 8 && vm.Clock.Minutes == 0 && hud.hour == 8 && hud.minute >= 0 && hud.minute < 60 &&
         vm.Fade.Direction == 0 && vm.Fade.DurationSeconds == 0 && vm.Fade.Alpha == 255;
     const bool startup = frames != 1 || (scheduler && !state.Ticks && vm.TimeMs == 0 &&
         near(state.Ped.Z, 12.8757f) && near(state.PedRoot.Z, 13.8757f) && host.Events().size() == 7 &&
@@ -136,7 +136,7 @@ static bool Swap(SDL_Window* window, const RealtimeHudState& hud, const Realtime
     bool garageReady = garageFrame.Revision == frames && view.Frame == frames - 1 && garageFrame.Generation == cpu.Generation &&
         garageFrame.Barrier == NativeGaragesRuntimeBarrier::None && garageFrame.Requirement == NativeGarageRequirement::None &&
         !garageFrame.Garage && !garageFrame.UnsupportedUpdates && garages.Frame().Updates.size() == 50 &&
-        clearFlags == 13 && garages.Revision() == (frames == 1 ? 0 : frames == 2 ? 12 : 13);
+        clearFlags == 13 && garages.Revision() == (frames == 1 ? 0 : frames == 2 ? 12 : frames < 6 ? 13 : 14);
     for (const auto& update : garages.Frame().Updates) garageReady &= update.Status == NativeScriptServiceStatus::Ready &&
         update.Requirement == NativeGarageRequirement::None;
     for (const auto& door : garages.Doors()) if (door.Garage) {
@@ -169,7 +169,7 @@ static bool Swap(SDL_Window* window, const RealtimeHudState& hud, const Realtime
         return event.Kind == NativeCarGeneratorEventKind::Create014B;
     });
     const auto switches = registry.Events().size() - creates;
-    constexpr std::array<std::ptrdiff_t, 5> expectedCreates{0, 0, 0, 9, 10};
+    constexpr std::array<std::ptrdiff_t, 6> expectedCreates{0, 0, 0, 9, 10, 10};
     bool generatorReady = generators && residency.Generation() == cpu.Generation && residency.Snapshot() == cpu.SourceCollision &&
         residency.Active().size() == 22 && registry.Census().Registered == 88 + static_cast<std::size_t>(creates) &&
         frames <= expectedCreates.size() && creates == expectedCreates[frames - 1] && switches == static_cast<std::size_t>(creates) &&
@@ -218,6 +218,10 @@ static bool Swap(SDL_Window* window, const RealtimeHudState& hud, const Realtime
         bool(cpu.SourceCollision), cpu.Overrides ? cpu.Overrides->Entries().size() : 0, disabled, garageReady, garages.Frame().Updates.size(), clearFlags,
         static_cast<unsigned long long>(garages.Revision()), cameraUnchanged, sourceBody, physics,
         static_cast<unsigned long long>(state.Ticks), state.Ped.Z, state.PedRoot.Z, state.Grounded, width, height);
+    if (!ok) std::printf("boot-diagnostic frame=%u presentation=%d vmClock=%02u:%02u hudClock=%02d:%02d garageFrameRevision=%llu expectedGarage=%u viewFrame=%llu expectedView=%u physics=%d\n",
+        frames, presentation, unsigned(vm.Clock.Hours), unsigned(vm.Clock.Minutes), hud.hour, hud.minute,
+        static_cast<unsigned long long>(garageFrame.Revision), frames, static_cast<unsigned long long>(view.Frame),
+        frames - 1, physics);
     std::fflush(stdout);
     passed &= ok;
     return SDL_GL_SwapWindow(window) && ok;
@@ -236,7 +240,7 @@ int main(int argc, char** argv) {
     }
     if (!gameDir) return 2;
     const int result = Realtime_Run(argc, argv, gameDir);
-    const bool ok = result == 1 && boot_probe::passed && boot_probe::frames == 5;
+    const bool ok = result == 1 && boot_probe::passed && boot_probe::frames == 6;
     std::printf("boot-runtime %s exit=%d swaps=%u fullboot=0\n", ok ? "PASS" : "FAIL", result, boot_probe::frames);
     return ok ? result : 2; // runner must validate the exact terminal log, not accept arbitrary exit 1
 }

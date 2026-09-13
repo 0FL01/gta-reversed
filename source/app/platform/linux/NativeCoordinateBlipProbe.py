@@ -27,7 +27,7 @@ def build():
     units = ['StreamPager', 'NativeCollisionAssets', 'RealtimeGameplay', 'NativePlayerAssets', 'TexSample',
              'Handling', 'Collide', 'IfpAnim', 'CarPose', 'GxtText', 'MenuShot', 'NativePlayerActivity',
               'NativeGarages', 'NativeVehiclePool', 'NativeScriptSchema', 'NativeScriptCorpus',
-               'NativeScriptSession', 'NativeScriptServiceTransaction', 'NativeScriptEntities', 'NativeEntryExits',
+                'NativeScriptSession', 'NativeScriptServiceTransaction', 'NativeStuntJumps', 'NativeScriptEntities', 'NativeEntryExits',
              'RealtimeScriptHost', 'NativeCarGenerators', 'NativeCarGeneratorResidency', 'NativeSourceRng', 'NativeRestarts',
              'RealtimeHud', 'RadarMap', NAME]
     OUTPUT.mkdir(parents=True, exist_ok=True)

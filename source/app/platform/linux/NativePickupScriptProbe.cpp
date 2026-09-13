@@ -133,8 +133,9 @@ int main(int argc, char** argv) try {
         const auto threads = host.Session().Threads();
         Require(index < threads.size() && threads[index].Active, "expected active corpus thread");
         NativeScriptInstructionForm form;
-        Require(host.Session().InspectInstruction(index, form, error), error);
+        if (!host.Session().InspectInstruction(index, form, error)) return false;
         Require(corpus.Observe(form, error), error);
+        return true;
     };
     Require(host.InitializeBeforeWorker(gameDir, error), error);
     EglContext egl;
@@ -149,7 +150,7 @@ int main(int argc, char** argv) try {
     NativeScriptResult first;
     std::size_t mainCommands = 0;
     for (unsigned guard = 0; guard < 100; ++guard) {
-        observe(0);
+        Require(observe(0), error);
         first = host.RunPass(1);
         mainCommands += first.Executed;
         if (first.Status != NativeScriptStatus::BudgetYield) break;
@@ -161,7 +162,10 @@ int main(int argc, char** argv) try {
     host.SealStartup();
     NativeScriptResult terminal;
     for (unsigned guard = 0; guard < 20000; ++guard) {
-        observe(1);
+        if (!observe(1)) {
+            terminal = host.RunPass(1);
+            break;
+        }
         terminal = host.RunPass(1);
         if (terminal.Status != NativeScriptStatus::BudgetYield) break;
     }
@@ -171,23 +175,63 @@ int main(int argc, char** argv) try {
         static_cast<unsigned long long>(mission.Commands), terminal.IP, terminal.Opcode,
         mission.LastOpcode, mission.LastInstructionIP, hud.IsRadarSpriteUploaded(33),
         hud.PreparedRadarSprite(33)->name);
+    const auto jumps = host.StuntJumps().Entries();
+    if (!jumps.empty()) {
+        const auto& firstJump = jumps.front(); const auto& lastJump = jumps.back();
+        std::printf("stunt-jump-registry count=%zu revision=%llu first=%.9g,%.9g,%.9g/%.9g,%.9g,%.9g "
+            "camera=%.9g,%.9g,%.9g reward=%d last-reward=%d runtime-update=%d save=%d\n",
+            jumps.size(), static_cast<unsigned long long>(host.StuntJumps().Revision()),
+            firstJump.Start.Min.X, firstJump.Start.Min.Y, firstJump.Start.Min.Z,
+            firstJump.Start.Max.X, firstJump.Start.Max.Y, firstJump.Start.Max.Z,
+            firstJump.Camera.X, firstJump.Camera.Y, firstJump.Camera.Z, firstJump.Reward,
+            lastJump.Reward, NativeStuntJumps::Coverage.RuntimeUpdate, NativeStuntJumps::Coverage.SaveLoad);
+    }
+    NativeStuntJump expectedFirst;
+    const auto sourceFloat = [](std::uint32_t bits) { return std::bit_cast<float>(bits); };
+    const NativeStuntJumpVector startCenter{sourceFloat(0x44F26458), sourceFloat(0xC4F601AA), sourceFloat(0x418D51B7)};
+    const NativeStuntJumpVector startHalf{sourceFloat(0x40200000), sourceFloat(0x402E978D), sourceFloat(0x404AE148)};
+    const NativeStuntJumpVector endCenter{sourceFloat(0x44F8BEAC), sourceFloat(0xC4F67E71), sourceFloat(0x41E5CC98)};
+    const NativeStuntJumpVector endHalf{sourceFloat(0x413224DD), sourceFloat(0x40ACBC6A), sourceFloat(0x40E75C29)};
+    expectedFirst.Start = {{startCenter.X - startHalf.X, startCenter.Y - startHalf.Y, startCenter.Z - startHalf.Z},
+        {startCenter.X + startHalf.X, startCenter.Y + startHalf.Y, startCenter.Z + startHalf.Z}};
+    expectedFirst.End = {{endCenter.X - endHalf.X, endCenter.Y - endHalf.Y, endCenter.Z - endHalf.Z},
+        {endCenter.X + endHalf.X, endCenter.Y + endHalf.Y, endCenter.Z + endHalf.Z}};
+    expectedFirst.Camera = {sourceFloat(0x44F5116E), sourceFloat(0xC4F57247), sourceFloat(0x41CA954D)};
+    expectedFirst.Reward = 500;
     Check(terminal.Status == NativeScriptStatus::Unsupported && terminal.Executed == 0 &&
-        mission.Commands == 1234 && terminal.IP == 212669 && terminal.Opcode == 0x0814 &&
-        mission.LastInstructionIP == 212645 && mission.LastOpcode == 0x016D && host.WorldRevision() == 3,
-        "actual HUD-ready mission reaches 1234 commands and strict 0814@212669 without a full-boot claim");
+        mission.Commands == 1305 && terminal.IP == 218276 && terminal.Opcode == 0x029B &&
+        mission.LastInstructionIP == 218269 && mission.LastOpcode == 0x0004 && host.WorldRevision() == 3 &&
+        jumps.size() == 70 && host.StuntJumps().Revision() == 70 && jumps.front() == expectedFirst &&
+        std::ranges::all_of(jumps, [](const auto& jump) { return !jump.Done && !jump.Found; }) &&
+        NativeStuntJumps::Coverage == NativeStuntJumpCoverage{true, false, false, false, false},
+        "actual startup registers70 source stunt jumps then stops strictly at object creation");
+    const auto stuntEvent = std::ranges::find(host.Events(), std::uint16_t(0x0814), &RealtimeScriptHostEvent::Opcode);
+    Require(stuntEvent != host.Events().end(), "actual stunt-jump event journal");
+    NativeScriptStuntJumpRequest replay{stuntEvent->Id,
+        {startCenter.X, startCenter.Y, startCenter.Z}, {startHalf.X, startHalf.Y, startHalf.Z},
+        {endCenter.X, endCenter.Y, endCenter.Z}, {endHalf.X, endHalf.Y, endHalf.Z},
+        {expectedFirst.Camera.X, expectedFirst.Camera.Y, expectedFirst.Camera.Z}, expectedFirst.Reward};
+    Check(host.AddStuntJump(replay).Status == NativeScriptServiceStatus::Ready &&
+        host.StuntJumps().Entries().size() == 70 && host.StuntJumps().Revision() == 70,
+        "stunt-jump service replay does not duplicate registration");
+    ++replay.Reward;
+    Check(host.AddStuntJump(replay).Status == NativeScriptServiceStatus::Error &&
+        host.StuntJumps().Entries().size() == 70 && host.StuntJumps().Revision() == 70,
+        "same request ID with changed registration rejects atomically");
     const auto summary = corpus.Summary();
-    Check(summary.Encounters == 1288 && summary.Sites == 1288 && summary.Threads == 2 &&
-        summary.Opcodes == 43 && summary.OperandForms == 48 && summary.MainSites == 53 &&
-        summary.MissionSites == 1235 && summary.StreamedSites == 0 &&
-        summary.ImplementedSites == 1287 && summary.UnsupportedSites == 1 &&
-        corpus.Fingerprint() == 0xBC61CAB8953E4545ULL,
-        "actual startup corpus classifies every encountered main/mission site including strict frontier");
+    Check(summary.Encounters == 1359 && summary.Sites == 1359 && summary.Threads == 2 &&
+        summary.Opcodes == 44 && summary.OperandForms == 49 && summary.MainSites == 53 &&
+        summary.MissionSites == 1306 && summary.StreamedSites == 0 &&
+        summary.ImplementedSites == 1358 && summary.UnsupportedSites == 1 &&
+        corpus.Fingerprint() == 0xF2F1C258210742ADULL,
+        "actual startup corpus classifies registered jumps and next strict object frontier");
     const auto& frontier = corpus.Sites().back().Form;
-    Check(frontier.IP == 212669 && frontier.NextIP == 212749 && frontier.Opcode == 0x0814 &&
-        frontier.OperandCount == 16 && frontier.Semantics == NativeScriptSemanticCoverage::Unsupported &&
+    Check(frontier.IP == 218276 && frontier.NextIP == 218298 && frontier.Opcode == 0x029B &&
+        frontier.OperandCount == 5 && frontier.Semantics == NativeScriptSemanticCoverage::Unsupported &&
         frontier.ThreadForm == NativeScriptThreadForm::Mission &&
-        std::all_of(frontier.OperandTags.begin(), frontier.OperandTags.begin() + 15, [](auto tag) { return tag == 6; }) &&
-        frontier.OperandTags[15] == 5, "0814 complete float15+int16 operand form remains semantic Unsupported");
+        frontier.OperandTags[0] == 4 && frontier.OperandTags[1] == 6 && frontier.OperandTags[2] == 6 &&
+        frontier.OperandTags[3] == 6 && frontier.OperandTags[4] == 2,
+        "029B complete model/position/output form remains semantic Unsupported");
     std::printf("script-corpus schema=%s sha256=%s version=%s encounters=%llu sites=%zu threads=%zu opcodes=%zu forms=%zu main=%zu mission=%zu streamed=%zu implemented=%zu unsupported=%zu frontier=%04X@%u next=%u fingerprint=%016llX nop-substitution=0\n",
         NativeScriptSchemaRevision().data(), NativeScriptSchemaSha256().data(), NativeScriptSchemaVersion().data(),
         static_cast<unsigned long long>(summary.Encounters), summary.Sites, summary.Threads, summary.Opcodes,

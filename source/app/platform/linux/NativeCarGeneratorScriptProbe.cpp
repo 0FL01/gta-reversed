@@ -177,13 +177,14 @@ int main(int argc, char** argv) try {
         Require(terminal.Status == NativeScriptStatus::Unsupported && creates && switches &&
             host.Session().Threads()[1].Commands > 679 && terminal.Opcode != 0x014B && terminal.Opcode != 0x014C,
             "actual mission crosses679/create/switch and stops at next strict unsupported");
-        Require(host.Session().Threads()[1].Commands == 1234 && terminal.Opcode == 0x0814 && terminal.IP == 212669 &&
-            creates == 10 && switches == 10, "measured legal mission0 strict frontier");
+        Require(host.Session().Threads()[1].Commands == 1305 && terminal.Opcode == 0x029B && terminal.IP == 218276 &&
+            creates == 10 && switches == 10 && host.StuntJumps().Entries().size() == 70,
+            "measured legal mission0 strict frontier after source stunt registrations");
         const auto summary = corpus.Summary();
-        Require(summary.Encounters == 1288 && summary.Sites == 1288 && summary.Threads == 2 &&
-            summary.Opcodes == 43 && summary.OperandForms == 48 && summary.MainSites == 53 &&
-            summary.MissionSites == 1235 && summary.UnsupportedSites == 1 &&
-            corpus.Fingerprint() == 0xBC61CAB8953E4545ULL,
+        Require(summary.Encounters == 1359 && summary.Sites == 1359 && summary.Threads == 2 &&
+            summary.Opcodes == 44 && summary.OperandForms == 49 && summary.MainSites == 53 &&
+            summary.MissionSites == 1306 && summary.UnsupportedSites == 1 &&
+            corpus.Fingerprint() == 0xF2F1C258210742ADULL,
             "GL-ready corpus matches exact shipped main/mission schema manifest");
         const auto first = host.CarGenerators().Events().front();
         Require(first.Create.ModelId == 476 && first.Id.IP == 207007 && first.Generator.Value == 88 &&

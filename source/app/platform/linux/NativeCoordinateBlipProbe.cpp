@@ -175,8 +175,9 @@ int main(int argc, char** argv) try {
                 "current exact GPU readiness barrier");
             std::printf("NativeCoordinateBlipProbe GPU BARRIER 04CE@212086 mission=1207 missing actual HUD sprite; no full-boot claim\n");
         } else {
-            Require(creates == 9 && host.Session().Threads()[1].Commands == 1234 && terminal.IP == 212669 && terminal.Opcode == 0x0814,
-                "measured original mission0 frontier: nine coordinate sprites, restart registrations, then stunt jumps");
+            Require(creates == 9 && host.Session().Threads()[1].Commands == 1305 && terminal.IP == 218276 &&
+                terminal.Opcode == 0x029B && host.StuntJumps().Entries().size() == 70,
+                "measured mission0 frontier after nine coordinate sprites, restarts and70 stunt registrations");
             Require(first.Position == NativeScriptPosition{2067.4f,-1831.2f,13.5f} && first.Sprite == 63 && first.Reference.Value == 65571,
                 "first actual04CE operands and source allocation order");
             Require(NativeScriptRadarVisible(first,.5f,true,0,true) && !NativeScriptRadarVisible(first,1.01f,false,0,true) &&

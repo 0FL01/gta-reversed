@@ -8,6 +8,7 @@
 #include "app/platform/linux/NativeEntryExits.h"
 #include "app/platform/linux/NativeGarages.h"
 #include "app/platform/linux/NativeRestarts.h"
+#include "app/platform/linux/NativeStuntJumps.h"
 #include "app/platform/linux/NativeVehiclePool.h"
 #include "app/platform/linux/NativeCarGeneratorResidency.h"
 #include "app/platform/linux/NativeSourceRng.h"
@@ -38,7 +39,7 @@ struct RealtimeScriptGroup {
 struct RealtimeScriptHostEvent {
     NativeScriptRequestId Id;
     std::uint16_t Opcode = 0;
-    std::array<float, 4> Arguments{};
+    std::array<float, 16> Arguments{};
     std::int32_t Index = 0, Reference = -1, StateArgument = 0;
     std::array<char, 8> Name{};
     std::array<std::int32_t, 8> GeneratorArguments{};
@@ -122,6 +123,7 @@ public:
     NativeGarages& Garages() { return m_Garages; }
     const NativeGarages& Garages() const { return m_Garages; }
     const NativeRestarts& Restarts() const { return m_Restarts; }
+    const NativeStuntJumps& StuntJumps() const { return m_StuntJumps; }
     // Explicit query inputs carry source area/ENEX authority; city unlock is
     // always read from this host's SCM stats. Returns reset work, never teleport.
     NativeRestartSelection QueryRestart(NativeRestartQuery query) const;
@@ -176,6 +178,7 @@ public:
     NativeScriptServiceResult SetEntryExitFlag(const NativeScriptEntryExitFlagRequest&) override;
     NativeScriptServiceResult DeactivateGarage(const NativeScriptGarageRequest&) override;
     NativeScriptServiceResult AddRestart(const NativeScriptRestartRequest&) override;
+    NativeScriptServiceResult AddStuntJump(const NativeScriptStuntJumpRequest&) override;
     NativeScriptReferenceResult<NativeScriptCarGeneratorRef> CreateCarGenerator(const NativeScriptCarGeneratorRequest&) override;
     NativeScriptServiceResult SwitchCarGenerator(const NativeScriptCarGeneratorSwitchRequest&) override;
     NativeScriptPickupCollectedResult HasPickupBeenCollected(const NativeScriptPickupReferenceRequest&) override;
@@ -195,6 +198,7 @@ private:
     NativeEntryExits m_EntryExits;
     NativeGarages m_Garages;
     NativeRestarts m_Restarts;
+    NativeStuntJumps m_StuntJumps;
     NativeVehiclePool m_Vehicles;
     NativeSourceRng m_SourceRng;
     NativeCarGenerators m_CarGenerators;

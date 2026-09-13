@@ -31,7 +31,7 @@ def build():
     units = [NAME, 'NativeLiveEntityBounds', 'NativeGeneratedVehicleAssets', 'NativeVehiclePool',
              'NativeGaragesRuntime', 'NativeCarGenerators', 'NativeCarGeneratorRuntime',
               'NativeCarGeneratorResidency', 'NativeScriptSchema', 'NativeScriptCorpus',
-               'NativeScriptSession', 'NativeScriptServiceTransaction', 'RealtimeScriptHost']
+                'NativeScriptSession', 'NativeScriptServiceTransaction', 'NativeStuntJumps', 'RealtimeScriptHost']
     # A concurrently integrated host service may precede the parent CMake edit.
     if (SOURCE / 'NativeRestarts.cpp').exists():
         units.append('NativeRestarts')

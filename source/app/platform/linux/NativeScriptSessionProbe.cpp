@@ -107,6 +107,13 @@ struct MockServices final : NativeScriptServices {
         if (Throw) throw std::runtime_error("TEST-ONLY restart exception");
         return {RestartMode,"TEST-ONLY restart service"};
     }
+    NativeScriptStuntJumpRequest StuntJump;
+    ServiceStatus StuntJumpMode = ServiceStatus::Unsupported;
+    unsigned StuntJumpCalls = 0;
+    NativeScriptServiceResult AddStuntJump(const NativeScriptStuntJumpRequest& request) override {
+        StuntJump = request; ++StuntJumpCalls;
+        return {StuntJumpMode, "TEST-ONLY stunt-jump service"};
+    }
     ServiceStatus GarageMode = ServiceStatus::Unsupported;
     unsigned GarageCalls = 0;
     NativeScriptPickupRequest Pickup;
@@ -1278,8 +1285,8 @@ void SchemaAndCorpus() {
         std::all_of(stunt->Operands.begin(), stunt->Operands.begin() + 15,
             [](auto type) { return type == NativeScriptOperandType::Float; }) &&
         stunt->Operands[15] == NativeScriptOperandType::Integer &&
-        stunt->Semantics == NativeScriptSemanticCoverage::Unsupported,
-        "0814 complete known form remains semantic Unsupported");
+        stunt->Semantics == NativeScriptSemanticCoverage::Implemented,
+        "0814 complete known form has registration-service semantics");
     Check(!NativeScriptLookupSchema(0x0FFF), "unknown opcode has no schema substitution");
 
     Bytes code; Op(code, 0x0814);
@@ -1290,22 +1297,33 @@ void SchemaAndCorpus() {
     Check(session.InspectInstruction(0, form, error) && form.IP == FixtureCode &&
         form.NextIP == FixtureCode + code.size() && form.Opcode == 0x0814 &&
         form.OperandCount == 16 && form.OperandTags[15] == 5 &&
-        form.Semantics == NativeScriptSemanticCoverage::Unsupported &&
+        form.Semantics == NativeScriptSemanticCoverage::Implemented &&
         form.ThreadForm == NativeScriptThreadForm::Main, "read-only inspection returns exact fixture form");
     const auto state = session.State();
     const auto threads = std::vector<NativeScriptThreadState>(session.Threads().begin(), session.Threads().end());
     const auto result = session.Step(services);
     Check(result.Status == Status::Unsupported && result.Opcode == 0x0814 && result.IP == FixtureCode &&
         !result.Executed && session.State() == state &&
-        std::vector<NativeScriptThreadState>(session.Threads().begin(), session.Threads().end()) == threads,
-        "known schema never executes through default NOP");
+        std::vector<NativeScriptThreadState>(session.Threads().begin(), session.Threads().end()) == threads &&
+        services.StuntJumpCalls == 1, "implemented form requires a real service and never becomes default NOP");
+
+    NativeScriptSession readySession; MockServices readyServices; readyServices.StuntJumpMode = ServiceStatus::Ready;
+    LoadFixture(readySession, readyServices, code);
+    const auto ready = readySession.Step(readyServices);
+    Check(ready.Status == Status::Advanced && ready.Executed == 1 && readySession.State().IP == FixtureCode + code.size() &&
+        readyServices.StuntJumpCalls == 1 && readyServices.StuntJump.StartCenter == NativeScriptPosition{0, 1, 2} &&
+        readyServices.StuntJump.StartHalfSize == NativeScriptPosition{3, 4, 5} &&
+        readyServices.StuntJump.EndCenter == NativeScriptPosition{6, 7, 8} &&
+        readyServices.StuntJump.EndHalfSize == NativeScriptPosition{9, 10, 11} &&
+        readyServices.StuntJump.Camera == NativeScriptPosition{12, 13, 14} && readyServices.StuntJump.Reward == 500,
+        "0814 Ready commits exact registration request once");
 
     NativeScriptCorpusManifest corpus; const auto before = corpus;
     Check(corpus.Observe(form, error) && corpus.Observe(form, error), "same corpus site visit is idempotent form aggregation");
     auto summary = corpus.Summary();
     Check(summary.Encounters == 2 && summary.Sites == 1 && summary.Threads == 1 && summary.Opcodes == 1 &&
-        summary.OperandForms == 1 && summary.MainSites == 1 && summary.UnsupportedSites == 1,
-        "corpus summary distinguishes sites, encounters and unsupported semantics");
+        summary.OperandForms == 1 && summary.MainSites == 1 && summary.ImplementedSites == 1 && !summary.UnsupportedSites,
+        "corpus summary distinguishes sites, encounters and implemented registration semantics");
     const auto fingerprint = corpus.Fingerprint();
     auto changed = form; changed.OperandTags[15] = 4;
     const auto retained = corpus;

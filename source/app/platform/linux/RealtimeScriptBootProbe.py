@@ -2,7 +2,7 @@
 """Build in native container (--build), run in a graphical host session (--run).
 
 Checks real production startup presentation and exact terminal Unsupported exit.
-Optional MAD_SA_BOOT_CAPTURE is a prefix for five diagnostic GL_BACK PPMs.
+Optional MAD_SA_BOOT_CAPTURE is a prefix for six diagnostic GL_BACK PPMs.
 """
 import os
 import re
@@ -57,33 +57,39 @@ if __name__ == '__main__':
         env = os.environ.copy()
         if env.get('WAYLAND_DISPLAY'):
             env['SDL_VIDEODRIVER'] = 'wayland'
-        command = [str(OUTPUT / name), '--play', '--new-game', '--game-dir', str(args.game_dir.resolve()), '--seconds', '5']
+        command = [str(OUTPUT / name), '--play', '--new-game', '--game-dir', str(args.game_dir.resolve()), '--seconds', '7']
         result = subprocess.run(command, cwd=WORKSPACE, env=env, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True, timeout=180)
         (OUTPUT / 'radar-ipl-boundary-boot-runtime.log').write_text(result.stdout + f'runner-exit={result.returncode}\n')
         print(result.stdout, end='')
         assert result.returncode == 1, f'Expected runtime terminal exit 1, got {result.returncode}'
         captures = re.findall(r'^boot-capture .*$', result.stdout, re.MULTILINE)
-        assert len(captures) == 5, captures
-        for frame, (capture, count, ip, revision) in enumerate(zip(captures, (0, 256, 512, 768, 1024),
-                (200000, 202662, 205508, 207969, 210403), (0, 12, 13, 13, 13)), 1):
-            assert capture.startswith(f'boot-capture PASS frame={frame} black=1 clock=08:00 paired=1 actor=1 startup=1 scheduler=1 mission={count} ip={ip} '), capture
+        assert len(captures) == 6, captures
+        previous_clock = None
+        for frame, (capture, count, ip, revision) in enumerate(zip(captures, (0, 256, 512, 768, 1024, 1280),
+                (200000, 202662, 205508, 207969, 210403, 216349), (0, 12, 13, 13, 13, 14)), 1):
+            prefix = re.match(rf'boot-capture PASS frame={frame} black=1 clock=(\d{{2}}):(\d{{2}}) paired=1 actor=1 startup=1 scheduler=1 mission={count} ip={ip} ', capture)
+            assert prefix, capture
+            clock = int(prefix[1]) * 60 + int(prefix[2])
+            assert (frame != 1 or clock == 8 * 60) and 8 * 60 <= clock < 9 * 60, capture
+            assert previous_clock is None or clock >= previous_clock, capture
+            previous_clock = clock
             assert f'worldRevision=3 sourceCOL=1 overrides=14 disabled=13 garageReady=1 updates=50 flagsCleared=13 garageRevision={revision} cameraUnchanged=1 sourceBody=1 physics=1 ticks={frame - 1} ' in capture, capture
         generators = re.findall(r'^boot-cargens .*$', result.stdout, re.MULTILINE)
-        assert len(generators) == 5, generators
+        assert len(generators) == 6, generators
         seeds = []
-        for frame, (line, quarter, created) in enumerate(zip(generators, (1, 2, 3, 0, 1), (0, 0, 0, 9, 10)), 1):
+        for frame, (line, quarter, created) in enumerate(zip(generators, (1, 2, 3, 0, 1, 2), (0, 0, 0, 9, 10, 10)), 1):
             assert line.startswith(f'boot-cargens PASS frame={frame} quarter={quarter} sources=22 registered={88 + created} creates={created} switches={created} demands=0 poolCreated=0 '), line
             seed = re.search(r'seed=(\d+) draws=0 borrowed=1$', line)
             assert seed and 0 <= int(seed[1]) <= 0xffffffff, line
             seeds.append(int(seed[1]))
         assert len(set(seeds)) == 1, seeds  # one platform capture; no fixed seed oracle
-        assert 'boot-runtime PASS exit=1 swaps=5 fullboot=0' in result.stdout
+        assert 'boot-runtime PASS exit=1 swaps=6 fullboot=0' in result.stdout
         terminals = re.findall(r'^play-.*terminal .*$', result.stdout, re.MULTILINE)
-        assert len(terminals) == 1 and terminals[0].startswith('play-script-terminal status=Unsupported thread=1 generation=1 ip=212669 opcode=0814 executed=210 '), terminals
-        assert 'play-script-state main=53 threadCommands=1234 ip=212669 previous=016D@212645 hospitals=8 police=7' in result.stdout
+        assert len(terminals) == 1 and terminals[0].startswith('play-script-terminal status=Unsupported thread=1 generation=1 ip=218276 opcode=029B executed=25 '), terminals
+        assert 'play-script-state main=53 threadCommands=1305 ip=218276 previous=0004@218269 hospitals=8 police=7 stuntJumps=70 runtimeUpdate=0 save=0' in result.stdout
         assert 'play-ok' not in result.stdout and 'play-fail' not in result.stdout and 'FAIL' not in result.stdout
-        print('boot-probe PASS actual-captures=5 mission-quanta=0/256/512/768/1024+210 mission-prefix=1234 terminal=0814@212669 '
+        print('boot-probe PASS actual-captures=6 mission-quanta=0/256/512/768/1024/1280+25 mission-prefix=1305 terminal=029B@218276 '
             'worldRevision=3 sourceCOL-overrides=14/13-disabled garage-ready=50-each-frame camera-unchanged=1 '
-            'actual-source-body=1 real-physics=1 quarters=1/2/3/0/1 sources=22 initial=88 creates=10 switches=10 '
+            'actual-source-body=1 real-physics=1 quarters=1/2/3/0/1/2 sources=22 initial=88 creates=10 switches=10 '
             'no-demand=1 pool-created=0 rng-draws=0 borrowed-generation=3 clothes-not-reached=1 runtime-exit=1 fullboot=0')
