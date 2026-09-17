@@ -82,7 +82,8 @@ bool RealtimeScriptHost::InitializeBeforeWorker(const char* gameDir, std::string
     if (!m_Entities.LoadBeforeWorker(gameDir, error)) return false;
     if (!m_EntryExits.LoadBeforeWorker(gameDir, error)) return false;
     if (!m_ZonePopulation.LoadBeforeWorker(gameDir, error)) return false;
-    if (!m_MissionText.LoadBeforeWorker(gameDir, error) || !m_Cutscene.Initialize(gameDir, error)) return false;
+    if (!m_MissionText.LoadBeforeWorker(gameDir, error) || !m_Cutscene.Initialize(gameDir, error) ||
+        !m_CarRecordings.LoadBeforeWorker(gameDir, error) || !m_BeatTrack.LoadBeforeWorker(gameDir, error)) return false;
     if (!m_Restarts.LoadBeforeWorker(gameDir, error)) return false;
     if (!m_Garages.LoadBeforeWorker(gameDir, *m_CollisionContext, error)) return false;
     if (!m_CarGenerators.LoadBeforeWorker(gameDir, State().TimeMs, error) ||
@@ -167,6 +168,23 @@ void RealtimeScriptHost::SetLiveWorldLoader(WorldLoader loader, CancelLoad cance
     assert(m_WorldTransaction.State().Phase == NativeScriptServiceTransactionPhase::Idle);
     assert(!loader || cancel); // every asynchronous owner has cancellation
     m_Loader = std::move(loader); m_Cancel = std::move(cancel);
+}
+bool RealtimeScriptHost::AdoptLiveWorld(std::uint64_t generation,
+    RealtimeScriptWorldPublication publication, std::string& error) {
+    if(!m_Initialized||m_PendingLoad||m_WorldTransaction.State().Phase!=NativeScriptServiceTransactionPhase::Idle||
+        generation!=m_WorldRevision+1||!publication.Scene||!publication.Collision||!publication.SourceCollision||
+        publication.Scene->meshes.empty()||publication.Overrides!=m_InitialPlacementOverrides){
+        error="live world publication identity mismatch generation="+std::to_string(generation)+
+            " expected="+std::to_string(m_WorldRevision+1)+" pending="+std::to_string(bool(m_PendingLoad))+
+            " phase="+std::to_string(unsigned(m_WorldTransaction.State().Phase))+
+            " scene="+std::to_string(bool(publication.Scene))+" collision="+std::to_string(bool(publication.Collision))+
+            " source="+std::to_string(bool(publication.SourceCollision))+
+            " overrides="+std::to_string(publication.Overrides==m_InitialPlacementOverrides);return false;
+    }
+    m_World=publication.Collision;
+    m_Publication=std::move(publication);
+    m_WorldRevision=generation;
+    error.clear();return true;
 }
 bool RealtimeScriptHost::CancelPendingWorld(const NativeScriptRequestId& id, std::string& error) {
     if (m_InWorldService) {
@@ -619,7 +637,7 @@ NativeScriptServiceResult RealtimeScriptHost::MarkModelNoLongerNeeded(const Nati
     if(model<0){const std::string_view used(request.UsedObjectName.data(),strnlen(request.UsedObjectName.data(),request.UsedObjectName.size()));if(used.empty()||!StreamPager_KnownModelName(used,&model))return Error("released used-object absent from pager IDE census");}
     RealtimeScriptHostEvent event{.Id=request.Id,.Opcode=0x0249,.Index=model,.ModelName=request.UsedObjectName};
     if(auto old=Replay(event))return *old;
-    m_ScriptModels.erase(model);Commit(event);return Ready();
+    m_ScriptModels.erase(model);m_ScriptModelCollisions.erase(model);Commit(event);return Ready();
 }
 NativeScriptServiceResult RealtimeScriptHost::LoadSpecialCharacter(const NativeScriptSpecialModelRequest& request) {
     if(!m_Initialized||request.Slot<0||request.Slot>=10)return Error("special-character slot is invalid");
@@ -634,13 +652,222 @@ NativeScriptServiceResult RealtimeScriptHost::LoadSpecialCharacter(const NativeS
     m_PendingModel=PendingScriptModel{request.Id,model,name,name,false};
     return Pending("special-character parser request submitted");
 }
+NativeScriptBooleanResult RealtimeScriptHost::HasSpecialCharacterLoaded(const NativeScriptSpecialModelRequest& request) {
+    NativeScriptBooleanResult result;
+    if(request.Slot<0||request.Slot>=10){result.Result=Error("special-character slot is invalid");return result;}
+    result.Value=m_ScriptModels.contains(290+request.Slot);
+    RealtimeScriptHostEvent event{.Id=request.Id,.Opcode=0x023D,.Index=request.Slot,.StateArgument=result.Value?1:0};
+    if(auto old=Replay(event)){result.Result=*old;return result;}
+    Commit(event);result.Result=Ready();return result;
+}
+NativeScriptServiceResult RealtimeScriptHost::RequestCarRecording(const NativeScriptCarRecordingRequest& request) {
+    RealtimeScriptHostEvent event{.Id=request.Id,.Opcode=0x07C0,.Index=request.Recording};
+    if(auto old=Replay(event))return *old;
+    auto result=m_CarRecordings.Request(request.Recording);
+    if(result.Status==NativeScriptServiceStatus::Ready)Commit(event);
+    return result;
+}
+NativeScriptBooleanResult RealtimeScriptHost::HasCarRecordingLoaded(const NativeScriptCarRecordingRequest& request) {
+    NativeScriptBooleanResult result;
+    result.Value=m_CarRecordings.IsLoaded(request.Recording);
+    RealtimeScriptHostEvent event{.Id=request.Id,.Opcode=0x07C1,.Index=request.Recording,.StateArgument=result.Value?1:0};
+    if(auto old=Replay(event)){result.Result=*old;return result;}
+    Commit(event);result.Result=Ready();return result;
+}
+NativeScriptServiceResult RealtimeScriptHost::PreloadBeatTrack(const NativeScriptBeatTrackRequest& request) {
+    RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=0x0952, .Index=request.Track};
+    if (auto old = Replay(event)) return *old;
+    auto result = m_BeatTrack.Preload(request.Track);
+    if (result.Status == NativeScriptServiceStatus::Ready) Commit(event);
+    return result;
+}
+NativeScriptIntegerResult RealtimeScriptHost::GetBeatTrackStatus(const NativeScriptRequestId& id) {
+    NativeScriptIntegerResult result;
+    result.Value = m_BeatTrack.State().Status;
+    RealtimeScriptHostEvent event{.Id=id, .Opcode=0x0953, .StateArgument=result.Value};
+    if (auto old = Replay(event)) { result.Result = *old; return result; }
+    Commit(event);
+    result.Result = Ready();
+    return result;
+}
+NativeScriptBooleanResult RealtimeScriptHost::AreSubtitlesEnabled(const NativeScriptRequestId& id) {
+    NativeScriptBooleanResult result;
+    result.Value = true; // CMenuManager::InitialiseChangedLanguageSettings default
+    RealtimeScriptHostEvent event{.Id=id, .Opcode=0x09C8, .StateArgument=1};
+    if (auto old = Replay(event)) { result.Result = *old; return result; }
+    Commit(event);
+    result.Result = Ready();
+    return result;
+}
+NativeScriptServiceResult RealtimeScriptHost::SetDensityMultiplier(const NativeScriptDensityRequest& request) {
+    if (!std::isfinite(request.Multiplier) || request.Multiplier < 0.0f)
+        return Error("density multiplier is invalid");
+    RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=std::uint16_t(request.Cars ? 0x01EB : 0x03DE),
+        .Arguments={request.Multiplier}};
+    if (auto old = Replay(event)) return *old;
+    (request.Cars ? m_CarDensityMultiplier : m_PedDensityMultiplier) = request.Multiplier;
+    Commit(event);
+    return Ready();
+}
+NativeScriptServiceResult RealtimeScriptHost::SetRandomTrains(const NativeScriptBooleanRequest& request) {
+    RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=0x06D7, .StateArgument=request.Value ? 1 : 0};
+    if (auto old = Replay(event)) return *old;
+    m_RandomTrains = request.Value;
+    Commit(event);
+    return Ready();
+}
+NativeScriptReferenceResult<NativeScriptVehicleRef> RealtimeScriptHost::CreateVehicle(
+    const NativeScriptVehicleCreateRequest& request) {
+    NativeScriptReferenceResult<NativeScriptVehicleRef> result;
+    if (!m_Initialized || !std::isfinite(request.Position.X) || !std::isfinite(request.Position.Y) ||
+        !std::isfinite(request.Position.Z)) {
+        result.Result = Error("script vehicle request is invalid");
+        return result;
+    }
+    std::string name, texture;
+    const auto* definition = m_CarGenerators.FindModel(request.ModelId);
+    if (!definition || !StreamPager_KnownModelIdentity(request.ModelId, name, texture) ||
+        !m_ScriptModels.contains(request.ModelId)) {
+        result.Result = Unsupported("script vehicle model is not source-resident");
+        return result;
+    }
+    auto collisionOwner = m_ScriptModelCollisions.contains(request.ModelId) ?
+        m_ScriptModelCollisions.at(request.ModelId) : std::shared_ptr<const NativeCollisionModel>{};
+    if (!collisionOwner) {
+        const auto collision = m_CollisionContext->Assets.LookupModel(name);
+        if (collision.Status == NativeCollisionModelStatus::Ready) collisionOwner = collision.Model;
+    }
+    if (!collisionOwner) {
+        result.Result = Unsupported("script vehicle model collision is unavailable");
+        return result;
+    }
+    RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=0x00A5,
+        .Arguments={request.Position.X, request.Position.Y, request.Position.Z}, .Index=request.ModelId};
+    if (auto old = Replay(event)) {
+        result.Result = *old;
+        if (old->Status == NativeScriptServiceStatus::Ready) {
+            const auto previous = std::ranges::find(m_Events, request.Id, &RealtimeScriptHostEvent::Id);
+            if (previous == m_Events.end()) result.Result = Error("script vehicle replay event is missing");
+            else result.Reference = {previous->Reference};
+        }
+        return result;
+    }
+    NativeVehicleState state;
+    state.ModelId = request.ModelId;
+    state.Type = definition->Type;
+    state.SubType = std::int32_t(definition->Type);
+    state.Status = NativeVehicleStatus::Physics;
+    state.CreatedBy = NativeVehicleCreatedBy::Mission;
+    state.MissionCleanupRegistered = true;
+    state.InWorld = true;
+    state.Matrix.Position = {request.Position.X, request.Position.Y, request.Position.Z};
+    state.Collision = collisionOwner;
+    state.ModelCollision = std::make_shared<const NativeVehicleModelCollision>(
+        NativeVehicleModelCollision{request.ModelId, collisionOwner});
+    const auto created = m_Vehicles.Allocate({NativeVehicleProducer::NativeScm, request.Id, -1, std::move(state)});
+    result.Result = created.Result;
+    result.Reference = {created.Reference.Value};
+    if (result.Result.Status == NativeScriptServiceStatus::Ready) {
+        event.Reference = result.Reference.Value;
+        Commit(event);
+    }
+    return result;
+}
+NativeScriptServiceResult RealtimeScriptHost::SetVehicleHeading(const NativeScriptVehicleHeadingRequest& request) {
+    if (!std::isfinite(request.Degrees)) return Error("script vehicle heading is invalid");
+    RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=0x0175,
+        .Arguments={request.Degrees}, .Reference=request.Vehicle.Value};
+    if (auto old = Replay(event)) return *old;
+    const auto* vehicle = m_Vehicles.Resolve({request.Vehicle.Value});
+    if (!vehicle || vehicle->Producer != NativeVehicleProducer::NativeScm)
+        return Error("script vehicle reference is stale");
+    auto state = vehicle->State;
+    const float radians = request.Degrees * 0.01745329251994329577f;
+    const float sine = std::sin(radians), cosine = std::cos(radians);
+    state.Matrix.Basis = {{{cosine, sine, 0}, {-sine, cosine, 0}, {0, 0, 1}}};
+    std::string error;
+    if (!m_Vehicles.Update({request.Vehicle.Value}, state, error)) return Error(error);
+    Commit(event);
+    return Ready();
+}
+NativeScriptServiceResult RealtimeScriptHost::SetVehicleLights(const NativeScriptVehicleStateRequest& request) {
+    if (request.Value < 0 || request.Value > 2) return Error("vehicle light override is invalid");
+    RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=0x067F,
+        .Reference=request.Vehicle.Value, .StateArgument=request.Value};
+    if (auto old = Replay(event)) return *old;
+    const auto* vehicle = m_Vehicles.Resolve({request.Vehicle.Value});
+    if (!vehicle || vehicle->Producer != NativeVehicleProducer::NativeScm)
+        return Error("script vehicle reference is stale");
+    m_ScriptVehicleLights[request.Vehicle.Value] = request.Value;
+    Commit(event);
+    return Ready();
+}
+NativeScriptServiceResult RealtimeScriptHost::WarpPedIntoVehiclePassenger(
+    const NativeScriptPedVehicleRequest& request) {
+    RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=0x0430,
+        .Index=request.Ped.Value, .Reference=request.Vehicle.Value, .StateArgument=request.Seat};
+    if (auto old = Replay(event)) return *old;
+    if (request.Ped.Value != PedRef().Value || !ResolvePed(request.Ped))
+        return Error("passenger warp requires the live source player ped");
+    const auto* vehicle = m_Vehicles.Resolve({request.Vehicle.Value});
+    if (!vehicle || vehicle->Producer != NativeVehicleProducer::NativeScm)
+        return Error("passenger warp vehicle reference is stale");
+    const auto& p = vehicle->State.Matrix.Position;
+    std::string error;
+    if (m_ScriptPeds.WarpPassenger(request.Ped, request.Vehicle, request.Seat,
+        {p[0], p[1], p[2]}, error) != NativeScriptPedStatus::Ok) return Error(error);
+    m_PlayerScriptVehicle = request.Vehicle;
+    m_PlayerScriptSeat = request.Seat;
+    Commit(event);
+    return Ready();
+}
+NativeScriptReferenceResult<NativeScriptPedRef> RealtimeScriptHost::CreatePedInsideVehicle(
+    const NativeScriptCreatePedInVehicleRequest& request) {
+    NativeScriptReferenceResult<NativeScriptPedRef> result;
+    RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=0x0129,
+        .Index=request.PedType, .Reference=request.Vehicle.Value, .StateArgument=request.ModelId};
+    if (auto old = Replay(event)) {
+        result.Result = *old;
+        if (old->Status == NativeScriptServiceStatus::Ready) {
+            const auto previous = std::ranges::find(m_Events, request.Id, &RealtimeScriptHostEvent::Id);
+            if (previous == m_Events.end()) result.Result = Error("script ped replay event is missing");
+            else result.Reference = {previous->GeneratorArguments[0]};
+        }
+        return result;
+    }
+    const auto* vehicle = m_Vehicles.Resolve({request.Vehicle.Value});
+    if (!vehicle || vehicle->Producer != NativeVehicleProducer::NativeScm) {
+        result.Result = Error("script ped vehicle reference is stale");
+        return result;
+    }
+    std::string name, texture;
+    if (!StreamPager_KnownModelIdentity(request.ModelId, name, texture) ||
+        !m_ScriptModels.contains(request.ModelId)) {
+        result.Result = Unsupported("script ped model is not source-resident");
+        return result;
+    }
+    const auto& p = vehicle->State.Matrix.Position;
+    std::string error;
+    const auto status = m_ScriptPeds.CreateDriver(request.PedType, request.ModelId,
+        request.Vehicle, {p[0], p[1], p[2]}, true, result.Reference, error);
+    if (status != NativeScriptPedStatus::Ok) {
+        result.Result = Error(error);
+        return result;
+    }
+    event.GeneratorArguments[0] = result.Reference.Value;
+    Commit(event);
+    result.Result = Ready();
+    return result;
+}
 bool RealtimeScriptHost::FulfillPendingModel(const NativeScriptRequestId& id,
-    std::shared_ptr<const WorldShotScene> scene, std::string& error) {
+    std::shared_ptr<const WorldShotScene> scene,
+    std::shared_ptr<const NativeCollisionModel> collision, std::string& error) {
     if (!m_PendingModel || m_PendingModel->Id != id || !scene || !scene->stats.atomics || !scene->stats.triangles) {
         error = "script model completion does not match pending request";
         return false;
     }
     m_ScriptModels[m_PendingModel->Model] = std::move(scene);
+    if (collision) m_ScriptModelCollisions[m_PendingModel->Model] = std::move(collision);
     m_PendingModel.reset();
     error.clear();
     return true;
@@ -654,15 +881,17 @@ NativeScriptBooleanResult RealtimeScriptHost::QueryPlayerState(const NativeScrip
         result.Value = request.Kind == NativeScriptPlayerStateQueryKind::ControlEnabled
             ? m_PlayerControlEnabled
             : ResolvePed(PedRef()) && m_PlayerControlEnabled &&
-                (m_Gameplay.State().PlayerOnFootTask || m_Gameplay.State().InVehicle);
+                (m_Gameplay.State().PlayerOnFootTask || m_Gameplay.State().InVehicle || m_PlayerScriptVehicle.has_value());
     } else {
         if (!ResolvePed({request.Reference})) { result.Result = Error("vehicle-class query requires live source player ped"); return result; }
         // This bounded slice has one ordinary model400 Automobile only;
         // train/flying/boat families remain later P5 owners.
+        const auto* scriptVehicle = m_PlayerScriptVehicle ? m_Vehicles.Resolve({m_PlayerScriptVehicle->Value}) : nullptr;
+        const bool inVehicle = m_Gameplay.State().InVehicle || scriptVehicle;
         result.Value = request.Kind == NativeScriptPlayerStateQueryKind::InAnyVehicle
-            ? m_Gameplay.State().InVehicle
-            : request.Kind == NativeScriptPlayerStateQueryKind::InVehicleModel &&
-                m_Gameplay.State().InVehicle && request.ModelId == 400;
+            ? inVehicle
+            : request.Kind == NativeScriptPlayerStateQueryKind::InVehicleModel && inVehicle &&
+                (scriptVehicle ? scriptVehicle->State.ModelId == request.ModelId : request.ModelId == 400);
     }
     const auto opcode = request.Kind == NativeScriptPlayerStateQueryKind::InTrain ? 0x09AE :
         request.Kind == NativeScriptPlayerStateQueryKind::InFlyingVehicle ? 0x04C8 :
@@ -978,8 +1207,18 @@ NativeScriptBooleanResult RealtimeScriptHost::LocateChar(const NativeScriptLocat
         return result;
     }
     const auto& player = m_Gameplay.State();
-    const auto& point = player.InVehicle && !request.OnFoot ? player.Car : player.PedRoot;
-    result.Value = (!request.OnFoot || !player.InVehicle) &&
+    NativeScriptPosition point{player.PedRoot.X, player.PedRoot.Y, player.PedRoot.Z};
+    bool inVehicle = player.InVehicle;
+    if (!request.OnFoot && m_PlayerScriptVehicle) {
+        if (const auto* vehicle = m_Vehicles.Resolve({m_PlayerScriptVehicle->Value})) {
+            const auto& p = vehicle->State.Matrix.Position;
+            point = {p[0], p[1], p[2]};
+            inVehicle = true;
+        }
+    } else if (!request.OnFoot && player.InVehicle) {
+        point = {player.Car.X, player.Car.Y, player.Car.Z};
+    }
+    result.Value = (!request.OnFoot || !inVehicle) &&
         std::abs(point.X - request.Center.X) <= request.Radius.X &&
         std::abs(point.Y - request.Center.Y) <= request.Radius.Y &&
         (request.TwoDimensional || std::abs(point.Z - request.Center.Z) <= request.Radius.Z);
@@ -1459,9 +1698,13 @@ NativeScriptServiceResult RealtimeScriptHost::LoadScene(const NativeScriptSceneR
     const auto p = request.Position;
     RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=0x03CB, .Arguments={p.X, p.Y, p.Z}};
     if (auto result = Replay(event)) return *result;
-    if (!m_CollisionRegion || m_CollisionRegion->X != p.X || m_CollisionRegion->Y != p.Y)
-        return Unsupported("LOAD_SCENE requires the requested collision region in this bounded host");
-    auto result = PublishWorld(request, true);
+    // REQUEST_COLLISION prefetches a source region, but LOAD_SCENE may choose a
+    // nearby point inside or beyond that packet (the shipped first mission does
+    // exactly this). The sole loader must qualify the exact LOAD_SCENE point;
+    // do not turn the preceding request center into an invented equality rule.
+    // Source LOAD_SCENE only requests/loads the scene; it does not perform a
+    // ground probe at the supplied Z coordinate.
+    auto result = PublishWorld(request);
     if (result.Status != NativeScriptServiceStatus::Ready) return result;
     m_LoadedScene = p; Commit(event); return Ready();
 }
@@ -1470,7 +1713,7 @@ NativeScriptServiceResult RealtimeScriptHost::LoadSceneInDirection(const NativeS
     if(!std::isfinite(request.Direction))return Error("directional scene load requires finite heading");
     RealtimeScriptHostEvent event{.Id=request.Id,.Opcode=0x0A0B,.Arguments={p.X,p.Y,p.Z,request.Direction}};
     if(auto result=Replay(event))return *result;
-    auto result=PublishWorld({request.Id,p},true);
+    auto result=PublishWorld({request.Id,p});
     if(result.Status!=NativeScriptServiceStatus::Ready)return result;
     m_LoadedScene=p;Commit(event);return Ready();
 }

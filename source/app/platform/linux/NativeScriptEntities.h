@@ -7,6 +7,9 @@
 #include <string_view>
 #include <optional>
 #include <functional>
+#include <memory>
+
+struct NativeCollisionModel;
 
 struct NativeScriptPropertyGeometry {
     std::array<float, 3> ColMin{}, ColMax{};
@@ -161,6 +164,7 @@ struct NativeScriptStaticModelOptions {
     bool RequireTexture = true;
     bool VehicleShared = false;
     bool ResidencyOnly = false;
+    std::shared_ptr<const NativeCollisionModel>* CollisionOut = nullptr;
 };
 bool NativeScriptEntities_LoadStaticModel(const char* gameDir, const std::string& model,
     const std::string& txd, WorldShotScene& scene, std::string& error, const NativeScriptStaticModelOptions& options = {});

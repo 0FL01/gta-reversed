@@ -20,6 +20,9 @@
 #include "app/platform/linux/NativeScriptClothes.h"
 #include "app/platform/linux/NativeMissionText.h"
 #include "app/platform/linux/NativeCutscene.h"
+#include "app/platform/linux/NativeCarRecordings.h"
+#include "app/platform/linux/NativeBeatTrack.h"
+#include "app/platform/linux/NativeScriptPeds.h"
 #include "app/platform/linux/NativeScriptObjects.h"
 #include "app/platform/linux/NativeVehiclePool.h"
 #include "app/platform/linux/NativeCarGeneratorResidency.h"
@@ -126,6 +129,7 @@ public:
     // Pass to CpuWorld::Build / Worker and return it with every live publication.
     std::shared_ptr<const NativePlacementOverrides> InitialPlacementOverrides() const { return m_InitialPlacementOverrides; }
     std::uint64_t WorldRevision() const { return m_WorldRevision; }
+    bool AdoptLiveWorld(std::uint64_t generation, RealtimeScriptWorldPublication publication, std::string& error);
     const std::vector<RealtimeScriptHostEvent>& Events() const { return m_Events; }
     const RealtimeGameplay* ResolvePed(NativeScriptPedRef ref) const;
     const RealtimeScriptGroup* ResolveGroup(NativeScriptGroupRef ref) const;
@@ -244,6 +248,19 @@ public:
     NativeScriptBooleanResult HasModelLoaded(const NativeScriptModelRequest&) override;
     NativeScriptServiceResult MarkModelNoLongerNeeded(const NativeScriptModelRequest&) override;
     NativeScriptServiceResult LoadSpecialCharacter(const NativeScriptSpecialModelRequest&) override;
+    NativeScriptBooleanResult HasSpecialCharacterLoaded(const NativeScriptSpecialModelRequest&) override;
+    NativeScriptServiceResult RequestCarRecording(const NativeScriptCarRecordingRequest&) override;
+    NativeScriptBooleanResult HasCarRecordingLoaded(const NativeScriptCarRecordingRequest&) override;
+    NativeScriptServiceResult PreloadBeatTrack(const NativeScriptBeatTrackRequest&) override;
+    NativeScriptIntegerResult GetBeatTrackStatus(const NativeScriptRequestId&) override;
+    NativeScriptBooleanResult AreSubtitlesEnabled(const NativeScriptRequestId&) override;
+    NativeScriptServiceResult SetDensityMultiplier(const NativeScriptDensityRequest&) override;
+    NativeScriptServiceResult SetRandomTrains(const NativeScriptBooleanRequest&) override;
+    NativeScriptReferenceResult<NativeScriptVehicleRef> CreateVehicle(const NativeScriptVehicleCreateRequest&) override;
+    NativeScriptServiceResult SetVehicleHeading(const NativeScriptVehicleHeadingRequest&) override;
+    NativeScriptServiceResult SetVehicleLights(const NativeScriptVehicleStateRequest&) override;
+    NativeScriptServiceResult WarpPedIntoVehiclePassenger(const NativeScriptPedVehicleRequest&) override;
+    NativeScriptReferenceResult<NativeScriptPedRef> CreatePedInsideVehicle(const NativeScriptCreatePedInVehicleRequest&) override;
     struct PendingScriptModel {
         NativeScriptRequestId Id;
         std::int32_t Model = 0;
@@ -251,7 +268,8 @@ public:
         bool Vehicle = false;
     };
     const std::optional<PendingScriptModel>& PendingModel() const { return m_PendingModel; }
-    bool FulfillPendingModel(const NativeScriptRequestId&, std::shared_ptr<const WorldShotScene>, std::string& error);
+    bool FulfillPendingModel(const NativeScriptRequestId&, std::shared_ptr<const WorldShotScene>,
+        std::shared_ptr<const NativeCollisionModel>, std::string& error);
     NativeScriptBooleanResult QueryPlayerState(const NativeScriptPlayerStateQueryRequest&) override;
     NativeScriptServiceResult ForceWeatherNow(const NativeScriptWeatherRequest&) override;
     NativeScriptServiceResult ReleaseWeather(const NativeScriptRequestId&) override;
@@ -332,6 +350,11 @@ private:
     NativeScriptClothes m_Clothes;
     NativeMissionText m_MissionText;
     NativeCutscene m_Cutscene;
+    NativeCarRecordings m_CarRecordings;
+    NativeBeatTrack m_BeatTrack;
+    NativeScriptPeds m_ScriptPeds;
+    float m_CarDensityMultiplier = 1.0f, m_PedDensityMultiplier = 1.0f;
+    bool m_RandomTrains = true;
     bool m_ZoneNamesVisible = true;
     std::int32_t m_PlayerArea = 0;
     std::int32_t m_DayOfWeek = 4; // source clock Initialise: Thursday
@@ -340,6 +363,10 @@ private:
     std::array<bool, 47> m_PlayerWeapons{};
     std::optional<PendingScriptModel> m_PendingModel;
     std::map<std::int32_t, std::shared_ptr<const WorldShotScene>> m_ScriptModels;
+    std::map<std::int32_t, std::shared_ptr<const NativeCollisionModel>> m_ScriptModelCollisions;
+    std::map<std::int32_t, std::int32_t> m_ScriptVehicleLights;
+    std::optional<NativeScriptVehicleRef> m_PlayerScriptVehicle;
+    std::int32_t m_PlayerScriptSeat = -1;
     std::array<bool, 82> m_StreamedNoLongerNeeded{};
     bool m_PlayerControlEnabled = true;
     bool m_UpdateStatsVisible = true;

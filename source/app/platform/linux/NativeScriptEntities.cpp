@@ -11,6 +11,7 @@
 #include <cstring>
 #include <limits>
 #include <map>
+#include <span>
 #include <stdexcept>
 #include <type_traits>
 
@@ -35,6 +36,35 @@ NativeScriptServiceResult Ready() { return {NativeScriptServiceStatus::Ready, {}
 NativeScriptServiceResult Error(const char* error) { return {NativeScriptServiceStatus::Error, error}; }
 NativeScriptServiceResult Unsupported(const char* error) { return {NativeScriptServiceStatus::Unsupported, error}; }
 uint32 Word(const std::uint8_t* p) { return uint32(p[0]) | uint32(p[1]) << 8 | uint32(p[2]) << 16 | uint32(p[3]) << 24; }
+struct RwChunkView { uint32 Type = 0; std::span<const std::uint8_t> Data; };
+std::vector<RwChunkView> RwChunks(std::span<const std::uint8_t> bytes) {
+    std::vector<RwChunkView> chunks;
+    for (std::size_t offset = 0; offset + 12 <= bytes.size();) {
+        const auto size = std::size_t(Word(bytes.data() + offset + 4));
+        Require(size <= bytes.size() - offset - 12, "DFF chunk bounds");
+        chunks.push_back({Word(bytes.data() + offset), bytes.subspan(offset + 12, size)});
+        offset += 12 + size;
+    }
+    return chunks;
+}
+std::shared_ptr<const NativeCollisionModel> EmbeddedCollision(
+    const std::vector<std::uint8_t>& dff, const std::string& model) {
+    const auto top = RwChunks(dff);
+    Require(!top.empty() && top.front().Type == 0x10, "DFF clump chunk");
+    std::shared_ptr<const NativeCollisionModel> result;
+    for (const auto& extension : RwChunks(top.front().Data)) if (extension.Type == 3) {
+        for (const auto& plugin : RwChunks(extension.Data)) if (plugin.Type == 0x253f2fa) {
+            Require(!result, "multiple embedded vehicle COL chunks");
+            auto collision = std::make_shared<NativeCollisionModel>();
+            std::string error;
+            Require(NativeCollisionAssets::Parse(plugin.Data, "gta3.img:" + model + ".dff:0x253f2fa",
+                *collision, error), error);
+            Require(collision->Name == model + "_col", "embedded COL/model identity mismatch");
+            result = std::move(collision);
+        }
+    }
+    return result;
+}
 bool Finite(NativeScriptPosition p) { return std::isfinite(p.X) && std::isfinite(p.Y) && std::isfinite(p.Z); }
 template<typename T> bool ValidEnum(T value, T last) {
     return static_cast<std::underlying_type_t<T>>(value) <= static_cast<std::underlying_type_t<T>>(last);
@@ -173,6 +203,7 @@ WorldShotScene ReadStaticModel(const std::string& model, const std::string& txd,
         shared = std::make_unique<Dictionary>(sharedBytes);
     }
     auto modelBytes = ReadEntry(model + ".dff");
+    const auto collision = options.CollisionOut ? EmbeddedCollision(modelBytes, model) : nullptr;
     struct Linked {
         LinkedClump Value;
         ~Linked() { TexSample_FreeLinked(Value); }
@@ -190,6 +221,7 @@ WorldShotScene ReadStaticModel(const std::string& model, const std::string& txd,
         Require(scene.stats.atomics && scene.stats.triangles, "empty resident model clump");
         std::snprintf(scene.stats.dffName, sizeof(scene.stats.dffName), "%s.dff", model.c_str());
         std::snprintf(scene.stats.txdName, sizeof(scene.stats.txdName), "%s.txd", txd.c_str());
+        if (options.CollisionOut) *options.CollisionOut = collision;
         return scene;
     }
     std::map<std::pair<const rw::Texture*, uint32>, int> images;
@@ -261,6 +293,7 @@ WorldShotScene ReadStaticModel(const std::string& model, const std::string& txd,
     std::snprintf(scene.stats.dffName, sizeof(scene.stats.dffName), "%s.dff", model.c_str());
     std::snprintf(scene.stats.txdName, sizeof(scene.stats.txdName), "%s.txd", txd.c_str());
     scene.stats.textures = int(scene.images.size());
+    if (options.CollisionOut) *options.CollisionOut = collision;
     return scene;
 }
 int32 NextRef(int32 old, std::size_t slot) {

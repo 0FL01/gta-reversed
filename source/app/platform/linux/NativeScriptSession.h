@@ -74,6 +74,7 @@ struct NativeScriptObjectRef {
 };
 // Source generator slot references: zero is valid; -1 is allocation failure.
 struct NativeScriptCarGeneratorRef { std::int32_t Value = -1; };
+struct NativeScriptVehicleRef { std::int32_t Value = -1; };
 template<typename Ref> struct NativeScriptReferenceResult {
     NativeScriptServiceResult Result;
     Ref Reference;
@@ -85,6 +86,33 @@ struct NativeScriptCarGeneratorRequest {
     std::int32_t ModelId = 0, PrimaryColor = 0, SecondaryColor = 0;
     std::int32_t ForceSpawn = 0, AlarmChance = 0, DoorLockChance = 0;
     std::int32_t MinDelay = 0, MaxDelay = 0;
+};
+struct NativeScriptVehicleCreateRequest {
+    NativeScriptRequestId Id;
+    std::int32_t ModelId = 0;
+    NativeScriptPosition Position;
+};
+struct NativeScriptVehicleHeadingRequest {
+    NativeScriptRequestId Id;
+    NativeScriptVehicleRef Vehicle;
+    float Degrees = 0.0f;
+};
+struct NativeScriptVehicleStateRequest {
+    NativeScriptRequestId Id;
+    NativeScriptVehicleRef Vehicle;
+    std::int32_t Value = 0;
+};
+struct NativeScriptPedVehicleRequest {
+    NativeScriptRequestId Id;
+    NativeScriptPedRef Ped;
+    NativeScriptVehicleRef Vehicle;
+    std::int32_t Seat = -1;
+};
+struct NativeScriptCreatePedInVehicleRequest {
+    NativeScriptRequestId Id;
+    NativeScriptVehicleRef Vehicle;
+    std::int32_t PedType = 0;
+    std::int32_t ModelId = 0;
 };
 struct NativeScriptCarGeneratorPlateRequest {
     NativeScriptCarGeneratorRequest Generator;
@@ -232,6 +260,23 @@ struct NativeScriptSpecialModelRequest {
     NativeScriptRequestId Id;
     std::int32_t Slot = 0;
     std::array<char, 8> Name{};
+};
+struct NativeScriptCarRecordingRequest {
+    NativeScriptRequestId Id;
+    std::int32_t Recording = 0;
+};
+struct NativeScriptBeatTrackRequest {
+    NativeScriptRequestId Id;
+    std::int32_t Track = 0;
+};
+struct NativeScriptBooleanRequest {
+    NativeScriptRequestId Id;
+    bool Value = false;
+};
+struct NativeScriptDensityRequest {
+    NativeScriptRequestId Id;
+    float Multiplier = 1.0f;
+    bool Cars = false;
 };
 struct NativeScriptWeatherRequest {
     NativeScriptRequestId Id;
@@ -510,6 +555,19 @@ public:
     virtual NativeScriptBooleanResult HasModelLoaded(const NativeScriptModelRequest&) { return {}; }
     virtual NativeScriptServiceResult MarkModelNoLongerNeeded(const NativeScriptModelRequest&) { return {}; }
     virtual NativeScriptServiceResult LoadSpecialCharacter(const NativeScriptSpecialModelRequest&) { return {}; }
+    virtual NativeScriptBooleanResult HasSpecialCharacterLoaded(const NativeScriptSpecialModelRequest&) { return {}; }
+    virtual NativeScriptServiceResult RequestCarRecording(const NativeScriptCarRecordingRequest&) { return {}; }
+    virtual NativeScriptBooleanResult HasCarRecordingLoaded(const NativeScriptCarRecordingRequest&) { return {}; }
+    virtual NativeScriptServiceResult PreloadBeatTrack(const NativeScriptBeatTrackRequest&) { return {}; }
+    virtual NativeScriptIntegerResult GetBeatTrackStatus(const NativeScriptRequestId&) { return {}; }
+    virtual NativeScriptBooleanResult AreSubtitlesEnabled(const NativeScriptRequestId&) { return {}; }
+    virtual NativeScriptServiceResult SetDensityMultiplier(const NativeScriptDensityRequest&) { return {}; }
+    virtual NativeScriptServiceResult SetRandomTrains(const NativeScriptBooleanRequest&) { return {}; }
+    virtual NativeScriptReferenceResult<NativeScriptVehicleRef> CreateVehicle(const NativeScriptVehicleCreateRequest&) { return {}; }
+    virtual NativeScriptServiceResult SetVehicleHeading(const NativeScriptVehicleHeadingRequest&) { return {}; }
+    virtual NativeScriptServiceResult SetVehicleLights(const NativeScriptVehicleStateRequest&) { return {}; }
+    virtual NativeScriptServiceResult WarpPedIntoVehiclePassenger(const NativeScriptPedVehicleRequest&) { return {}; }
+    virtual NativeScriptReferenceResult<NativeScriptPedRef> CreatePedInsideVehicle(const NativeScriptCreatePedInVehicleRequest&) { return {}; }
     virtual NativeScriptBooleanResult QueryPlayerState(const NativeScriptPlayerStateQueryRequest&) { return {}; }
     virtual NativeScriptServiceResult ForceWeatherNow(const NativeScriptWeatherRequest&) { return {}; }
     virtual NativeScriptServiceResult ReleaseWeather(const NativeScriptRequestId&) { return {}; }

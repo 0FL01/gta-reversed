@@ -428,24 +428,27 @@ struct LiveWorld {
     void Start(bool collision) {
         worker = std::make_unique<realtime_streaming::Worker>(collision, collisionContext,
             active->cpu->Overrides,active->cpu->Generation,nullptr,
-            [](const realtime_streaming::StaticModelRequest& request,WorldShotScene& scene,std::string& error){
+            [](const realtime_streaming::StaticModelRequest& request, WorldShotScene& scene,
+                std::shared_ptr<const NativeCollisionModel>& collision, std::string& error) {
                 NativeScriptStaticModelOptions options;
                 options.VehicleShared=request.Vehicle;
                 options.RequireTexture=!request.Vehicle;
                 options.ResidencyOnly=true;
+                options.CollisionOut = request.Vehicle ? &collision : nullptr;
                 return NativeScriptEntities_LoadStaticModel(request.GameDir.c_str(),request.Model,
                     request.Texture,scene,error,options);
             });
     }
 
     // Call once, BEFORE Tick: physics and draw see exactly the same generation.
-    bool Advance(realtime_streaming::Center center, bool& published) {
+    bool RetirementBusy() const { return bool(retiring); }
+    bool Advance(realtime_streaming::Center center, bool& published, bool requestNormal = true) {
         published = false;
         auto request = [&] {
             const auto loaded = active->cpu->Position;
             worker->Request(center, std::hypot(center.X - loaded.X, center.Y - loaded.Y) >= 40.0f);
         };
-        request();
+        if (requestNormal) request();
         const double start = realtime_streaming::Milliseconds();
         constexpr double budgetMs = 4.0;
         if (retiring) {
@@ -483,11 +486,24 @@ struct LiveWorld {
                             static_cast<unsigned long long>(pending->cpu->Generation), residency.Removals.size(), residency.Detail.c_str());
                         return false;
                     }
+                    auto collision=pending->cpu->BorrowedCollision;
+                    if(!collision){std::printf("play-fail source world lost collision owner\n");return false;}
+                    RealtimeScriptWorldPublication publication;
+                    publication.Center={pending->cpu->Position.X,pending->cpu->Position.Y,pending->cpu->Position.Z};
+                    publication.Scene=std::make_shared<const WorldShotScene>(pending->cpu->Scene);
+                    publication.Collision=std::move(collision);
+                    publication.SourceCollision=pending->cpu->SourceCollision;
+                    publication.Overrides=pending->cpu->Overrides;
+                    publication.Frame=pending->cpu->Frame;
+                    std::string adoptError;
+                    if(!scriptHost->AdoptLiveWorld(pending->cpu->Generation,std::move(publication),adoptError)){
+                        std::printf("play-fail adopt live world: %s\n",adoptError.c_str());return false;
+                    }
                 }
                 active.swap(pending); // matching immutable soup + BVH + GL handles
                 retiring = std::move(pending);
                 worker->Retire(std::move(retiring->cpu));
-                request(); // don't rebuild the just-published center from stale mailbox state
+                if (requestNormal) request(); // don't rebuild the just-published center from stale mailbox state
                 published = true;
                 const auto& cpu = *active->cpu;
                 std::printf("play-stream generation=%llu pagerMs=%.2f bvhMs=%.2f gpuMs=%.2f ageMs=%.2f lagM=%.1f\n",
@@ -880,12 +896,36 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
         scriptHost.SetLiveWorldLoader(
             [&](const NativeScriptSceneRequest& request, const NativeScriptServiceTicket&,
                 RealtimeScriptWorldPublication& publication) {
-                if (auto cpu = world.worker->TakeReady()) {
-                    if (cpu->Position.X != request.Position.X || cpu->Position.Y != request.Position.Y ||
-                        cpu->Position.Z != request.Position.Z || !cpu->Error.empty()) {
+                std::unique_ptr<realtime_streaming::CpuWorld> prepared;
+                if (world.pending && world.pending->cpu) {
+                    if (world.pending->cpu->Position.X == request.Position.X &&
+                        world.pending->cpu->Position.Y == request.Position.Y) {
+                        prepared = std::move(world.pending->cpu);
+                    } else {
+                        // A normal camera request was already uploading when
+                        // SCM acquired the sole world transaction. Retire it
+                        // without publication so the exact script request can
+                        // become the next worker generation.
+                        world.worker->Discard(std::move(world.pending->cpu));
+                    }
+                    world.pending.reset();
+                }
+                if (!prepared) prepared = world.worker->TakeReady();
+                if (auto cpu=std::move(prepared)) {
+                    if (!cpu->Error.empty()) {
                         scriptWorldPending = false;
-                        return NativeScriptAsyncPrepareResult{NativeScriptAsyncPrepareStatus::Error,
-                            cpu->Error.empty() ? "world worker returned a mismatched script center" : cpu->Error};
+                        return NativeScriptAsyncPrepareResult{NativeScriptAsyncPrepareStatus::Error, cpu->Error};
+                    }
+                    if (cpu->Position.X != request.Position.X || cpu->Position.Y != request.Position.Y) {
+                        // Repeated polls can leave one already-built packet for
+                        // the preceding REQUEST_COLLISION center. It is stale
+                        // input, not a service failure: retire it and request
+                        // the exact LOAD_SCENE center under the same ticket.
+                        world.worker->Discard(std::move(cpu));
+                        world.worker->Request({request.Position.X, request.Position.Y, request.Position.Z}, true);
+                        scriptWorldPending = true;
+                        return NativeScriptAsyncPrepareResult{NativeScriptAsyncPrepareStatus::Pending,
+                            "stale world packet retired; exact script center pending"};
                     }
                     publication.Center = request.Position;
                     publication.Frame = cpu->Frame;
@@ -979,7 +1019,7 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
                     auto completion = world.worker->TakeStaticModel(ticket);
                     if (completion) {
                         if (!completion->Error.empty() || !scriptHost.FulfillPendingModel(
-                            pending->Id, std::move(completion->Scene), gameplayError)) {
+                            pending->Id, std::move(completion->Scene), std::move(completion->Collision), gameplayError)) {
                             if (gameplayError.empty()) gameplayError = completion->Error;
                             std::printf("play-fail script model: %s\n", gameplayError.c_str());
                             return 1;
@@ -990,6 +1030,19 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
                         return 1;
                     }
                 } else if (scriptHost.WorldTransaction().Phase != NativeScriptServiceTransactionPhase::Idle) {
+                    if (scriptHost.WorldTransaction().Phase == NativeScriptServiceTransactionPhase::Prepared) {
+                        struct Cleanup final : NativeCarGeneratorResidencyCleanup {
+                            const NativeVehiclePool& Pool;
+                            explicit Cleanup(const NativeVehiclePool& pool) : Pool(pool) {}
+                            bool Complete(const NativeCarGeneratorRemovalObligation& obligation) const noexcept override {
+                                return obligation.Vehicle.Value == -1 || !Pool.Resolve(obligation.Vehicle);
+                            }
+                        } cleanup(scriptHost.Vehicles());
+                        const auto reconciled=scriptHost.ReconcilePendingWorldCleanup(cleanup);
+                        if(reconciled.Status==NativeCarGeneratorResidencyStatus::Error){
+                            std::printf("play-fail world cleanup: %s\n",reconciled.Detail.c_str());return 1;
+                        }
+                    }
                     // The sole world loader is polled by the repeated SCM service call.
                 } else if (!scriptHost.FulfillPendingStreamedScript(gameDir, gameplayError)) {
                     std::printf("play-fail streamed script: %s\n", gameplayError.c_str());
@@ -1008,7 +1061,13 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
         }
         const double streamStart = realtime_streaming::Milliseconds();
         bool published = false;
-        if (!scriptWorldPending && !world.Advance({camera.x, camera.y, camera.z}, published)) {
+        const bool worldServicePending=scriptWorldPending||
+            scriptHost.WorldTransaction().Phase!=NativeScriptServiceTransactionPhase::Idle;
+        // An SCM transaction owns world publication until it commits. Continue
+        // only retirement of the previously published packet; a normal pending
+        // upload is either transferred or discarded by the script loader.
+        if ((!worldServicePending || world.RetirementBusy()) &&
+            !world.Advance({camera.x, camera.y, camera.z}, published, !worldServicePending)) {
             return 1;
         }
         reportMaxStreamMs = std::max(reportMaxStreamMs, realtime_streaming::Milliseconds() - streamStart);
@@ -1343,14 +1402,15 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             lastScriptStatus == NativeScriptStatus::Waiting && !session.PassOutstanding();
         std::printf("play-script-live ready=%d main=%llu active=%zu missions=%zu mission0=%d "
             "mission-index=%d mission-ip=%u mission-commands=%llu control=%d fade=%.0f/%u cutscene=%d/%d "
-            "commands=%llu draws=%zu status=%s\n",
+            "commands=%llu draws=%zu status=%s world-phase=%u vehicles=%zu\n",
             live, static_cast<unsigned long long>(session.State().Commands), active, missions, mission0Active,
             mission == session.Threads().end() ? -1 : mission->MissionIndex,
             mission == session.Threads().end() ? 0 : mission->IP,
             static_cast<unsigned long long>(mission == session.Threads().end() ? 0 : mission->Commands),
             scriptHost.PlayerControlEnabled(), fade.Alpha, fade.Direction,
             scriptHost.Cutscene().Loaded(), scriptHost.Cutscene().Started(), static_cast<unsigned long long>(scriptExecuted),
-            scriptHost.MissionText().Draws().size(), lastScriptStatus == NativeScriptStatus::Waiting ? "Waiting" : "Other");
+            scriptHost.MissionText().Draws().size(), lastScriptStatus == NativeScriptStatus::Waiting ? "Waiting" : "Other",
+            unsigned(scriptHost.WorldTransaction().Phase),scriptHost.Vehicles().Census().Alive);
         if (!live) return 1;
     }
     std::printf("play-ok swaps=%llu seconds=%.3f sceneUpdates=%d\n",

@@ -33,9 +33,11 @@ struct StaticModelRequest {
 struct StaticModelCompletion {
     std::uint64_t Ticket = 0;
     std::shared_ptr<const WorldShotScene> Scene;
+    std::shared_ptr<const NativeCollisionModel> Collision;
     std::string Error;
 };
-using StaticModelLoader = std::function<bool(const StaticModelRequest&, WorldShotScene&, std::string&)>;
+using StaticModelLoader = std::function<bool(const StaticModelRequest&, WorldShotScene&,
+    std::shared_ptr<const NativeCollisionModel>&, std::string&)>;
 
 struct CpuWorld {
     Center Position;
@@ -71,9 +73,11 @@ struct CpuWorld {
         if (collision) {
             if (context) {
                 auto snapshot = std::make_shared<NativeCollisionSnapshot>();
+                auto collision = std::make_shared<RealtimeGameplayWorld>();
                 if (!context->Snapshot(Position.X, Position.Y, *snapshot, Error, Overrides) ||
-                    !Collision.Rebuild(*snapshot, Error)) return;
+                    !collision->Rebuild(*snapshot, Error)) return;
                 SourceCollision = std::move(snapshot);
+                BorrowedCollision = std::move(collision);
             } else {
                 Collision.Rebuild(Scene, Error);
             }
@@ -82,8 +86,8 @@ struct CpuWorld {
         if (SourceCollision) {
             std::printf("source-col-world generation=%llu center=%.3f,%.3f,%.3f pagerMs=%.2f collisionMs=%.2f instances=%zu triangles=%zu spheres=%zu boxes=%zu collapsed=%zu missing=%zu empty=%zu\n",
                 static_cast<unsigned long long>(Generation), Position.X, Position.Y, Position.Z, PagerMs, CollisionMs,
-                SourceCollision->Instances.size(), Collision.TriangleCount(), Collision.SphereCount(), Collision.BoxCount(),
-                Collision.CollapsedTriangleCount(), SourceCollision->MissingModels, SourceCollision->EmptyModels);
+                SourceCollision->Instances.size(), QueryWorld().TriangleCount(), QueryWorld().SphereCount(), QueryWorld().BoxCount(),
+                QueryWorld().CollapsedTriangleCount(), SourceCollision->MissingModels, SourceCollision->EmptyModels);
         }
     }
 };
@@ -243,9 +247,9 @@ private:
                 auto request = std::move(*m_StaticModelWaiting);
                 m_StaticModelWaiting.reset();
                 lock.unlock();
-                StaticModelCompletion completion{.Ticket=request.Ticket,.Scene={},.Error={}};
+                StaticModelCompletion completion{.Ticket=request.Ticket,.Scene={},.Collision={},.Error={}};
                 auto scene = std::make_shared<WorldShotScene>();
-                if (m_StaticModelLoader && m_StaticModelLoader(request,*scene,completion.Error)) completion.Scene = std::move(scene);
+                if (m_StaticModelLoader && m_StaticModelLoader(request,*scene,completion.Collision,completion.Error)) completion.Scene = std::move(scene);
                 else if (!m_StaticModelLoader) completion.Error = "script model loader is unavailable";
                 else completion.Error = request.Model + ": " + completion.Error;
                 lock.lock();
