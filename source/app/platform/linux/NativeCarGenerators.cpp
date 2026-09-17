@@ -362,10 +362,10 @@ const NativeCarGeneratorEvent* NativeCarGenerators::FindEvent(NativeScriptReques
 NativeScriptReferenceResult<NativeCarGeneratorRef> NativeCarGenerators::CreateInternal(
     const NativeCarGeneratorCreateRequest& request, uint32 timeMs,
     const NativeCarGeneratorProvenance& provenance, bool journal,
-    NativeCarGeneratorRegistrationStatus* registration) try {
+    NativeCarGeneratorRegistrationStatus* registration, NativeCarGeneratorEventKind kind) try {
     if (journal) {
         if (const auto* event = FindEvent(request.Id)) {
-            if (event->Kind != NativeCarGeneratorEventKind::Create014B || event->Create != request) {
+            if (event->Kind != kind || event->Create != request) {
                 return {Error("car-generator request ID reused by another operation or payload"), {}};
             }
             return {event->Result, event->Generator};
@@ -410,11 +410,14 @@ NativeScriptReferenceResult<NativeCarGeneratorRef> NativeCarGenerators::CreateIn
             ++m_Registered;
             ++m_Revision;
             result.Reference = {int32(index)};
+            if (request.PlateText[0] && m_PlateCount < m_Plates.size()) {
+                m_Plates[m_PlateCount++] = {result.Reference, request.PlateText};
+            }
             if (registration) *registration = NativeCarGeneratorRegistrationStatus::Registered;
         }
     }
     if (journal) {
-        m_Events.push_back({m_Events.size() + 1, NativeCarGeneratorEventKind::Create014B,
+        m_Events.push_back({m_Events.size() + 1, kind,
             request.Id, result.Reference, request, 0, result.Result});
     }
     return result;
@@ -422,7 +425,7 @@ NativeScriptReferenceResult<NativeCarGeneratorRef> NativeCarGenerators::CreateIn
     if (registration) *registration = NativeCarGeneratorRegistrationStatus::InvalidMetadata;
     NativeScriptReferenceResult<NativeCarGeneratorRef> result{Error(exception.what()), {}};
     if (journal) {
-        m_Events.push_back({m_Events.size() + 1, NativeCarGeneratorEventKind::Create014B,
+        m_Events.push_back({m_Events.size() + 1, kind,
             request.Id, result.Reference, request, 0, result.Result});
     }
     return result;
@@ -432,6 +435,13 @@ NativeScriptReferenceResult<NativeCarGeneratorRef> NativeCarGenerators::Create(
     const NativeCarGeneratorCreateRequest& request, uint32 timeMs) {
     return CreateInternal(request, timeMs,
         {NativeCarGeneratorSourceKind::Script014B, "main.scm", 0, 0, 0, request.Id.IP, 0}, true);
+}
+
+NativeScriptReferenceResult<NativeCarGeneratorRef> NativeCarGenerators::CreateWithPlate(
+    const NativeCarGeneratorCreateRequest& request, uint32 timeMs) {
+    return CreateInternal(request, timeMs,
+        {NativeCarGeneratorSourceKind::Script014B, "main.scm", 0, 0, 0, request.Id.IP, 0}, true,
+        nullptr, NativeCarGeneratorEventKind::Create09E2);
 }
 
 NativeScriptServiceResult NativeCarGenerators::Switch(const NativeCarGeneratorSwitchRequest& request,

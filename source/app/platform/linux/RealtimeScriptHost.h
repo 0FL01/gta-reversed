@@ -9,6 +9,17 @@
 #include "app/platform/linux/NativeGarages.h"
 #include "app/platform/linux/NativeRestarts.h"
 #include "app/platform/linux/NativeStuntJumps.h"
+#include "app/platform/linux/NativeSetPieces.h"
+#include "app/platform/linux/NativeZonePopulation.h"
+#include "app/platform/linux/NativePathPolicy.h"
+#include "app/platform/linux/NativeExternalScriptTriggers.h"
+#include "app/platform/linux/NativeScriptModelAnims.h"
+#include "app/platform/linux/NativeScriptIplRequests.h"
+#include "app/platform/linux/NativeWorldObjectOverrides.h"
+#include "app/platform/linux/NativeScriptWeather.h"
+#include "app/platform/linux/NativeScriptClothes.h"
+#include "app/platform/linux/NativeMissionText.h"
+#include "app/platform/linux/NativeCutscene.h"
 #include "app/platform/linux/NativeScriptObjects.h"
 #include "app/platform/linux/NativeVehiclePool.h"
 #include "app/platform/linux/NativeCarGeneratorResidency.h"
@@ -126,6 +137,21 @@ public:
     const NativeGarages& Garages() const { return m_Garages; }
     const NativeRestarts& Restarts() const { return m_Restarts; }
     const NativeStuntJumps& StuntJumps() const { return m_StuntJumps; }
+    const NativeSetPieces& SetPieces() const { return m_SetPieces; }
+    const NativeZonePopulation& ZonePopulation() const { return m_ZonePopulation; }
+    const NativePathPolicy& PathPolicy() const{return m_PathPolicy;}
+    const NativeExternalScriptTriggers& ExternalTriggers()const{return m_ExternalTriggers;}
+    const NativeScriptModelAnims& ModelAnims() const { return m_ModelAnims; }
+    const NativeScriptIplRequests& IplRequests() const { return m_IplRequests; }
+    const NativeWorldObjectOverrides& WorldObjectOverrides() const { return m_WorldObjectOverrides; }
+    const NativeScriptWeather& Weather() const { return m_Weather; }
+    const NativeScriptClothes& Clothes() const { return m_Clothes; }
+    const NativeMissionText& MissionText() const { return m_MissionText; }
+    const NativeCutscene& Cutscene() const { return m_Cutscene; }
+    bool ZoneNamesVisible() const { return m_ZoneNamesVisible; }
+    const std::array<std::uint8_t, 3>& FadeColour() const { return m_FadeColour; }
+    bool PlayerControlEnabled() const { return m_PlayerControlEnabled; }
+    bool UpdateStatsVisible() const { return m_UpdateStatsVisible; }
     const NativeScriptObjects& Objects() const { return m_Objects; }
     // Explicit query inputs carry source area/ENEX authority; city unlock is
     // always read from this host's SCM stats. Returns reset work, never teleport.
@@ -167,6 +193,8 @@ public:
 
     NativeScriptServiceResult RequestCollision(const NativeScriptCollisionRequest&) override;
     NativeScriptServiceResult LoadScene(const NativeScriptSceneRequest&) override;
+    NativeScriptServiceResult LoadSceneInDirection(const NativeScriptDirectionalSceneRequest&) override;
+    NativeScriptServiceResult ClearArea(const NativeScriptClearAreaRequest&) override;
     NativeScriptServiceResult CreatePlayer(const NativeScriptPlayerRequest&) override;
     NativeScriptReferenceResult<NativeScriptGroupRef> GetPlayerGroup(const NativeScriptPlayerLookupRequest&) override;
     NativeScriptReferenceResult<NativeScriptPedRef> GetPlayerChar(const NativeScriptPlayerLookupRequest&) override;
@@ -175,14 +203,85 @@ public:
     NativeScriptReferenceResult<NativeScriptPickupRef> CreateLockedProperty(const NativeScriptLockedPropertyRequest&) override;
     NativeScriptReferenceResult<NativeScriptPickupRef> CreateForSaleProperty(const NativeScriptForSalePropertyRequest&) override;
     NativeScriptReferenceResult<NativeScriptPickupRef> CreatePickup(const NativeScriptPickupRequest&) override;
+    NativeScriptReferenceResult<NativeScriptPickupRef> CreatePickupWithAmmo(const NativeScriptPickupAmmoRequest&) override;
     NativeScriptReferenceResult<NativeScriptBlipRef> CreateContactBlip(const NativeScriptContactBlipRequest&) override;
     NativeScriptReferenceResult<NativeScriptBlipRef> CreateCoordinateBlip(const NativeScriptCoordinateBlipRequest&) override;
     NativeScriptServiceResult SetBlipDisplay(const NativeScriptBlipDisplayRequest&) override;
     NativeScriptServiceResult SetEntryExitFlag(const NativeScriptEntryExitFlagRequest&) override;
+    NativeScriptServiceResult SwitchEntryExit(const NativeScriptEntryExitSwitchRequest&) override;
     NativeScriptServiceResult DeactivateGarage(const NativeScriptGarageRequest&) override;
     NativeScriptServiceResult ChangeGarageType(const NativeScriptGarageTypeRequest&) override;
     NativeScriptServiceResult AddRestart(const NativeScriptRestartRequest&) override;
     NativeScriptServiceResult AddStuntJump(const NativeScriptStuntJumpRequest&) override;
+    NativeScriptServiceResult AddSetPiece(const NativeScriptSetPieceRequest&) override;
+    NativeScriptServiceResult InitZonePopulationSettings(const NativeScriptRequestId&) override;
+    NativeScriptServiceResult SetZonePopulationType(const NativeScriptZonePopulationRequest&) override;
+    NativeScriptServiceResult SetZonePopulationRaces(const NativeScriptZonePopulationRequest&) override;
+    NativeScriptServiceResult SetZoneDealerStrength(const NativeScriptZonePopulationRequest&) override;
+    NativeScriptServiceResult SetZoneGangStrength(const NativeScriptZoneGangRequest&) override;
+    NativeScriptServiceResult SetZoneNoCops(const NativeScriptZonePopulationRequest&) override;
+    NativeScriptServiceResult AddPathPolicy(const NativeScriptPathPolicyRequest&) override;
+    NativeScriptServiceResult AddExternalScriptTrigger(const NativeScriptExternalTriggerRequest&) override;
+    NativeScriptServiceResult AddCodeScriptBrain(const NativeScriptCodeBrainRequest&) override;
+    NativeScriptServiceResult AttachAnimsToModel(const NativeScriptModelAnimRequest&) override;
+    NativeScriptServiceResult SetIplRequested(const NativeScriptIplRequest&) override;
+    NativeScriptServiceResult SetClosestObjectVisibility(const NativeScriptWorldObjectVisibilityRequest&) override;
+    NativeScriptServiceResult SetZoneNamesVisible(const NativeScriptRequestId&, bool) override;
+    NativeScriptBooleanResult IsPlayerPlaying(const NativeScriptPlayerLookupRequest&) override;
+    NativeScriptIntegerResult GetCharAreaVisible(const NativeScriptPedQueryRequest&) override;
+    NativeScriptIntegerResult GetAreaVisible(const NativeScriptRequestId&) override;
+    NativeScriptIntegerResult GetCurrentDayOfWeek(const NativeScriptRequestId&) override;
+    NativeScriptIntegerResult GetCurrentLanguage(const NativeScriptRequestId&) override;
+    NativeScriptBooleanResult HasLanguageChanged(const NativeScriptRequestId&) override;
+    NativeScriptIntegerResult GetCityPlayerIsIn(const NativeScriptPlayerLookupRequest&) override;
+    NativeScriptIntegerResult GetNumberTagsTagged(const NativeScriptRequestId&) override;
+    NativeScriptBooleanResult AreCarCheatsActivated(const NativeScriptRequestId&) override;
+    NativeScriptBooleanResult HasDeathArrestBeenExecuted(const NativeScriptRequestId&) override;
+    NativeScriptBooleanResult IsCharDead(const NativeScriptPedQueryRequest&) override;
+    NativeScriptBooleanResult IsGarageOpen(const NativeScriptGarageRequest&) override;
+    NativeScriptBooleanResult HasCharGotWeapon(const NativeScriptPedWeaponRequest&) override;
+    NativeScriptServiceResult RequestModel(const NativeScriptModelRequest&) override;
+    NativeScriptBooleanResult HasModelLoaded(const NativeScriptModelRequest&) override;
+    NativeScriptServiceResult MarkModelNoLongerNeeded(const NativeScriptModelRequest&) override;
+    NativeScriptServiceResult LoadSpecialCharacter(const NativeScriptSpecialModelRequest&) override;
+    struct PendingScriptModel {
+        NativeScriptRequestId Id;
+        std::int32_t Model = 0;
+        std::string Name, Texture;
+        bool Vehicle = false;
+    };
+    const std::optional<PendingScriptModel>& PendingModel() const { return m_PendingModel; }
+    bool FulfillPendingModel(const NativeScriptRequestId&, std::shared_ptr<const WorldShotScene>, std::string& error);
+    NativeScriptBooleanResult QueryPlayerState(const NativeScriptPlayerStateQueryRequest&) override;
+    NativeScriptServiceResult ForceWeatherNow(const NativeScriptWeatherRequest&) override;
+    NativeScriptServiceResult ReleaseWeather(const NativeScriptRequestId&) override;
+    NativeScriptServiceResult GivePlayerClothes(const NativeScriptClothesRequest&) override;
+    NativeScriptServiceResult BuildPlayerModel(const NativeScriptPlayerLookupRequest&) override;
+    NativeScriptServiceResult StoreClothesState(const NativeScriptRequestId&) override;
+    NativeScriptServiceResult SetFadeColour(const NativeScriptFadeColourRequest&) override;
+    NativeScriptServiceResult SetAreaVisible(const NativeScriptAreaRequest&) override;
+    NativeScriptServiceResult SetPlayerControl(const NativeScriptPlayerControlRequest&) override;
+    NativeScriptServiceResult LoadMissionText(const NativeScriptMissionTextRequest&) override;
+    NativeScriptServiceResult UseTextCommands(const NativeScriptTextCommandsRequest&) override;
+    NativeScriptServiceResult SetTextDrawBeforeFade(const NativeScriptRequestId&, bool) override;
+    NativeScriptServiceResult SetTextFont(const NativeScriptRequestId&, std::int32_t) override;
+    NativeScriptServiceResult SetTextStyle(const NativeScriptTextStyleRequest&) override;
+    NativeScriptServiceResult DisplayText(const NativeScriptTextDisplayRequest&) override;
+    NativeScriptServiceResult LoadCutscene(const NativeScriptCutsceneRequest&) override;
+    NativeScriptServiceResult StartCutscene(const NativeScriptRequestId&) override;
+    NativeScriptServiceResult ClearCutscene(const NativeScriptRequestId&) override;
+    NativeScriptBooleanResult HasCutsceneLoaded(const NativeScriptRequestId&) override;
+    NativeScriptBooleanResult HasCutsceneFinished(const NativeScriptRequestId&) override;
+    NativeScriptBooleanResult WasCutsceneSkipped(const NativeScriptRequestId&) override;
+    NativeScriptStringResult GetCharEntryExitName(const NativeScriptPedQueryRequest&) override;
+    NativeScriptServiceResult SetUpdateStatsVisible(const NativeScriptRequestId&, bool) override;
+    NativeScriptServiceResult ClearHelp(const NativeScriptRequestId&) override;
+    NativeScriptServiceResult StreamScript(const NativeScriptStreamedRequest&) override;
+    NativeScriptServiceResult MarkStreamedScriptNoLongerNeeded(const NativeScriptStreamedRequest&) override;
+    bool FulfillPendingStreamedScript(const char* gameDir, std::string& error);
+    NativeScriptBooleanResult LocateChar(const NativeScriptLocateCharRequest&) override;
+    NativeScriptBooleanResult DoesObjectExist(const NativeScriptObjectCleanupRequest&) override;
+    NativeScriptBooleanResult LocateCharObject2D(const NativeScriptLocateCharObjectRequest&) override;
     NativeScriptReferenceResult<NativeScriptObjectRef> CreateObjectNoOffset(const NativeScriptObjectRequest&) override;
     NativeScriptReferenceResult<NativeScriptObjectRef> CreateObject(const NativeScriptObjectRequest&) override;
     NativeScriptServiceResult SetObjectHeading(const NativeScriptObjectHeadingRequest&) override;
@@ -200,6 +299,7 @@ public:
     NativeScriptObjectHeadingResult GetObjectHeading(const NativeScriptObjectCoordinatesRequest&) override;
     NativeScriptServiceResult ConnectObjectLods(const NativeScriptObjectLodRequest&) override;
     NativeScriptReferenceResult<NativeScriptCarGeneratorRef> CreateCarGenerator(const NativeScriptCarGeneratorRequest&) override;
+    NativeScriptReferenceResult<NativeScriptCarGeneratorRef> CreateCarGeneratorWithPlate(const NativeScriptCarGeneratorPlateRequest&) override;
     NativeScriptServiceResult SwitchCarGenerator(const NativeScriptCarGeneratorSwitchRequest&) override;
     NativeScriptServiceResult SetCarGeneratorOwned(const NativeScriptCarGeneratorOwnedRequest&) override;
     NativeScriptPickupCollectedResult HasPickupBeenCollected(const NativeScriptPickupReferenceRequest&) override;
@@ -221,6 +321,29 @@ private:
     NativeGarages m_Garages;
     NativeRestarts m_Restarts;
     NativeStuntJumps m_StuntJumps;
+    NativeSetPieces m_SetPieces;
+    NativeZonePopulation m_ZonePopulation;
+    NativePathPolicy m_PathPolicy;
+    NativeExternalScriptTriggers m_ExternalTriggers;
+    NativeScriptModelAnims m_ModelAnims;
+    NativeScriptIplRequests m_IplRequests;
+    NativeWorldObjectOverrides m_WorldObjectOverrides;
+    NativeScriptWeather m_Weather;
+    NativeScriptClothes m_Clothes;
+    NativeMissionText m_MissionText;
+    NativeCutscene m_Cutscene;
+    bool m_ZoneNamesVisible = true;
+    std::int32_t m_PlayerArea = 0;
+    std::int32_t m_DayOfWeek = 4; // source clock Initialise: Thursday
+    bool m_CarCheatsActivated = false;
+    bool m_DeathArrestExecuted = false;
+    std::array<bool, 47> m_PlayerWeapons{};
+    std::optional<PendingScriptModel> m_PendingModel;
+    std::map<std::int32_t, std::shared_ptr<const WorldShotScene>> m_ScriptModels;
+    std::array<bool, 82> m_StreamedNoLongerNeeded{};
+    bool m_PlayerControlEnabled = true;
+    bool m_UpdateStatsVisible = true;
+    std::array<std::uint8_t, 3> m_FadeColour{};
     NativeScriptObjects m_Objects;
     NativeVehiclePool m_Vehicles;
     NativeSourceRng m_SourceRng;

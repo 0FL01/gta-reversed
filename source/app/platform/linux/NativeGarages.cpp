@@ -336,7 +336,8 @@ NativeGarageRequirement NativeGarages::Transition(const NativeGarageEntry& g,con
     // Type 22 is the hidden TRICAS record in int_veg.ipl and is absent from
     // the reversed eGarageType enum. Keep its unported body strict nearby;
     // a distant hidden-interior record has no active transition in this view.
-    if ((g.Type==19 || g.Type==22) && DistanceSquared(g,p)>=3600.0f) return NativeGarageRequirement::None;
+    if ((g.Type==19 || g.Type==22 || (g.Type>=36 && g.Type<=38)) && DistanceSquared(g,p)>=3600.0f)
+        return NativeGarageRequirement::None;
     if (!Hideout(g.Type)) return NativeGarageRequirement::SourceTypeUpdate;
     if (g.DoorState==1) {
         const auto distance=DistanceSquared(g,p);

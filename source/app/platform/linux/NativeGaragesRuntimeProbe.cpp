@@ -62,6 +62,10 @@ void BranchFixtures(const NativeGarages& garages,NativeGarageView view) {
     Require(NativeGarages::Transition(g,view)==NativeGarageRequirement::None,"distant hidden type22 garage has no active source transition");
     center(g);
     Require(NativeGarages::Transition(g,view)==NativeGarageRequirement::SourceTypeUpdate,"near hidden type22 garage retains strict unported body");
+    g.Type=36; view.Player.Matrix.Position={10000,10000,0};
+    Require(NativeGarages::Transition(g,view)==NativeGarageRequirement::None,"distant tuning garage has no active source transition");
+    center(g);
+    Require(NativeGarages::Transition(g,view)==NativeGarageRequirement::SourceTypeUpdate,"near tuning garage retains strict unported body");
     g.Type=6; view.Player.Matrix.Position={5000,5000,0};
     Require(NativeGarages::Transition(g,view)==NativeGarageRequirement::SourceTypeUpdate,"unknown body is not a far-distance no-op");
     std::printf("TEST-POSITION/POLICY branch fixtures PASS (actual IPL records and source ped COL; not SCM execution)\n");

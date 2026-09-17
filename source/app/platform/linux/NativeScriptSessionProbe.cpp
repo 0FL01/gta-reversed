@@ -451,7 +451,7 @@ void RejectCode(const Bytes& code, Status expected = Status::Error) {
 
 void Malformed() {
     RejectCode({0xFF, 0x7F}, Status::Unsupported);
-    RejectCode({0x6A, 0x81}, Status::Unsupported); // no conditions in this slice
+    RejectCode({0x6A, 0x81}, Status::Error); // NOT is invalid on non-condition FADE
     const auto player = ServiceCode(2);
     for (std::size_t n = 2; n < player.size(); ++n) RejectCode(Bytes(player.begin(), player.begin() + n));
     RejectCode(ServiceCode(2, 0)); // cannot overwrite header
@@ -1226,7 +1226,7 @@ void PickupOperationsAndFloatCopy() {
         Bytes complete; Op(complete, opcode); I32(complete, ref);
         for (std::size_t n = 2; n < complete.size(); ++n) RejectCode(Bytes(complete.begin(), complete.begin() + n));
     }
-    Bytes bad; Op(bad, 0x8215); I32(bad, ref); RejectCode(bad, Status::Unsupported);
+    Bytes bad; Op(bad, 0x8215); I32(bad, ref); RejectCode(bad, Status::Error);
     bad.clear(); Op(bad, 0x0214); Array(bad, true, 12, false, 0, 1, true); RejectCode(bad);
 
     struct MissingPickupServices final : NativeScriptServices {

@@ -238,7 +238,24 @@ bool NativeScriptSession::LoadMainBytes(std::span<const uint8> prefix, uint64 fi
 }
 
 bool NativeScriptSession::LoadStreamedScript(const char* gameDir, uint16 scriptIndex, std::string& error) {
-    if (!m_Loaded || !gameDir || !*gameDir || m_InService || m_Pending || !m_Pass.empty() ||
+    return LoadStreamedScriptInternal(gameDir, scriptIndex, false, error);
+}
+
+bool NativeScriptSession::FulfillPendingStreamedScript(const char* gameDir, std::string& error) {
+    if (!m_Pending || !m_PendingInstruction || m_PendingInstruction->Opcode != 0x08A9 ||
+        m_PendingInstruction->Int(0) < 0 || m_PendingInstruction->Int(0) > std::numeric_limits<uint16>::max()) {
+        error = "no exact pending streamed-script request";
+        return false;
+    }
+    return LoadStreamedScriptInternal(gameDir, uint16(m_PendingInstruction->Int(0)), true, error);
+}
+
+bool NativeScriptSession::LoadStreamedScriptInternal(const char* gameDir, uint16 scriptIndex,
+    bool pendingFulfillment, std::string& error) {
+    const bool exactPending = pendingFulfillment && m_Pending && m_PendingInstruction &&
+        m_PendingInstruction->Opcode == 0x08A9 && m_PendingInstruction->Int(0) == scriptIndex && !m_Pass.empty();
+    if (!m_Loaded || !gameDir || !*gameDir || m_InService ||
+        (pendingFulfillment ? !exactPending : m_Pending || !m_Pass.empty()) ||
         scriptIndex >= m_StreamedStates.size()) {
         error = "invalid streamed-script load";
         return false;
@@ -315,11 +332,19 @@ bool NativeScriptSession::LoadStreamedScript(const char* gameDir, uint16 scriptI
         error = "short streamed script read";
         return false;
     }
-    return LoadStreamedScriptBytes(scriptIndex, bytes, error);
+    return LoadStreamedScriptBytesInternal(scriptIndex, bytes, pendingFulfillment, error);
 }
 
 bool NativeScriptSession::LoadStreamedScriptBytes(uint16 scriptIndex, std::span<const uint8> bytes, std::string& error) {
-    if (!m_Loaded || m_InService || m_Pending || !m_Pass.empty() || scriptIndex >= m_StreamedStates.size()) {
+    return LoadStreamedScriptBytesInternal(scriptIndex, bytes, false, error);
+}
+
+bool NativeScriptSession::LoadStreamedScriptBytesInternal(uint16 scriptIndex, std::span<const uint8> bytes,
+    bool pendingFulfillment, std::string& error) {
+    const bool exactPending = pendingFulfillment && m_Pending && m_PendingInstruction &&
+        m_PendingInstruction->Opcode == 0x08A9 && m_PendingInstruction->Int(0) == scriptIndex && !m_Pass.empty();
+    if (!m_Loaded || m_InService || (pendingFulfillment ? !exactPending : m_Pending || !m_Pass.empty()) ||
+        scriptIndex >= m_StreamedStates.size()) {
         error = "invalid streamed-script payload load";
         return false;
     }
@@ -445,9 +470,8 @@ bool NativeScriptSession::Decode(std::size_t thread, uint32 ip, Instruction& d, 
     Reader reader{bytes, ip - base};
     uint32 opcode = 0;
     if (!reader.Read(2, opcode)) { error = "truncated opcode"; return false; }
-    d.Opcode = uint16(opcode);
+    d.Opcode = uint16(opcode & 0x7FFF);
     d.Negated = (opcode & 0x8000) != 0;
-    if (d.Negated && ((opcode & 0x7FFF) == 0x001A || (opcode & 0x7FFF) == 0x0214)) d.Opcode &= 0x7FFF;
     const auto* signature = NativeScriptLookupSchema(d.Opcode);
     if (!signature) { error = "unsupported opcode (including NOT forms)"; return false; }
     d.FixedOperandCount = signature->OperandCount;
@@ -456,13 +480,159 @@ bool NativeScriptSession::Decode(std::size_t thread, uint32 ip, Instruction& d, 
         uint32 bits = 0;
         d.RawTags[i] = uint8(tag);
         d.OperandTypes[i] = type;
-        if (type == O::String) {
-            if (tag != 9 || variadic) { error = "unsupported string operand type"; return false; }
-            d.Tags[i] = uint8(tag);
-            for (auto& c : d.Text) {
-                if (!reader.Read(1, bits)) { error = "truncated short string"; return false; }
-                c = char(bits);
+        if (type == O::DebugString128) {
+            if (variadic) { error = "invalid fixed debug string"; return false; }
+            for (unsigned n = 0; n < 128; ++n) {
+                if (!reader.Read(1, bits)) { error = "truncated fixed debug string"; return false; }
             }
+            return true;
+        }
+        if (type == O::IgnoredString) {
+            d.Tags[i] = uint8(tag);
+            if (tag == 9) {
+                for (unsigned n = 0; n < 8; ++n) if (!reader.Read(1, bits)) { error = "truncated ignored string"; return false; }
+                return true;
+            }
+            if (tag == 14) {
+                if (!reader.Read(1, bits) || !bits) { error = "invalid ignored Pascal string"; return false; }
+                const auto length = bits;
+                for (uint32 n = 0; n < length; ++n) if (!reader.Read(1, bits)) { error = "truncated ignored Pascal string"; return false; }
+                return true;
+            }
+            if (tag == 15) {
+                for (unsigned n = 0; n < 16; ++n) if (!reader.Read(1, bits)) { error = "truncated ignored long string"; return false; }
+                return true;
+            }
+            if (tag == 10 || tag == 11 || tag == 16 || tag == 17) {
+                if (!reader.Read(2, bits)) { error = "truncated ignored string variable"; return false; }
+                return true;
+            }
+            if (tag == 12 || tag == 13 || tag == 18 || tag == 19) {
+                uint32 indexVar = 0, count = 0, flags = 0;
+                if (!reader.Read(2, bits) || !reader.Read(2, indexVar) || !reader.Read(1, count) ||
+                    !reader.Read(1, flags)) {
+                    error = "truncated ignored string array";
+                    return false;
+                }
+                d.ArrayCounts[i] = uint8(count);
+                d.ArrayFlags[i] = uint8(flags);
+                return true;
+            }
+            error = "unsupported ignored string operand";
+            return false;
+        }
+        if (type == O::StringOutput) {
+            if (variadic || (tag != 10 && tag != 11 && tag != 12 && tag != 13 &&
+                tag != 16 && tag != 17 && tag != 18 && tag != 19) || !reader.Read(2, bits)) {
+                error = "invalid string output operand";
+                return false;
+            }
+            const uint32 length = tag >= 16 ? 16 : 8;
+                const bool array = tag == 12 || tag == 13 || tag == 18 || tag == 19;
+            const bool global = tag == 10 || tag == 12 || tag == 16 || tag == 18;
+                if (array) {
+                uint32 indexVar = 0, count = 0, flags = 0;
+                if (!reader.Read(2, indexVar) || !reader.Read(1, count) || !reader.Read(1, flags) ||
+                    !count || (flags & 0x7F) != (length == 16 ? 3u : 2u)) {
+                    error = "invalid string output array";
+                    return false;
+                }
+                    const bool globalIndex = (flags & 0x80) != 0;
+                    d.ArrayCounts[i] = uint8(count);
+                    d.ArrayFlags[i] = uint8(flags);
+                    if ((globalIndex && !IsGlobal(uint16(indexVar))) || (!globalIndex && indexVar >= state.Locals.size())) {
+                        error = "string output array index variable out of bounds";
+                        return false;
+                    }
+                    if (!validateRuntimeValues) {
+                        d.Tags[i] = uint8(tag);
+                        d.Values[i] = bits;
+                        d.OutputGlobal = global;
+                        return true;
+                    }
+                    const int32 index = std::bit_cast<int32>(globalIndex ? Word(m_Memory, indexVar) : state.Locals[indexVar]);
+                if (index < 0 || uint32(index) >= count) { error = "string output array index out of bounds"; return false; }
+                const uint64 address = uint64(bits) + uint64(index) * (global ? length : length / 4);
+                if (address > std::numeric_limits<uint16>::max()) { error = "string output array address overflow"; return false; }
+                bits = uint32(address);
+            }
+            if ((global && (bits < 8 || bits + length > 8 + m_Metadata.GlobalBytes)) ||
+                (!global && bits + length / 4 > state.Locals.size())) {
+                error = "string output out of bounds";
+                return false;
+            }
+            d.Tags[i] = uint8(tag);
+            d.Values[i] = bits;
+            d.OutputGlobal = global;
+            return true;
+        }
+        if (type == O::DebugString) {
+            if (tag != 14 || variadic || !reader.Read(1, bits) || !bits) { error = "invalid debug string operand"; return false; }
+            const uint32 length = bits;
+            for (uint32 n = 0; n < length; ++n) {
+                if (!reader.Read(1, bits)) { error = "truncated debug string"; return false; }
+            }
+            d.Tags[i] = uint8(tag);
+            return true;
+        }
+        if (type == O::String) {
+            if (variadic) { error = "unsupported variadic string operand"; return false; }
+            d.Tags[i] = uint8(tag);
+            if (tag == 10 || tag == 11 || tag == 16 || tag == 17) {
+                if (!reader.Read(2, bits)) { error = "truncated string variable"; return false; }
+                const uint32 length = tag >= 16 ? 16 : 8;
+                if (!validateRuntimeValues) return true;
+                if (tag == 10 || tag == 16) {
+                    if (bits < 8 || bits + length > 8 + m_Metadata.GlobalBytes) {
+                        error = "global string variable out of bounds";
+                        return false;
+                    }
+                    std::copy_n(reinterpret_cast<const char*>(m_Memory.data() + bits), length, d.LongText.data());
+                } else {
+                    const uint32 cells = length / 4;
+                    if (bits + cells > state.Locals.size()) { error = "local string variable out of bounds"; return false; }
+                    std::memcpy(d.LongText.data(), state.Locals.data() + bits, length);
+                }
+                std::copy_n(d.LongText.data(), d.Text.size(), d.Text.data());
+                d.Strings[i] = d.LongText;
+                return true;
+            }
+            if (tag == 12 || tag == 13 || tag == 18 || tag == 19) {
+                uint32 indexVar = 0, count = 0, flags = 0;
+                if (!reader.Read(2, bits) || !reader.Read(2, indexVar) || !reader.Read(1, count) ||
+                    !reader.Read(1, flags)) {
+                    error = "truncated string array";
+                    return false;
+                }
+                d.ArrayCounts[i] = uint8(count);
+                d.ArrayFlags[i] = uint8(flags);
+                if (validateRuntimeValues) { error = "unsupported runtime string array"; return false; }
+                return true;
+            }
+            if (tag == 15) {
+                for (unsigned n = 0; n < 16; ++n) {
+                    if (!reader.Read(1, bits)) { error = "truncated static long string"; return false; }
+                    if (validateRuntimeValues) d.LongText[n] = char(bits);
+                }
+                if (validateRuntimeValues) {
+                    std::copy_n(d.LongText.data(), d.Text.size(), d.Text.data());
+                    d.Strings[i] = d.LongText;
+                }
+                return true;
+            }
+            if (tag != 9 && tag != 14) { error = "unsupported string operand type"; return false; }
+            uint32 length = d.Text.size();
+            if (tag == 14) {
+                if (!reader.Read(1, bits)) { error = "truncated long-string length"; return false; }
+                if (!bits || (validateRuntimeValues && bits > d.LongText.size())) { error = "unsupported long-string length"; return false; }
+                length = bits;
+            }
+            for (uint32 n = 0; n < length; ++n) {
+                if (!reader.Read(1, bits)) { error = tag == 9 ? "truncated short string" : "truncated long string"; return false; }
+                if (n < d.LongText.size()) d.LongText[n] = char(bits);
+            }
+            std::copy_n(d.LongText.data(), d.Text.size(), d.Text.data());
+            d.Strings[i] = d.LongText;
             return true;
         }
         if (tag == 2 || tag == 3 || tag == 7 || tag == 8) {
@@ -516,7 +686,7 @@ bool NativeScriptSession::Decode(std::size_t thread, uint32 ip, Instruction& d, 
                 d.OutputGlobal = tag == 2;
                 if (type == O::InOutInteger || type == O::InOutFloat) {
                     d.OutputValue = tag == 2 ? Word(m_Memory, bits) : state.Locals[bits];
-                    if (floating && !std::isfinite(std::bit_cast<float>(d.OutputValue))) {
+                    if (validateRuntimeValues && floating && !std::isfinite(std::bit_cast<float>(d.OutputValue))) {
                         error = "nonfinite arithmetic destination"; return false;
                     }
                 }
@@ -535,13 +705,16 @@ bool NativeScriptSession::Decode(std::size_t thread, uint32 ip, Instruction& d, 
         }
         d.Tags[i] = uint8(tag);
         d.Values[i] = bits;
-        if ((type == O::Float || (type == O::Argument && tag == 6)) &&
+        if (validateRuntimeValues && (type == O::Float || (type == O::Argument && tag == 6)) &&
             !std::isfinite(d.Float(i))) { error = "nonfinite float operand"; return false; }
         return true;
     };
     for (unsigned i = 0; i < signature->OperandCount; ++i) {
         uint32 tag = 0;
-        if (!reader.Read(1, tag)) { error = "truncated operand tag"; return false; }
+        if (signature->Operands[i] != O::DebugString128 && !reader.Read(1, tag)) {
+            error = "truncated operand tag";
+            return false;
+        }
         if (!decodeOperand(i, signature->Operands[i], tag, false)) return false;
         ++d.OperandCount;
     }
@@ -587,7 +760,10 @@ bool NativeScriptSession::IsTarget(std::size_t thread, int32 label) const {
     while (pos < target) {
         Instruction d;
         std::string error;
-        if (!Decode(thread, pos, d, error, false)) { m_TargetError = error; return false; }
+        if (!Decode(thread, pos, d, error, false)) {
+            m_TargetError = "scan@" + std::to_string(pos) + " target=" + std::to_string(target) + ": " + error;
+            return false;
+        }
         pos = d.Next;
     }
     return pos == target;
@@ -627,12 +803,54 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
     if (!schema || schema->Semantics != NativeScriptSemanticCoverage::Implemented)
         return Fail(thread, NativeScriptStatus::Unsupported, rawOpcode, "opcode form classified; semantics unsupported");
     auto invalid = [&](std::string message) { return Fail(thread, NativeScriptStatus::Error, rawOpcode, std::move(message)); };
+    const auto conditionOpcode=[](std::uint16_t opcode){switch(opcode){
+    case 0x0038:case 0x0039:case 0x003A:case 0x003B:case 0x003C:case 0x04A3:case 0x04A4:case 0x07D6:
+    case 0x0018:case 0x0019:case 0x001A:case 0x001B:case 0x001C:case 0x001D:case 0x001E:case 0x001F:
+    case 0x0028:case 0x0029:case 0x002A:case 0x002B:case 0x002C:case 0x002F:
+    case 0x0020:case 0x0021:case 0x0022:case 0x0023:case 0x0024:case 0x0025:case 0x0030:case 0x0043:
+    case 0x0846:case 0x016B:case 0x08B4:case 0x08B5:case 0x08B6:case 0x0256:case 0x056A:case 0x02E9:
+    case 0x06B9:case 0x0118:case 0x0112:case 0x0445:case 0x00A3:case 0x00EC:case 0x00FE:case 0x00FF:
+    case 0x03CA:case 0x03B0:case 0x0491:case 0x0248:case 0x0A0F:case 0x08AB:case 0x0471:
+    case 0x09AE:case 0x04C8:case 0x04A7:case 0x09E7:case 0x00DD:case 0x00DF:case 0x03EE:case 0x0214:return true;
+    default:return false;}};
+    if(d.Negated&&!conditionOpcode(d.Opcode))return invalid("NOT prefix requires a condition opcode");
     std::vector<uint8> mission;
     std::optional<NativeScriptThreadState> newThread;
     std::optional<NativeScriptPosition> objectCoordinates;
     std::optional<float> objectHeading;
+    std::optional<uint32> switchTarget;
     int32 streamedLaunch = -1;
     uint32 arithmeticResult = 0;
+    uint32 statResult = 0;
+    uint32 streamedUsersResult = 0;
+    bool streamedLoadedResult = false;
+    uint32 progressResult = 0;
+    if (d.Opcode == 0x0652) {
+        if (a < 120 || std::size_t(a - 120) >= m_State.IntStats.size()) {
+            return invalid("integer stat ID outside source storage");
+        }
+        statResult = uint32(m_State.IntStats[std::size_t(a - 120)]);
+    }
+    if (d.Opcode == 0x0926) {
+        if (a < 0 || std::size_t(a) >= m_StreamedStates.size()) {
+            return invalid("streamed-script user query index out of bounds");
+        }
+        streamedUsersResult = m_StreamedStates[std::size_t(a)].Users;
+    }
+    if (d.Opcode == 0x08AB) {
+        if (a < 0 || std::size_t(a) >= m_StreamedStates.size()) {
+            return invalid("streamed-script loaded query index out of bounds");
+        }
+        streamedLoadedResult = m_StreamedStates[std::size_t(a)].Loaded;
+    }
+    if (d.Opcode == 0x058C) {
+        const float made = m_State.FloatStats[0], total = m_State.FloatStats[1];
+        const float percentage = total > 0.0f ? made / total * 100.0f : 0.0f;
+        if (!std::isfinite(made) || !std::isfinite(total) || !std::isfinite(percentage)) {
+            return invalid("progress percentage is nonfinite");
+        }
+        progressResult = std::bit_cast<uint32>(percentage);
+    }
     if (d.Opcode >= 0x0008 && d.Opcode <= 0x0017) {
         if (d.OutputGlobal != ((d.Opcode & 2) == 0)) return invalid("arithmetic variable bank mismatch");
         const unsigned operation = (d.Opcode - 0x0008) / 4;
@@ -652,6 +870,64 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
             arithmeticResult = uint32(int32(value));
         }
     }
+    const bool variableArithmetic =
+        (d.Opcode >= 0x0058 && d.Opcode <= 0x0065) || d.Opcode == 0x0068 || d.Opcode == 0x006A ||
+        d.Opcode == 0x006B || d.Opcode == 0x006D || d.Opcode == 0x006F || d.Opcode == 0x0072 || d.Opcode == 0x0073;
+    if (variableArithmetic) {
+        const bool floating = d.Opcode == 0x0059 || d.Opcode == 0x005B || d.Opcode == 0x005D ||
+            d.Opcode == 0x005F || d.Opcode == 0x0061 || d.Opcode == 0x0063 || d.Opcode == 0x0065 ||
+            d.Opcode == 0x006B || d.Opcode == 0x006D || d.Opcode == 0x006F || d.Opcode == 0x0073;
+        const bool localDestination = d.Opcode == 0x005A || d.Opcode == 0x005B || d.Opcode == 0x005C ||
+            d.Opcode == 0x005D || d.Opcode == 0x0062 || d.Opcode == 0x0063 || d.Opcode == 0x0064 ||
+            d.Opcode == 0x0065 || d.Opcode == 0x006A || d.Opcode == 0x006B || d.Opcode == 0x006F ||
+            d.Opcode == 0x0072 || d.Opcode == 0x0073;
+        const bool localSource = d.Opcode == 0x005A || d.Opcode == 0x005B || d.Opcode == 0x005E ||
+            d.Opcode == 0x005F || d.Opcode == 0x0062 || d.Opcode == 0x0063 || d.Opcode == 0x006A ||
+            d.Opcode == 0x006B || d.Opcode == 0x006D || d.Opcode == 0x0072 || d.Opcode == 0x0073;
+        if (d.Tags[0] != (localDestination ? 3 : 2) || d.RawTags[1] != (localSource ? 3 : 2)) {
+            return invalid("variable arithmetic bank mismatch");
+        }
+        const bool subtract = d.Opcode >= 0x0060 && d.Opcode <= 0x0065;
+        const bool multiply = d.Opcode == 0x0068 || d.Opcode == 0x006A || d.Opcode == 0x006B ||
+            d.Opcode == 0x006D || d.Opcode == 0x006F;
+        const bool divide = d.Opcode == 0x0072 || d.Opcode == 0x0073;
+        if (floating) {
+            const float lhs = std::bit_cast<float>(d.OutputValue), rhs = d.Float(1);
+            if (divide && rhs == 0.0f) return invalid("float division by zero");
+            const float value = subtract ? lhs - rhs : multiply ? lhs * rhs : divide ? lhs / rhs : lhs + rhs;
+            if (!std::isfinite(value)) return invalid("float arithmetic overflow");
+            arithmeticResult = std::bit_cast<uint32>(value);
+        } else {
+            const int64 lhs = std::bit_cast<int32>(d.OutputValue), rhs = b;
+            if (divide && !rhs) return invalid("integer division by zero");
+            const int64 value = subtract ? lhs - rhs : multiply ? lhs * rhs : divide ? lhs / rhs : lhs + rhs;
+            if (value < std::numeric_limits<int32>::min() || value > std::numeric_limits<int32>::max()) {
+                return invalid("integer arithmetic overflow");
+            }
+            arithmeticResult = uint32(int32(value));
+        }
+    }
+    if (d.Opcode == 0x08BA || d.Opcode == 0x08BB || d.Opcode == 0x08BC ||
+        d.Opcode == 0x08C0 || d.Opcode == 0x08C1 || d.Opcode == 0x08C2) {
+        if (d.Tags[0] != 2 || b < 0 || b >= 32) return invalid("invalid global bit mutation");
+        const bool constant = d.Opcode == 0x08BA || d.Opcode == 0x08C0;
+        const bool global = d.Opcode == 0x08BB || d.Opcode == 0x08C1;
+        if ((constant && d.RawTags[1] != 1 && d.RawTags[1] != 4 && d.RawTags[1] != 5) ||
+            (global && d.RawTags[1] != 2) || (!constant && !global && d.RawTags[1] != 3)) {
+            return invalid("global bit index bank mismatch");
+        }
+        const uint32 mask = uint32(1) << unsigned(b);
+        const uint32 old = d.OutputValue;
+        arithmeticResult = d.Opcode >= 0x08C0 ? old & ~mask : old | mask;
+    }
+    if (d.Opcode == 0x08B4 || d.Opcode == 0x08B5 || d.Opcode == 0x08B6) {
+        const bool validIndex = d.Opcode == 0x08B4
+            ? d.RawTags[1] == 1 || d.RawTags[1] == 4 || d.RawTags[1] == 5
+            : d.RawTags[1] == (d.Opcode == 0x08B5 ? 2 : 3);
+        if (d.RawTags[0] != 2 || !validIndex || b < 0 || b >= 32) {
+            return invalid("global bit query bank/index mismatch");
+        }
+    }
     switch (d.Opcode) {
     case 0x0001:
     case 0x016A:
@@ -669,16 +945,19 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         }
         break;
     case 0x004F:
+    case 0x00D7:
         if (a < 0 || uint32(a) >= MainCapacity || !IsTarget(thread, a))
-            return invalid("START_NEW_SCRIPT target is not a main instruction boundary");
+            return invalid("new main-script target is not an instruction boundary: " + m_TargetError);
         if (m_Threads.size() >= 96 && m_Idle.empty()) return invalid("script thread pool exhausted");
         newThread.emplace();
         newThread->IP = uint32(a);
         newThread->TimeMs = state.TimeMs;
         newThread->Active = true;
         if (!m_Idle.empty()) newThread->Generation = m_Threads[m_Idle.back()].Generation + 1;
-        for (unsigned i = d.FixedOperandCount; i < d.OperandCount; ++i)
-            newThread->Locals[i - d.FixedOperandCount] = d.Values[i];
+        if (d.Opcode == 0x004F) {
+            for (unsigned i = d.FixedOperandCount; i < d.OperandCount; ++i)
+                newThread->Locals[i - d.FixedOperandCount] = d.Values[i];
+        }
         break;
     case 0x0050:
         if (state.StackDepth >= state.ReturnStack.size()) return invalid("script return stack overflow");
@@ -687,6 +966,26 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
     case 0x0051:
         if (!state.StackDepth) return invalid("script return stack underflow");
         break;
+    case 0x0871: {
+        const int32 cases = d.Int(1), hasDefault = d.Int(2);
+        if (cases < 0 || cases > 7 || (hasDefault != 0 && hasDefault != 1)) {
+            return invalid("unsupported switch-start case count/default");
+        }
+        for (int32 i = 0; i < cases; ++i) {
+            if (a == d.Int(4 + unsigned(i) * 2)) {
+                const int32 label = d.Int(5 + unsigned(i) * 2);
+                if (!IsTarget(thread, label)) return invalid("switch case target is not an instruction boundary: " + m_TargetError);
+                switchTarget = Target(thread, label);
+                break;
+            }
+        }
+        if (!switchTarget && hasDefault) {
+            const int32 label = d.Int(3);
+            if (!IsTarget(thread, label)) return invalid("switch default target is not an instruction boundary: " + m_TargetError);
+            switchTarget = Target(thread, label);
+        }
+        break;
+    }
     case 0x042C: case 0x030D: case 0x0997:
         if (a < 0) return invalid("negative startup total");
         break;
@@ -709,6 +1008,9 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         break;
     case 0x0004: case 0x0005: case 0x0006: case 0x0007:
         if (d.OutputGlobal != (d.Opcode <= 0x0005)) return invalid("assignment variable bank mismatch");
+        break;
+    case 0x0084:
+        if (d.Tags[0] != 2 || d.RawTags[1] != 2) return invalid("0084 requires global source and destination");
         break;
     case 0x0086:
         // The pinned SA schema and BasicCommands::AssignTo<float,float> both
@@ -769,12 +1071,199 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
 
     int32 reference = -1;
     bool pickupCollected = false;
-    if (d.Opcode == 0x04E4 || d.Opcode == 0x03CB || d.Opcode == 0x0053 || d.Opcode == 0x07AF || d.Opcode == 0x01F5 || d.Opcode == 0x0373 || d.Opcode == 0x0173 || d.Opcode == 0x0517 || d.Opcode == 0x0518 || d.Opcode == 0x0570 || d.Opcode == 0x04CE || d.Opcode == 0x018B || d.Opcode == 0x09B4 || d.Opcode == 0x02B9 || d.Opcode == 0x02FA || d.Opcode == 0x016C || d.Opcode == 0x016D || d.Opcode == 0x0814 || d.Opcode == 0x029B || d.Opcode == 0x0107 || d.Opcode == 0x0177 || d.Opcode == 0x01C7 || d.Opcode == 0x07F7 || d.Opcode == 0x0550 || d.Opcode == 0x0392 || d.Opcode == 0x09CA || d.Opcode == 0x034D || d.Opcode == 0x0566 || d.Opcode == 0x01BB || d.Opcode == 0x0176 || d.Opcode == 0x0827 || d.Opcode == 0x0381 || d.Opcode == 0x0400 || d.Opcode == 0x0453 || d.Opcode == 0x0A17 || d.Opcode == 0x0213 || d.Opcode == 0x0214 || d.Opcode == 0x0215 || d.Opcode == 0x014B || d.Opcode == 0x014C) {
+    bool booleanResult = false;
+    int32 integerResult = 0;
+    std::array<char, 16> stringResult{};
+    if (d.Opcode == 0x094B || d.Opcode == 0x02E4 || d.Opcode == 0x02E7 || d.Opcode == 0x02E9 || d.Opcode == 0x02EA || d.Opcode == 0x056A || d.Opcode == 0x06B9 || d.Opcode == 0x033E || d.Opcode == 0x060D || d.Opcode == 0x033F || d.Opcode == 0x0340 || d.Opcode == 0x0341 || d.Opcode == 0x0342 || d.Opcode == 0x0343 || d.Opcode == 0x0344 || d.Opcode == 0x0345 || d.Opcode == 0x0348 || d.Opcode == 0x0395 || d.Opcode == 0x0A0B || d.Opcode == 0x0A0F || d.Opcode == 0x03E6 || d.Opcode == 0x08E1 || d.Opcode == 0x0349 || d.Opcode == 0x03E0 || d.Opcode == 0x00A3 || d.Opcode == 0x090F || d.Opcode == 0x0491 || d.Opcode == 0x023C || d.Opcode == 0x0247 || d.Opcode == 0x0248 || d.Opcode == 0x0249 || d.Opcode == 0x08A9 || d.Opcode == 0x03B0 || d.Opcode == 0x0842 || d.Opcode == 0x09FB || d.Opcode == 0x07D0 || d.Opcode == 0x077E || d.Opcode == 0x08F8 || d.Opcode == 0x0118 || d.Opcode == 0x03F0 || d.Opcode == 0x054C || d.Opcode == 0x0112 || d.Opcode == 0x01B7 || d.Opcode == 0x01B4 || d.Opcode == 0x04BB || d.Opcode == 0x0169 || d.Opcode == 0x0793 || d.Opcode == 0x070D || d.Opcode == 0x087B || d.Opcode == 0x0471 || d.Opcode == 0x03CA || d.Opcode == 0x00EC || d.Opcode == 0x00FE || d.Opcode == 0x00FF || d.Opcode == 0x09E8 || d.Opcode == 0x0445 || d.Opcode == 0x09AE ||
+        d.Opcode == 0x04C8 || d.Opcode == 0x04A7 || d.Opcode == 0x09E7 || d.Opcode == 0x00DD ||
+        d.Opcode == 0x00DF || d.Opcode == 0x03EE) {
+        const NativeScriptRequestId id{m_SessionId, m_CommandSequence + 1, state.IP};
+        NativeScriptServiceResult result;
+        struct Guard { bool& Flag; Guard(bool& flag): Flag(flag) { Flag = true; } ~Guard() { Flag = false; } } guard{m_InService};
+        try {
+            if (d.Opcode == 0x094B) {
+                auto queried = services.GetCharEntryExitName({id, {a}});
+                result = std::move(queried.Result);
+                stringResult = queried.Value;
+            } else if (d.Opcode == 0x02E4) {
+                result = services.LoadCutscene({id, d.Text});
+            } else if (d.Opcode == 0x02E7) {
+                result = services.StartCutscene(id);
+            } else if (d.Opcode == 0x06B9) {
+                auto queried = services.HasCutsceneLoaded(id);
+                result = std::move(queried.Result);
+                booleanResult = queried.Value;
+            } else if (d.Opcode == 0x02E9) {
+                auto queried = services.HasCutsceneFinished(id);
+                result = std::move(queried.Result);
+                booleanResult = queried.Value;
+            } else if (d.Opcode == 0x02EA) {
+                result = services.ClearCutscene(id);
+            } else if (d.Opcode == 0x056A) {
+                auto queried = services.WasCutsceneSkipped(id);
+                result = std::move(queried.Result);
+                booleanResult = queried.Value;
+            } else if (d.Opcode == 0x033E) {
+                NativeScriptTextDisplayRequest request{id, d.Float(0), d.Float(1)};
+                std::copy_n(d.Strings[2].begin(), request.Key.size(), request.Key.begin());
+                result = services.DisplayText(request);
+            } else if (d.Opcode == 0x060D || d.Opcode == 0x033F || d.Opcode == 0x0340 || d.Opcode == 0x0341 || d.Opcode == 0x0342 ||
+                d.Opcode == 0x0343 || d.Opcode == 0x0344 || d.Opcode == 0x0345 || d.Opcode == 0x0348) {
+                result = services.SetTextStyle({id, d.Opcode, {d.Float(0), d.Float(1)},
+                    {a, b, d.Int(2), d.Int(3), d.Int(4)}});
+            } else if (d.Opcode == 0x0A0F) {
+                auto queried = services.HasLanguageChanged(id);
+                result = std::move(queried.Result);
+                booleanResult = queried.Value;
+            } else if (d.Opcode == 0x0A0B) {
+                result=services.LoadSceneInDirection({id,{d.Float(0),d.Float(1),d.Float(2)},d.Float(3)});
+            } else if (d.Opcode == 0x0395) {
+                result=services.ClearArea({id,{d.Float(0),d.Float(1),d.Float(2)},d.Float(3),d.Int(4)!=0});
+            } else if (d.Opcode == 0x03E6) {
+                result = services.ClearHelp(id);
+            } else if (d.Opcode == 0x08E1) {
+                auto queried = services.GetNumberTagsTagged(id);
+                result = std::move(queried.Result);
+                integerResult = queried.Value;
+            } else if (d.Opcode == 0x0349) {
+                result = services.SetTextFont(id, a);
+            } else if (d.Opcode == 0x03E0) {
+                result = services.SetTextDrawBeforeFade(id, a != 0);
+            } else if (d.Opcode == 0x00A3) {
+                const float minX=d.Float(1), minY=d.Float(2), maxX=d.Float(3), maxY=d.Float(4);
+                auto queried = services.LocateChar({id,{a},{(minX+maxX)*0.5f,(minY+maxY)*0.5f,0},
+                    {(maxX-minX)*0.5f,(maxY-minY)*0.5f,0},false,d.Int(5)!=0,true});
+                result = std::move(queried.Result);
+                booleanResult = queried.Value;
+            } else if (d.Opcode == 0x090F) {
+                result = services.MarkStreamedScriptNoLongerNeeded({id, a});
+            } else if (d.Opcode == 0x0491) {
+                auto queried = services.HasCharGotWeapon({id, {a}, b});
+                result = std::move(queried.Result);
+                booleanResult = queried.Value;
+            } else if(d.Opcode==0x023C){result=services.LoadSpecialCharacter({id,a,d.Text});
+            } else if (d.Opcode == 0x0247 || d.Opcode == 0x0248 || d.Opcode == 0x0249) {
+                NativeScriptModelRequest request{id, a, {}};
+                if (a < 0) {
+                    const auto index = uint64(-int64(a));
+                    if (index >= m_Metadata.UsedObjects.size()) return invalid("model request used-object index out of bounds");
+                    request.UsedObjectName = m_Metadata.UsedObjects[index];
+                }
+                if (d.Opcode == 0x0247) result = services.RequestModel(request);
+                else if(d.Opcode==0x0249)result=services.MarkModelNoLongerNeeded(request);
+                else { auto queried=services.HasModelLoaded(request); result=std::move(queried.Result); booleanResult=queried.Value; }
+            } else if (d.Opcode == 0x08A9) {
+                result = services.StreamScript({id, a});
+            } else if (d.Opcode == 0x03B0) {
+                auto queried = services.IsGarageOpen({id, d.Text});
+                result = std::move(queried.Result);
+                booleanResult = queried.Value;
+            } else if (d.Opcode == 0x0842) {
+                auto queried = services.GetCityPlayerIsIn({id, a});
+                result = std::move(queried.Result);
+                integerResult = queried.Value;
+            } else if (d.Opcode == 0x09FB) {
+                auto queried = services.GetCurrentLanguage(id);
+                result = std::move(queried.Result);
+                integerResult = queried.Value;
+            } else if (d.Opcode == 0x07D0) {
+                auto queried = services.GetCurrentDayOfWeek(id);
+                result = std::move(queried.Result);
+                integerResult = queried.Value;
+            } else if (d.Opcode == 0x077E) {
+                auto queried = services.GetAreaVisible(id);
+                result = std::move(queried.Result);
+                integerResult = queried.Value;
+            } else if (d.Opcode == 0x08F8) {
+                result = services.SetUpdateStatsVisible(id, a != 0);
+            } else if (d.Opcode == 0x0118) {
+                auto queried = services.IsCharDead({id, {a}});
+                result = std::move(queried.Result);
+                booleanResult = queried.Value;
+            } else if (d.Opcode == 0x03F0) {
+                result = services.UseTextCommands({id, a != 0});
+            } else if (d.Opcode == 0x054C) {
+                result = services.LoadMissionText({id, d.Text});
+            } else if (d.Opcode == 0x01B7) {
+                result = services.ReleaseWeather(id);
+            } else if (d.Opcode == 0x01B4) {
+                result = services.SetPlayerControl({id, a, b != 0});
+            } else if (d.Opcode == 0x04BB) {
+                result = services.SetAreaVisible({id, a});
+            } else if (d.Opcode == 0x0169) {
+                result = services.SetFadeColour({id, a, b, d.Int(2)});
+            } else if (d.Opcode == 0x0793) {
+                result = services.StoreClothesState(id);
+            } else if (d.Opcode == 0x070D) {
+                result = services.BuildPlayerModel({id, a});
+            } else if (d.Opcode == 0x087B) {
+                result = services.GivePlayerClothes({id, a, d.Strings[1], d.Strings[2], d.Int(3)});
+            } else if (d.Opcode == 0x0471) {
+                auto queried = services.LocateCharObject2D({id,{a},{b},d.Float(2),d.Float(3),d.Int(4) != 0});
+                result = std::move(queried.Result);
+                booleanResult = queried.Value;
+            } else if (d.Opcode == 0x03CA) {
+                auto queried = services.DoesObjectExist({id,{a}});
+                result = std::move(queried.Result);
+                booleanResult = queried.Value;
+            } else if (d.Opcode == 0x00EC || d.Opcode == 0x00FE || d.Opcode == 0x00FF) {
+                const bool twoDimensional = d.Opcode == 0x00EC;
+                auto queried = services.LocateChar({id,{a},
+                    {d.Float(1),d.Float(2),twoDimensional ? 0.0f : d.Float(3)},
+                    {d.Float(twoDimensional ? 3 : 4),d.Float(twoDimensional ? 4 : 5),twoDimensional ? 0.0f : d.Float(6)},
+                    d.Opcode == 0x00FF,d.Int(twoDimensional ? 5 : 7) != 0,twoDimensional});
+                result = std::move(queried.Result);
+                booleanResult = queried.Value;
+            } else if (d.Opcode == 0x09E8) {
+                auto queried = services.GetCharAreaVisible({id, {a}});
+                result = std::move(queried.Result);
+                integerResult = queried.Value;
+            } else if (d.Opcode == 0x0112) {
+                auto queried = services.HasDeathArrestBeenExecuted(id);
+                result = std::move(queried.Result);
+                booleanResult = queried.Value;
+            } else if (d.Opcode == 0x0445) {
+                auto queried = services.AreCarCheatsActivated(id);
+                result = std::move(queried.Result);
+                booleanResult = queried.Value;
+            } else {
+                const auto kind = d.Opcode == 0x09AE ? NativeScriptPlayerStateQueryKind::InTrain :
+                    d.Opcode == 0x04C8 ? NativeScriptPlayerStateQueryKind::InFlyingVehicle :
+                    d.Opcode == 0x04A7 ? NativeScriptPlayerStateQueryKind::InBoat :
+                    d.Opcode == 0x00DD ? NativeScriptPlayerStateQueryKind::InVehicleModel :
+                    d.Opcode == 0x00DF ? NativeScriptPlayerStateQueryKind::InAnyVehicle :
+                    d.Opcode == 0x03EE ? NativeScriptPlayerStateQueryKind::CanStartMission :
+                    NativeScriptPlayerStateQueryKind::ControlEnabled;
+                auto queried = services.QueryPlayerState({id, a, kind, d.Opcode == 0x00DD ? b : -1});
+                result = std::move(queried.Result);
+                booleanResult = queried.Value;
+            }
+        } catch (const std::exception& exception) {
+            return Fail(thread, NativeScriptStatus::Error, rawOpcode, "service exception: " + std::string(exception.what()));
+        } catch (...) {
+            return invalid("unknown service exception");
+        }
+        switch (result.Status) {
+        case NativeScriptServiceStatus::Pending:
+            m_Pending = true;
+            m_PendingInstruction = d;
+            m_PendingThread = thread;
+            return {NativeScriptStatus::Pending, state.IP, rawOpcode, 0, std::move(result.Message), thread};
+        case NativeScriptServiceStatus::Unsupported:
+            return Fail(thread, NativeScriptStatus::Unsupported, rawOpcode, "service unsupported: " + result.Message);
+        case NativeScriptServiceStatus::Error:
+            return Fail(thread, NativeScriptStatus::Error, rawOpcode, "service failed: " + result.Message);
+        case NativeScriptServiceStatus::Ready: break;
+        default: return invalid("invalid service result");
+        }
+    }
+    if (d.Opcode == 0x01B6 || d.Opcode == 0x0256 || d.Opcode == 0x09BA || d.Opcode == 0x0363 || d.Opcode == 0x0776 || d.Opcode == 0x0777 || d.Opcode == 0x07D3 || d.Opcode == 0x0884 || d.Opcode == 0x08E8 || d.Opcode == 0x0928 || d.Opcode == 0x0929 || d.Opcode == 0x02A7 || d.Opcode == 0x04E4 || d.Opcode == 0x03CB || d.Opcode == 0x0053 || d.Opcode == 0x07AF || d.Opcode == 0x01F5 || d.Opcode == 0x0373 || d.Opcode == 0x0173 || d.Opcode == 0x0517 || d.Opcode == 0x0518 || d.Opcode == 0x0570 || d.Opcode == 0x04CE || d.Opcode == 0x018B || d.Opcode == 0x09B4 || d.Opcode == 0x02B9 || d.Opcode == 0x02FA || d.Opcode == 0x016C || d.Opcode == 0x016D || d.Opcode == 0x0814 || d.Opcode == 0x029B || d.Opcode == 0x0107 || d.Opcode == 0x0177 || d.Opcode == 0x01C7 || d.Opcode == 0x07F7 || d.Opcode == 0x0550 || d.Opcode == 0x0392 || d.Opcode == 0x09CA || d.Opcode == 0x034D || d.Opcode == 0x0566 || d.Opcode == 0x01BB || d.Opcode == 0x0176 || d.Opcode == 0x0827 || d.Opcode == 0x0381 || d.Opcode == 0x0400 || d.Opcode == 0x0453 || d.Opcode == 0x0A17 || d.Opcode == 0x09E2 || d.Opcode == 0x07FB || d.Opcode == 0x04F8 || d.Opcode == 0x08CA || d.Opcode == 0x0767 || d.Opcode == 0x0874 || d.Opcode == 0x076A || d.Opcode == 0x076C || d.Opcode == 0x09B7 || d.Opcode == 0x0958 || d.Opcode == 0x0959 || d.Opcode == 0x095A || d.Opcode == 0x032B || d.Opcode == 0x01E7 || d.Opcode == 0x01E8 || d.Opcode == 0x091D || d.Opcode == 0x022A || d.Opcode == 0x022B || d.Opcode == 0x0213 || d.Opcode == 0x0214 || d.Opcode == 0x0215 || d.Opcode == 0x014B || d.Opcode == 0x014C) {
         const NativeScriptRequestId id{m_SessionId, m_CommandSequence + 1, state.IP};
         NativeScriptServiceResult result;
         // All operands/output bounds have been checked before ANY host call.
         struct Guard { bool& Flag; Guard(bool& flag): Flag(flag) { Flag = true; } ~Guard() { Flag = false; } } guard{m_InService};
         try {
+            if (d.Opcode == 0x01B6) result = services.ForceWeatherNow({id, a});
             if (d.Opcode == 0x014B) {
                 // Pinned schema: model -1 selects a random local-popcycle car,
                 // NOT an SCM used-object index. Host owns source constructor
@@ -782,6 +1271,12 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
                 auto created = services.CreateCarGenerator({id,
                     {d.Float(0), d.Float(1), d.Float(2)}, d.Float(3),
                     d.Int(4), d.Int(5), d.Int(6), d.Int(7), d.Int(8), d.Int(9), d.Int(10), d.Int(11)});
+                result = std::move(created.Result); reference = created.Reference.Value;
+            }
+            if (d.Opcode == 0x09E2) {
+                auto created = services.CreateCarGeneratorWithPlate({{id,
+                    {d.Float(0), d.Float(1), d.Float(2)}, d.Float(3),
+                    d.Int(4), d.Int(5), d.Int(6), d.Int(7), d.Int(8), d.Int(9), d.Int(10), d.Int(11)}, d.Text});
                 result = std::move(created.Result); reference = created.Reference.Value;
             }
             if (d.Opcode == 0x014C) {
@@ -800,12 +1295,49 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
                 auto created = services.CreatePickup(request);
                 result = std::move(created.Result); reference = created.Reference.Value;
             }
+            if (d.Opcode == 0x0958 || d.Opcode == 0x0959 || d.Opcode == 0x095A) {
+                auto created = services.CreatePickup({id,d.Opcode==0x0958 ? 1253 : d.Opcode==0x0959 ? 954 : 953,3,{d.Float(0),d.Float(1),d.Float(2)}});
+                result=std::move(created.Result); reference=created.Reference.Value;
+            }
+            if(d.Opcode==0x032B){auto created=services.CreatePickupWithAmmo({id,d.Int(0),d.Int(1),d.Int(2),{d.Float(3),d.Float(4),d.Float(5)}});result=std::move(created.Result);reference=created.Reference.Value;}
+            if(d.Opcode==0x01E7||d.Opcode==0x01E8||d.Opcode==0x091D||d.Opcode==0x022A||d.Opcode==0x022B){
+                const auto kind=d.Opcode==0x01E7?NativePathPolicyKind::VehicleOn:d.Opcode==0x01E8?NativePathPolicyKind::VehicleOff:
+                    d.Opcode==0x091D?NativePathPolicyKind::VehicleOriginal:d.Opcode==0x022A?NativePathPolicyKind::PedOn:NativePathPolicyKind::PedOff;
+                result=services.AddPathPolicy({id,kind,{d.Float(0),d.Float(1),d.Float(2),d.Float(3),d.Float(4),d.Float(5)}});
+            }
+            if(d.Opcode==0x0928||d.Opcode==0x0929){NativeScriptExternalTriggerRequest request{id,d.Int(0),d.Int(1),d.Int(2),d.Opcode==0x0929?d.Int(4):0,d.Opcode==0x0929?d.Float(3):0,{},{d.Opcode==0x0929}};if(request.ModelId<0){const auto index=uint64(-int64(request.ModelId));if(index>=m_Metadata.UsedObjects.size())return invalid("external trigger used-object index out of bounds");request.ModelName=m_Metadata.UsedObjects[index];}result=services.AddExternalScriptTrigger(request);}
+            if (d.Opcode == 0x07D3 || d.Opcode == 0x0884) result = services.AddCodeScriptBrain({id, d.Int(0), d.Text, d.Opcode == 0x0884});
+            if (d.Opcode == 0x08E8) result = services.AttachAnimsToModel({id, d.Int(0), d.Text});
+            if (d.Opcode == 0x0776 || d.Opcode == 0x0777) result = services.SetIplRequested({id, d.Text, d.Opcode == 0x0776});
+            if (d.Opcode == 0x0363) {
+                NativeScriptWorldObjectVisibilityRequest request{id,{d.Float(0),d.Float(1),d.Float(2)},d.Float(3),d.Int(4),{},d.Int(5) != 0};
+                if (request.ModelId < 0) {
+                    const auto index = uint64(-int64(request.ModelId));
+                    if (index >= m_Metadata.UsedObjects.size()) return invalid("world-object visibility used-object index out of bounds");
+                    request.ModelName = m_Metadata.UsedObjects[index];
+                }
+                result = services.SetClosestObjectVisibility(request);
+            }
+            if (d.Opcode == 0x09BA) result = services.SetZoneNamesVisible(id, a != 0);
+            if (d.Opcode == 0x0256) {
+                auto queried = services.IsPlayerPlaying({id, a});
+                result = std::move(queried.Result);
+                booleanResult = queried.Value;
+            }
             if (d.Opcode == 0x0214) {
                 auto queried = services.HasPickupBeenCollected({id, {a}});
                 result = std::move(queried.Result); pickupCollected = queried.Collected;
             }
             if (d.Opcode == 0x0215) result = services.RemoveScriptPickup({id, {a}});
             if (d.Opcode == 0x09B4) result = services.SetEntryExitFlag({id, d.Float(0), d.Float(1), d.Float(2), d.Int(3), d.Int(4)});
+            if (d.Opcode == 0x07FB) result = services.SwitchEntryExit({id, d.Text, a != 0});
+            if (d.Opcode == 0x04F8) result = services.AddSetPiece({id,a,{d.Float(1),d.Float(2),d.Float(3),d.Float(4),d.Float(5),d.Float(6),d.Float(7),d.Float(8),d.Float(9),d.Float(10),d.Float(11),d.Float(12)}});
+            if (d.Opcode == 0x08CA) result = services.InitZonePopulationSettings(id);
+            if (d.Opcode == 0x0767) result = services.SetZonePopulationType({id,d.Text,a});
+            if (d.Opcode == 0x0874) result = services.SetZonePopulationRaces({id,d.Text,a});
+            if (d.Opcode == 0x076A) result = services.SetZoneDealerStrength({id,d.Text,a});
+            if (d.Opcode == 0x076C) result = services.SetZoneGangStrength({id,d.Text,a,b});
+            if (d.Opcode == 0x09B7) result = services.SetZoneNoCops({id,d.Text,a});
             if (d.Opcode == 0x02B9) result = services.DeactivateGarage({id, d.Text});
             if (d.Opcode == 0x02FA) result = services.ChangeGarageType({id, d.Text, d.Int(1)});
             if (d.Opcode == 0x016C || d.Opcode == 0x016D) result = services.AddRestart({id,
@@ -866,6 +1398,10 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
             }
             if (d.Opcode == 0x0570) {
                 auto created = services.CreateContactBlip({id, {d.Float(0), d.Float(1), d.Float(2)}, d.Int(3)});
+                result = std::move(created.Result); reference = created.Reference.Value;
+            }
+            if (d.Opcode == 0x02A7) {
+                auto created = services.CreateContactBlip({id, {d.Float(0), d.Float(1), d.Float(2)}, d.Int(3), false, true});
                 result = std::move(created.Result); reference = created.Reference.Value;
             }
             if (d.Opcode == 0x04CE) {
@@ -930,6 +1466,13 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         } else state.Locals[offset] = value;
         state.LastOutputWrite = {state.LastOutputWrite.Sequence + 1, state.IP, offset, d.OutputGlobal, std::bit_cast<int32>(value)};
     };
+    auto writeText = [&](unsigned operand) {
+        const auto offset = uint16(d.Values[operand]);
+        const auto length = d.RawTags[operand] >= 16 ? 16u : 8u;
+        if (d.OutputGlobal) std::copy_n(reinterpret_cast<const uint8*>(d.LongText.data()), length, m_Memory.data() + offset);
+        else std::memcpy(state.Locals.data() + offset, d.LongText.data(), length);
+        state.LastOutputWrite = {state.LastOutputWrite.Sequence + 1, state.IP, offset, d.OutputGlobal, 0};
+    };
     auto updateCondition = [&](bool condition) {
         condition = condition != d.Negated;
         if (!state.AndOrState) state.Condition = condition;
@@ -953,7 +1496,7 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         state.Waiting = true;
         break;
     case 0x0002: d.Next = Target(thread, a); break;
-    case 0x004F: launchPrepared(); break;
+    case 0x004F: case 0x00D7: launchPrepared(); break;
     case 0x0050:
         state.ReturnStack[state.StackDepth++] = d.Next;
         d.Next = Target(thread, a);
@@ -962,11 +1505,39 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         d.Next = state.ReturnStack[--state.StackDepth];
         state.ReturnStack[state.StackDepth] = 0;
         break;
-    case 0x0004: case 0x0005: case 0x0006: case 0x0007: case 0x0086: write(0, d.Values[1]); break;
+    case 0x0871: if (switchTarget) d.Next = *switchTarget; break;
+    case 0x01BD: write(0, state.TimeMs); break;
+    case 0x0004: case 0x0005: case 0x0006: case 0x0007: case 0x0084: case 0x0086: write(0, d.Values[1]); break;
+    case 0x08E1: write(0, uint32(integerResult)); break;
+    case 0x0842: write(1, uint32(integerResult)); break;
+    case 0x09FB:
+    case 0x07D0:
+    case 0x077E: write(0, uint32(integerResult)); break;
+    case 0x0652: write(1, statResult); break;
+    case 0x0926: write(1, streamedUsersResult); break;
+    case 0x058C: write(0, progressResult); break;
+    case 0x09E8: write(1, uint32(integerResult)); break;
+    case 0x05A9: case 0x05AA: case 0x06D1: writeText(0); break;
+    case 0x094B:
+        d.LongText = stringResult;
+        writeText(1);
+        break;
+    case 0x04AE:
+        if(d.Tags[0]!=2)return invalid("04AE requires global destination");
+        write(0,d.Values[1]); break;
+    case 0x04AF:
+        if(d.Tags[0]!=3)return invalid("04AF requires local destination");
+        write(0,d.Values[1]); break;
     case 0x0008: case 0x0009: case 0x000A: case 0x000B:
     case 0x000C: case 0x000D: case 0x000E: case 0x000F:
     case 0x0010: case 0x0011: case 0x0012: case 0x0013:
     case 0x0014: case 0x0015: case 0x0016: case 0x0017:
+        write(0, arithmeticResult); break;
+    case 0x0058: case 0x0059: case 0x005A: case 0x005B: case 0x005C: case 0x005D: case 0x005E: case 0x005F:
+    case 0x0060: case 0x0061: case 0x0062: case 0x0063: case 0x0064: case 0x0065:
+    case 0x0068: case 0x006A: case 0x006B: case 0x006D: case 0x006F: case 0x0072: case 0x0073:
+        write(0, arithmeticResult); break;
+    case 0x08BA: case 0x08BB: case 0x08BC: case 0x08C0: case 0x08C1: case 0x08C2:
         write(0, arithmeticResult); break;
     case 0x06C8:
         // Original owned-retail static RE: dispatcher 0x49CCE5 subtracts 1700,
@@ -981,7 +1552,36 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         state.AndOrState = a ? uint8(a + 1) : 0;
         state.Condition = a > 0 && a < 21;
         break;
-    case 0x001A: updateCondition(a > b); break;
+    case 0x0038: case 0x0039: case 0x003A: case 0x003B: case 0x003C:
+    case 0x04A3: case 0x04A4: case 0x07D6: updateCondition(a == b); break;
+    case 0x0018: case 0x0019: case 0x001A: case 0x001B: case 0x001C: case 0x001D:
+    case 0x001E: case 0x001F: updateCondition(a > b); break;
+    case 0x0028: case 0x0029: case 0x002A: case 0x002B: case 0x002C: case 0x002F:
+        updateCondition(a >= b); break;
+    case 0x0020: case 0x0021: case 0x0022: case 0x0023: case 0x0024: case 0x0025:
+        updateCondition(d.Float(0) > d.Float(1)); break;
+    case 0x0030: updateCondition(d.Float(0) >= d.Float(1)); break;
+    case 0x0043: updateCondition(d.Float(0) == d.Float(1)); break;
+    case 0x0846: updateCondition(std::ranges::all_of(d.Strings[0], [](char value) { return value == 0; })); break;
+    case 0x016B: updateCondition(m_State.Fade.Fading); break;
+    case 0x08B4: case 0x08B5: case 0x08B6: updateCondition((uint32(a) & (uint32(1) << unsigned(b))) != 0); break;
+    case 0x0256: updateCondition(booleanResult); break;
+    case 0x056A:
+    case 0x02E9:
+    case 0x06B9:
+    case 0x0118:
+    case 0x0112:
+    case 0x0445: updateCondition(booleanResult); break;
+    case 0x00A3: case 0x00EC: case 0x00FE: case 0x00FF: updateCondition(booleanResult); break;
+    case 0x03CA: updateCondition(booleanResult); break;
+    case 0x03B0: updateCondition(booleanResult); break;
+    case 0x0491: updateCondition(booleanResult); break;
+    case 0x0248: updateCondition(booleanResult); break;
+    case 0x0A0F: updateCondition(booleanResult); break;
+    case 0x08AB: updateCondition(streamedLoadedResult); break;
+    case 0x0471: updateCondition(booleanResult); break;
+    case 0x09AE: case 0x04C8: case 0x04A7: case 0x09E7: case 0x00DD: case 0x00DF: case 0x03EE:
+        updateCondition(booleanResult); break;
     case 0x0214: updateCondition(pickupCollected); break;
     case 0x004D: if (!state.Condition) d.Next = Target(thread, a); break;
     case 0x004E:
@@ -1033,6 +1633,8 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
     case 0x0053: write(4, uint32(a)); break;
     case 0x0517: case 0x0570: case 0x04CE: write(4, uint32(reference)); break;
     case 0x029B: case 0x0107: write(4, uint32(reference)); break;
+    case 0x0958: case 0x0959: case 0x095A: write(3,uint32(reference)); break;
+    case 0x032B: write(6,uint32(reference)); break;
     case 0x01BB:
         if (!objectCoordinates) return invalid("object coordinate service returned no value");
         write(1, std::bit_cast<std::uint32_t>(objectCoordinates->X));
@@ -1050,7 +1652,9 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         write(6, std::bit_cast<std::uint32_t>(objectCoordinates->Z));
         break;
     case 0x0518: case 0x0213: write(5, uint32(reference)); break;
+    case 0x02A7: write(4,uint32(reference)); break;
     case 0x014B: write(12, uint32(reference)); break;
+    case 0x09E2: write(13, uint32(reference)); break;
     case 0x07AF: case 0x01F5: write(1, uint32(reference)); break;
     case 0x0746: {
         auto& categories = m_State.Relationships[b];
@@ -1070,11 +1674,18 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         break;
     }
     case 0x0911: break; // genuine REGISTER_STREAMED_SCRIPT NOP
+    case 0x0914: break; // genuine streamed-script registration companion NOP
     case 0x0913:
         launchPrepared();
         ++m_StreamedStates[std::size_t(streamedLaunch)].Users;
         break;
     case 0x06CF: break; // genuine DISPLAY_TIMER_BARS NOP: UnusedCommands.cpp
+    case 0x0662: break; // source write-debug command is a retail NOP
+    case 0x0180:
+        if (d.Tags[0] != 2 || d.Values[0] > std::numeric_limits<std::uint16_t>::max())
+            return invalid("mission flag declaration requires a global byte offset");
+        m_State.OnAMissionFlag = std::uint16_t(d.Values[0]);
+        break;
     default: break; // service commands committed their effects on Ready
     }
     state.LastInstructionIP = state.IP;

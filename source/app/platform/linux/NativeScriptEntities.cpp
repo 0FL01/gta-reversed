@@ -166,13 +166,32 @@ WorldShotScene ReadModel(NativeScriptPropertyGeometry& property, int modelId, st
 WorldShotScene ReadStaticModel(const std::string& model, const std::string& txd, const NativeScriptStaticModelOptions& options) {
     auto textureBytes = ReadEntry(txd + ".txd");
     Dictionary dictionary(textureBytes);
+    std::vector<std::uint8_t> sharedBytes;
+    std::unique_ptr<Dictionary> shared;
+    if (options.VehicleShared) {
+        sharedBytes = ReadFile("models/generic/vehicle.txd");
+        shared = std::make_unique<Dictionary>(sharedBytes);
+    }
     auto modelBytes = ReadEntry(model + ".dff");
     struct Linked {
         LinkedClump Value;
         ~Linked() { TexSample_FreeLinked(Value); }
-    } linked{TexSample_LinkedParse(modelBytes.data(), modelBytes.size(), dictionary.Value, nullptr, 0)};
+    } linked{TexSample_LinkedParse(modelBytes.data(), modelBytes.size(), dictionary.Value, nullptr, 0,
+        shared ? shared->Value : nullptr)};
     Require(linked.Value.clump, "locked property DFF parse");
     WorldShotScene scene{};
+    if (options.ResidencyOnly) {
+        FORLIST(link, linked.Value.clump->atomics) {
+            const auto* atomic = rw::Atomic::fromClump(link);
+            Require(atomic && atomic->geometry, "resident model atomic geometry");
+            ++scene.stats.atomics;
+            scene.stats.triangles += atomic->geometry->numTriangles;
+        }
+        Require(scene.stats.atomics && scene.stats.triangles, "empty resident model clump");
+        std::snprintf(scene.stats.dffName, sizeof(scene.stats.dffName), "%s.dff", model.c_str());
+        std::snprintf(scene.stats.txdName, sizeof(scene.stats.txdName), "%s.txd", txd.c_str());
+        return scene;
+    }
     std::map<std::pair<const rw::Texture*, uint32>, int> images;
     FORLIST(link, linked.Value.clump->atomics) {
         auto* atomic = rw::Atomic::fromClump(link);
@@ -198,14 +217,17 @@ WorldShotScene ReadStaticModel(const std::string& model, const std::string& txd,
             int image = -1;
             if (mat->texture) {
                 const auto it = linked.Value.resolved.find(mat->texture);
-                Require(it != linked.Value.resolved.end() && it->second.real && geometry->texCoords[0], "unresolved property texture/UV");
-                const auto key = std::make_pair(it->second.real, it->second.filter);
-                auto found = images.find(key);
-                if (found == images.end()) {
-                    WorldShotImage decoded{}; Require(TexSample_Decode(key.first, decoded) && !decoded.rgba.empty(), "property texel decode");
-                    decoded.filter = key.second;
-                    image = int(scene.images.size()); scene.images.push_back(std::move(decoded)); images.emplace(key, image);
-                } else image = found->second;
+                const bool resolved = it != linked.Value.resolved.end() && it->second.real && geometry->texCoords[0];
+                Require(resolved || !options.RequireTexture, "unresolved property texture/UV");
+                if (resolved) {
+                    const auto key = std::make_pair(it->second.real, it->second.filter);
+                    auto found = images.find(key);
+                    if (found == images.end()) {
+                        WorldShotImage decoded{}; Require(TexSample_Decode(key.first, decoded) && !decoded.rgba.empty(), "property texel decode");
+                        decoded.filter = key.second;
+                        image = int(scene.images.size()); scene.images.push_back(std::move(decoded)); images.emplace(key, image);
+                    } else image = found->second;
+                }
             }
             mesh.triImg.push_back(image);
             mesh.triCol.insert(mesh.triCol.end(), {mat->color.red / 255.0f, mat->color.green / 255.0f, mat->color.blue / 255.0f});
@@ -235,7 +257,7 @@ WorldShotScene ReadStaticModel(const std::string& model, const std::string& txd,
         scene.meshes.push_back(std::move(mesh));
         if (options.FirstAtomicOnly) break;
     }
-    Require(scene.stats.triangles && !scene.images.empty(), "empty/untextured locked property model");
+    Require(scene.stats.triangles && (!options.RequireTexture || !scene.images.empty()), "empty/untextured locked property model");
     std::snprintf(scene.stats.dffName, sizeof(scene.stats.dffName), "%s.dff", model.c_str());
     std::snprintf(scene.stats.txdName, sizeof(scene.stats.txdName), "%s.txd", txd.c_str());
     scene.stats.textures = int(scene.images.size());
@@ -307,15 +329,23 @@ bool NativeScriptEntities::LoadBeforeWorker(const char* gameDir, std::string& er
     if (m_Loaded) { error = "property assets already initialized"; return false; }
     try {
         RwScope scope; OS_SetFilePathOffset(gameDir);
-        NativeScriptPropertyGeometry property, saleGeometry, saveGeometry;
+        NativeScriptPropertyGeometry property, saleGeometry, saveGeometry, photoGeometry;
         auto model = ReadModel(property, 1272); Bounds(model);
         auto saleModel = ReadModel(saleGeometry, 1273); Bounds(saleModel);
         // ModelIndices.cpp MI_PICKUP_SAVEGAME binding, dynamic.ide + dynamic.col.
         // Bounded source model category, not SCM coordinates/IP/string scanning.
         auto saveModel = ReadModel(saveGeometry, 1277, "pickupsave"); Bounds(saveModel);
+        auto photoModel = ReadModel(photoGeometry, 1253, "camerapickup"); Bounds(photoModel);
+        NativeScriptStaticModelOptions collectible;
+        collectible.RequireTexture=false;
+        auto oysterModel = ReadStaticModel("cj_oyster", "shell_pick", collectible); Bounds(oysterModel);
+        auto horseshoeModel = ReadStaticModel("cj_horse_shoe", "horse_shoe_pick", collectible); Bounds(horseshoeModel);
         auto images = model.images;
         images.insert(images.end(), saleModel.images.begin(), saleModel.images.end());
         images.insert(images.end(), saveModel.images.begin(), saveModel.images.end());
+        images.insert(images.end(), photoModel.images.begin(), photoModel.images.end());
+        images.insert(images.end(), oysterModel.images.begin(), oysterModel.images.end());
+        images.insert(images.end(), horseshoeModel.images.begin(), horseshoeModel.images.end());
         WorldShotImage radar{}; Require(NativeScriptEntities_LoadRadar(gameDir, radar, error), error);
         WorldShotImage saleRadar{}; Require(NativeScriptEntities_LoadRadar(gameDir, saleRadar, error, 31), error);
         GxtTable table; char err[256]{}; Require(GxtText_Load(gameDir, "english", table, err, sizeof(err)), err);
@@ -344,6 +374,8 @@ bool NativeScriptEntities::LoadBeforeWorker(const char* gameDir, std::string& er
         m_Model = std::move(model); m_Radar = std::move(radar); m_Messages = std::move(messages);
         m_ForSaleModel = std::move(saleModel); m_ForSaleGeometry = std::move(saleGeometry);
         m_SaveModel = std::move(saveModel); m_SaveGeometry = std::move(saveGeometry);
+        m_PhotoModel = std::move(photoModel);
+        m_OysterModel = std::move(oysterModel); m_HorseshoeModel = std::move(horseshoeModel);
         m_ForSaleRadar = std::move(saleRadar); m_Images = std::move(images);
         m_SaleMessages = std::move(saleMessages); m_LabelMessages = std::move(labelMessages);
         m_Denials = std::move(denials); std::copy_n(helpFont.prop, m_HelpWidths.size(), m_HelpWidths.begin());
@@ -390,7 +422,7 @@ NativeScriptReferenceResult<NativeScriptPickupRef> NativeScriptEntities::CreateP
     for (auto& c : name) if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
     const std::string_view model(name.data(), strnlen(name.data(), name.size()));
     if (r.Model >= 0 && std::ranges::any_of(name, [](char c) { return c != 0; })) return {Error("positive pickup model has a used-object name"), {}};
-    if ((r.Model < 0 ? model != "pickupsave" : r.Model != 1277) || std::uint8_t(r.Type) != 3)
+    if ((r.Model < 0 && model != "pickupsave") || r.Type <= 0 || r.Type > 22)
         return {Unsupported("ordinary pickup model/type consumer is not prepared"), {}};
     if (!Finite(r.Position) || !Finite(camera)) return {Error("nonfinite ordinary pickup position/camera"), {}};
     if (r.Position.Z <= -100) return {Unsupported("ordinary pickup ground sentinel requires owned world ground service"), {}};
@@ -415,19 +447,42 @@ NativeScriptReferenceResult<NativeScriptPickupRef> NativeScriptEntities::CreateP
     p.Reference = {NextRef(free->Reference.Value, std::size_t(free - m_Pickups.begin()))};
     p.AuthoredPosition = r.Position;
     p.Position = {float(int32(r.Position.X * 8)) / 8, float(int32(r.Position.Y * 8)) / 8, float(int32(r.Position.Z * 8)) / 8};
-    p.Model = 1277; p.Type = 3; p.Active = true; p.RegenerationTime = gameMs;
+    p.Model = r.Model < 0 ? 1277 : r.Model; p.Type = r.Type; p.Active = true; p.RegenerationTime = gameMs;
     const auto dx = camera.X - p.Position.X, dy = camera.Y - p.Position.Y;
-    p.Visible = dx*dx + dy*dy < 10000;
-    p.ObjectPresent = p.Visible && !(m_Frame && m_Frame->Property && m_Frame->Property->CutsceneLoaded);
-    p.Actor = m_SaveModel;
-    for (auto& mesh : p.Actor.meshes) for (std::size_t i = 0; i < mesh.pos.size(); i += 3) {
-        const auto x = mesh.pos[i], nx = mesh.nrm[i];
-        mesh.pos[i] = mesh.pos[i+1] + p.Position.X; mesh.pos[i+1] = -x + p.Position.Y; mesh.pos[i+2] += p.Position.Z;
-        mesh.nrm[i] = mesh.nrm[i+1]; mesh.nrm[i+1] = -nx;
+    const bool prepared=p.Model==953||p.Model==954||p.Model==1253||p.Model==1277;
+    p.Visible = prepared && dx*dx + dy*dy < 10000;
+    p.ObjectPresent = prepared && p.Visible && !(m_Frame && m_Frame->Property && m_Frame->Property->CutsceneLoaded);
+    if(prepared)p.Actor = p.Model == 953 ? m_OysterModel : p.Model == 954 ? m_HorseshoeModel :
+        p.Model == 1253 ? m_PhotoModel : m_SaveModel;
+    if(prepared){
+        for (auto& mesh : p.Actor.meshes) for (std::size_t i = 0; i < mesh.pos.size(); i += 3) {
+            const auto x = mesh.pos[i], nx = mesh.nrm[i];
+            mesh.pos[i] = mesh.pos[i+1] + p.Position.X; mesh.pos[i+1] = -x + p.Position.Y; mesh.pos[i+2] += p.Position.Z;
+            mesh.nrm[i] = mesh.nrm[i+1]; mesh.nrm[i+1] = -nx;
+        }
+        Bounds(p.Actor);
     }
-    Bounds(p.Actor);
     m_Events.push_back({r.Id, 0x0213, r.Position, {}, r.Type, p.Reference.Value, r.Model, r.UsedObjectName});
     *free = std::move(p); ++m_Revision; return {Ready(), free->Reference};
+}
+NativeScriptReferenceResult<NativeScriptPickupRef> NativeScriptEntities::CreatePickupWithAmmo(
+    const NativeScriptPickupAmmoRequest& r, std::uint32_t gameMs) {
+    if (FindPickupOperation(r.Id)) return {Error("pickup request ID already owns a pickup query/removal"), {}};
+    if (const auto* old=FindEvent(r.Id)) {
+        if(old->Opcode!=0x032B||old->Position!=r.Position||old->Argument!=r.Type||old->Model!=r.Model||old->Ammo!=r.Ammo||
+            (old->Reference!=-1&&!ResolvePickup({old->Reference}))) return {Error("mismatched/stale ammo pickup replay"),{}};
+        return {Ready(),{old->Reference}};
+    }
+    if(!m_Loaded)return {Unsupported("pickup identities must be prepared before worker startup"),{}};
+    if(r.Type<=0||r.Type>22||r.Ammo<0||!Finite(r.Position))return {Error("invalid source ammo pickup request"),{}};
+    for(const auto v:{r.Position.X,r.Position.Y,r.Position.Z})if(v*8<-32768||v*8>32767)return {Error("ammo pickup position compression overflow"),{}};
+    const auto free=std::find_if(m_Pickups.begin(),m_Pickups.end(),[](const auto& p){return !p.Active&&(p.Reference.Value==-1||(uint32(p.Reference.Value)>>16)<0xfffe);});
+    if(free==m_Pickups.end())return {Error("pickup pool capacity exhausted"),{}};
+    NativeScriptPickup p; p.Reference={NextRef(free->Reference.Value,std::size_t(free-m_Pickups.begin()))}; p.AuthoredPosition=r.Position;
+    p.Position={float(int32(r.Position.X*8))/8,float(int32(r.Position.Y*8))/8,float(int32(r.Position.Z*8))/8};
+    p.Model=r.Model; p.Type=r.Type; p.Ammo=r.Ammo; p.Active=true; p.RegenerationTime=gameMs;
+    m_Events.push_back({r.Id,0x032B,r.Position,{},r.Type,p.Reference.Value,r.Model,{},r.Ammo});
+    *free=std::move(p); ++m_Revision; return {Ready(),free->Reference};
 }
 NativeScriptReferenceResult<NativeScriptPickupRef> NativeScriptEntities::CreateProperty(const NativeScriptForSalePropertyRequest& r, bool forSale) {
     const std::uint16_t opcode = forSale ? 0x0518 : 0x0517;
@@ -474,7 +529,7 @@ NativeScriptReferenceResult<NativeScriptPickupRef> NativeScriptEntities::CreateP
 NativeScriptReferenceResult<NativeScriptBlipRef> NativeScriptEntities::CreateContactBlip(const NativeScriptContactBlipRequest& r) {
     if (FindPickupOperation(r.Id)) return {Error("blip request ID already owns a pickup query/removal"), {}};
     if (const auto* old = FindEvent(r.Id)) {
-        if (old->Opcode != 0x0570 || old->Position != r.Position || old->Argument != r.Sprite || !ResolveBlip({old->Reference})) return {Error("mismatched/stale blip replay"), {}};
+        if (old->Opcode != (r.AddSphere?0x02A7:0x0570) || old->Position != r.Position || old->Argument != r.Sprite || !ResolveBlip({old->Reference})) return {Error("mismatched/stale blip replay"), {}};
         return {Ready(), {old->Reference}};
     }
     if (!m_Loaded || (r.Sprite != 32 && r.Sprite != 31 && !r.RadarSpriteReady)) return {Unsupported("contact sprite is not prepared by this bounded host"), {}};
@@ -483,8 +538,8 @@ NativeScriptReferenceResult<NativeScriptBlipRef> NativeScriptEntities::CreateCon
     if (free == m_Blips.end()) return {Error("radar pool capacity exhausted"), {}};
     NativeScriptRadarBlip blip;
     blip.Reference = {NextRef(free->Reference.Value, std::size_t(free - m_Blips.begin()))}; blip.Position = r.Position; blip.Active = true;
-    blip.Sprite = r.Sprite;
-    m_Events.push_back({r.Id, 0x0570, r.Position, {}, r.Sprite, blip.Reference.Value});
+    blip.Sprite = r.Sprite; blip.DrawSphere=r.AddSphere;
+    m_Events.push_back({r.Id, std::uint16_t(r.AddSphere?0x02A7:0x0570), r.Position, {}, r.Sprite, blip.Reference.Value});
     *free = blip; ++m_Revision; return {Ready(), blip.Reference};
 }
 NativeScriptReferenceResult<NativeScriptBlipRef> NativeScriptEntities::CreateCoordinateBlip(
@@ -866,6 +921,18 @@ void NativeScriptHelpPresentation::Show(std::string_view text, std::uint32_t lin
     // including when replacing an active message (594ce8..594dd2).
     m_State = m_Alpha = 0; m_NewMessage = !m_Text.empty();
     m_Quick = quick;
+}
+void NativeScriptHelpPresentation::Clear() {
+    *this = NativeScriptHelpPresentation{};
+}
+
+NativeScriptServiceResult NativeScriptEntities::ClearHelp() {
+    if (!m_Loaded) return Unsupported("help owner is unavailable");
+    m_Help.Clear();
+    m_HelpMessage.clear();
+    ++m_HelpRevision;
+    ++m_Revision;
+    return Ready();
 }
 bool NativeScriptHelpPresentation::AdvanceTime(std::uint32_t now, std::string& error) {
     const auto elapsed = m_HasTime ? now - m_LastTime : 0;

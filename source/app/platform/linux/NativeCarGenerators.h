@@ -111,7 +111,13 @@ struct NativeCarGeneratorCreateRequest {
     std::int32_t MaxDelay = 0;
     std::uint8_t IplId = 0;
     bool IgnorePopulationLimit = false;
+    std::array<char, 12> PlateText{};
     bool operator==(const NativeCarGeneratorCreateRequest&) const = default;
+};
+struct NativeCarGeneratorPlate {
+    NativeCarGeneratorRef Generator;
+    std::array<char, 12> Text{};
+    bool operator==(const NativeCarGeneratorPlate&) const = default;
 };
 
 struct NativeCarGeneratorSwitchRequest {
@@ -149,6 +155,7 @@ struct NativeCarGeneratorState {
 
 enum class NativeCarGeneratorEventKind : std::uint8_t {
     Create014B,
+    Create09E2,
     Switch014C,
 };
 
@@ -344,6 +351,8 @@ public:
 
     NativeScriptReferenceResult<NativeCarGeneratorRef> Create(const NativeCarGeneratorCreateRequest& request,
         std::uint32_t timeMs);
+    NativeScriptReferenceResult<NativeCarGeneratorRef> CreateWithPlate(
+        const NativeCarGeneratorCreateRequest& request, std::uint32_t timeMs);
     NativeScriptServiceResult Switch(const NativeCarGeneratorSwitchRequest& request, std::uint32_t timeMs);
     NativeScriptServiceResult SetPlayerOwned(NativeCarGeneratorRef reference, bool owned, std::string& error);
     bool ActivateStreamedIpl(std::string_view source, std::uint8_t iplId, std::uint32_t timeMs, std::string& error);
@@ -371,6 +380,7 @@ public:
     std::span<const NativeCarGeneratorAssetRecord> AssetRecords() const { return m_Assets; }
     std::span<const NativeCarGeneratorModelDefinition> ModelDefinitions() const { return m_Models; }
     std::span<const NativeCarGeneratorEvent> Events() const { return m_Events; }
+    std::span<const NativeCarGeneratorPlate> Plates() const { return {m_Plates.data(), m_PlateCount}; }
     NativeCarGeneratorSourceCensus Census() const;
     std::uint8_t ProcessCounter() const { return m_ProcessCounter; }
     std::uint8_t GenerateCloseCounter() const { return m_GenerateCloseCounter; }
@@ -384,7 +394,8 @@ private:
     NativeCarGenerators& operator=(NativeCarGenerators&&) noexcept = default;
     NativeScriptReferenceResult<NativeCarGeneratorRef> CreateInternal(const NativeCarGeneratorCreateRequest& request,
         std::uint32_t timeMs, const NativeCarGeneratorProvenance& provenance, bool journal,
-        NativeCarGeneratorRegistrationStatus* registration = nullptr);
+        NativeCarGeneratorRegistrationStatus* registration = nullptr,
+        NativeCarGeneratorEventKind kind = NativeCarGeneratorEventKind::Create014B);
     NativeScriptServiceResult RegisterAsset(NativeCarGeneratorAssetRecord& asset, std::uint8_t iplId,
         std::uint32_t timeMs);
     const NativeCarGeneratorEvent* FindEvent(NativeScriptRequestId id) const;
@@ -393,6 +404,8 @@ private:
     std::vector<NativeCarGeneratorAssetRecord> m_Assets;
     std::vector<NativeCarGeneratorModelDefinition> m_Models;
     std::vector<NativeCarGeneratorEvent> m_Events;
+    std::array<NativeCarGeneratorPlate, 15> m_Plates{};
+    std::size_t m_PlateCount = 0;
     std::size_t m_Registered = 0;
     std::size_t m_TextIplFiles = 0;
     std::size_t m_BinaryIplFiles = 0;

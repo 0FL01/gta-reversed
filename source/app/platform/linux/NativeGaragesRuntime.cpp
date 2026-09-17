@@ -35,6 +35,11 @@ NativeGarageTidyPlan NativeGaragesRuntime::PlanTidy(const NativeGarageEntry& gar
         return plan;
     }
     if (tidyClose) {
+        if (!vehicles.Census().Alive) {
+            plan.Status = NativeScriptServiceStatus::Ready;
+            plan.Requirement = NativeGarageTidyRequirement::None;
+            return plan; // Source collision/destruction loops are vacuous for the qualified empty pool.
+        }
         // TidyUpGarageClose needs source COL spheres and door-state destruction
         // ordering. This slice implements only the selected counter-12 far body.
         plan.Status=NativeScriptServiceStatus::Unsupported;

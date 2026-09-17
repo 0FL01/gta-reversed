@@ -242,8 +242,9 @@ struct IdeEntry {
 };
 
 void ParseIdeText(const std::string& text, std::map<std::string, IdeEntry>& out,
-                  std::set<std::string>& animModels, std::map<int, std::string>& modelIds) {
-    int mode = 0; // 0 none, 1 static, 2 anim, 3 TXD parents
+                  std::set<std::string>& animModels, std::map<int, std::string>& modelIds,
+                  std::map<int, std::string>& modelTxds) {
+    int mode = 0; // 0 none, 1 static, 2 anim, 3 TXD parents, 4 identity-only
     bool timeModel = false;
     size_t pos = 0;
     while (pos <= text.size()) {
@@ -272,6 +273,11 @@ void ParseIdeText(const std::string& text, std::map<std::string, IdeEntry>& out,
         }
         if (head == "txdp") {
             mode = 3;
+            continue;
+        }
+        if (head == "weap" || head == "cars" || head == "peds" || head == "hier") {
+            mode = 4;
+            timeModel = false;
             continue;
         }
         if (mode == 0) {
@@ -303,6 +309,8 @@ void ParseIdeText(const std::string& text, std::map<std::string, IdeEntry>& out,
         std::string key = model;
         ToLowerInPlace(key);
         modelIds[id] = model;
+        modelTxds[id] = txd;
+        if (mode == 4) continue;
         s_collisionPopulation.Models[id] = {key, timeModel};
         if (mode == 2) {
             animModels.insert(key);
@@ -1061,6 +1069,8 @@ bool s_init = false;
 std::vector<PagerInst> s_insts;
 std::map<Cell, std::vector<int>> s_grid; // cell -> IPL-ordered instance rows
 std::map<std::string, IdeEntry> s_ide;
+std::map<int, std::string> s_modelIds;
+std::map<int, std::string> s_modelTxds;
 std::set<std::string> s_animModels; // lowercased anim (Clump) keys, retained for selected validation
 std::vector<ImgIndex> s_imgs;
 std::map<std::string, CachedModel> s_cache; // resident DFF models
@@ -1511,7 +1521,9 @@ bool StreamPager_Init(const char* gameDir, E2ELoadInfo& info, char* err, std::si
     s_ide.clear();
     s_animModels.clear();
     std::set<std::string> animModels;
-    std::map<int, std::string> modelIds;
+    s_modelIds.clear();
+    s_modelTxds.clear();
+    auto& modelIds = s_modelIds;
     int ideFiles = 0;
     for (const std::string& rel : idePaths) {
         std::string text;
@@ -1521,7 +1533,7 @@ bool StreamPager_Init(const char* gameDir, E2ELoadInfo& info, char* err, std::si
             }
             continue;
         }
-        ParseIdeText(text, s_ide, animModels, modelIds);
+        ParseIdeText(text, s_ide, animModels, modelIds, s_modelTxds);
         ++ideFiles;
     }
     s_animModels = animModels;
@@ -2051,6 +2063,8 @@ void StreamPager_Shutdown() {
     s_insts.clear();
     s_grid.clear();
     s_ide.clear();
+    s_modelIds.clear();
+    s_modelTxds.clear();
     s_animModels.clear();
     s_imgs.clear();
     s_active.clear();
@@ -2068,6 +2082,34 @@ bool StreamPager_CollisionPopulation(NativeCollisionPopulation& out, std::string
     }
     out = s_collisionPopulation;
     error.clear(); return true;
+}
+
+bool StreamPager_KnownModelId(int modelId, std::string* modelName) {
+    const auto found=s_modelIds.find(modelId);
+    if(found==s_modelIds.end())return false;
+    if(modelName)*modelName=found->second;
+    return true;
+}
+bool StreamPager_KnownModelName(std::string_view modelName, int* modelId) {
+    std::string key(modelName); ToLowerInPlace(key);
+    if(!s_ide.contains(key))return false;
+    if(modelId){
+        const auto found=std::ranges::find_if(s_modelIds,[&](const auto& pair){std::string name=pair.second;ToLowerInPlace(name);return name==key;});
+        if(found==s_modelIds.end())return false;
+        *modelId=found->first;
+    }
+    return true;
+}
+bool StreamPager_KnownModelIdentity(int modelId, std::string& modelName, std::string& textureName) {
+    if (!s_init) return false;
+    const auto id = s_modelIds.find(modelId);
+    const auto txd = s_modelTxds.find(modelId);
+    if (id == s_modelIds.end() || txd == s_modelTxds.end() || id->second.empty() || txd->second.empty()) return false;
+    modelName = id->second;
+    textureName = txd->second;
+    ToLowerInPlace(modelName);
+    ToLowerInPlace(textureName);
+    return true;
 }
 
 std::shared_ptr<const NativeCollisionContext> NativeCollisionContext::LoadBeforeWorker(

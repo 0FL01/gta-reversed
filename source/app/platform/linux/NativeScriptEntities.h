@@ -31,6 +31,7 @@ struct NativeScriptHelpView {
 class NativeScriptHelpPresentation {
 public:
     void Show(std::string_view text, std::uint32_t lines, bool quick = false);
+    void Clear();
     bool Displayed() const { return m_State != 0; } // CHud::HelpMessageDisplayed
     // One update per native UNPAUSED frame. Duplicate stamps are idempotent;
     // backwards/ambiguous (>INT32_MAX elapsed) stamps fail without mutation.
@@ -54,6 +55,7 @@ struct NativeScriptPickup {
     WorldShotScene Actor; // actual prepared DFF; absolute phase rebuilt from bind
     bool Active = false, HelpMessageDisplayed = false;
     int Model = 1272, Type = 17; // eModelID / ePickupType; sale=1273/18, save=1277/3
+    std::int32_t Ammo = 0;
     std::int32_t Price = 0; // CPickup::m_nAmmo bits; signed comparison in Update
     std::uint16_t CostValue = 0; // CObject::m_wCostValue = uint32(price)/5
     std::uint32_t MessageLines = 0;
@@ -138,6 +140,7 @@ struct NativeScriptRadarBlip {
     // uses white/255; these trace properties apply to source non-sprite markers.
     std::uint32_t Colour = 8; // BLIP_COLOUR_DESTINATION (input color5 is unused)
     float SphereRadius = 1.0f;
+    bool DrawSphere = false;
     std::uint16_t Size = 1;
     bool Bright = true, Friendly = false, Fade = false;
 };
@@ -155,6 +158,9 @@ bool NativeScriptEntities_LoadRadar(const char* gameDir, WorldShotImage& image, 
 struct NativeScriptStaticModelOptions {
     bool ResetFrame = false, FirstAtomicOnly = false;
     std::optional<std::array<float, 4>> FirstMaterialColor;
+    bool RequireTexture = true;
+    bool VehicleShared = false;
+    bool ResidencyOnly = false;
 };
 bool NativeScriptEntities_LoadStaticModel(const char* gameDir, const std::string& model,
     const std::string& txd, WorldShotScene& scene, std::string& error, const NativeScriptStaticModelOptions& options = {});
@@ -167,6 +173,8 @@ public:
     NativeScriptReferenceResult<NativeScriptPickupRef> CreateForSaleProperty(const NativeScriptForSalePropertyRequest&);
     NativeScriptReferenceResult<NativeScriptPickupRef> CreatePickup(const NativeScriptPickupRequest&,
         NativeScriptPosition camera, std::uint32_t gameMs);
+    NativeScriptReferenceResult<NativeScriptPickupRef> CreatePickupWithAmmo(const NativeScriptPickupAmmoRequest&,
+        std::uint32_t gameMs);
     NativeScriptReferenceResult<NativeScriptBlipRef> CreateContactBlip(const NativeScriptContactBlipRequest&);
     // Exact host-owned live GPU callback; no CPU-image/property fallback. Replays
     // resolve the original generation before querying later renderer readiness.
@@ -225,6 +233,7 @@ public:
     bool AdvanceTime(std::uint32_t gameMs, std::string& error);
     NativeScriptHelpView HelpPresentation() const { return m_Help.View(); }
     std::uint32_t HelpLifetimeMs() const { return m_Help.LifetimeMs(); }
+    NativeScriptServiceResult ClearHelp();
     std::uint64_t Revision() const { return m_Revision; }
     bool OwnsRequest(NativeScriptRequestId id) const;
 private:
@@ -236,6 +245,7 @@ private:
         std::int32_t Argument = 0, Reference = -1;
         std::int32_t Model = 0;
         std::array<char, 24> ModelName{};
+        std::int32_t Ammo = 0;
     };
     enum class PickupOperationKind { HasBeenCollected, Remove };
     struct PickupOperation {
@@ -257,7 +267,7 @@ private:
     std::vector<Event> m_Events;
     std::vector<PickupOperation> m_PickupOperations;
     WorldShotScene m_Model{}, m_ForSaleModel{}, m_Actors{};
-    WorldShotScene m_SaveModel{};
+    WorldShotScene m_SaveModel{}, m_OysterModel{}, m_HorseshoeModel{}, m_PhotoModel{};
     NativeScriptPropertyGeometry m_SaveGeometry;
     NativeScriptPickupRequirement m_PickupRequirement;
     std::optional<PlayerActivityFrame> m_PlayerActivity;

@@ -72,6 +72,7 @@ public:
 private:
     friend class RealtimeScriptHost; // all script mutations pass host's global ID journal
     NativeScriptServiceResult SetFlag(const NativeScriptEntryExitFlagRequest&);
+    NativeScriptServiceResult SetEnabledByName(const NativeScriptEntryExitSwitchRequest&);
     std::vector<std::size_t> PointCandidates(float x, float y) const;
     void BuildRegistry();
     std::vector<NativeEntryExit> m_Entries;

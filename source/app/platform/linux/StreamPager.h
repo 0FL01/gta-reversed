@@ -9,6 +9,7 @@
 
 #include <cstddef>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "app/platform/linux/WorldShot.h"
@@ -69,6 +70,10 @@ void StreamPager_Shutdown();
 // and low-byte Interior. Legacy offline mode deliberately rejects this export.
 // Call under pager ownership; result survives shutdown.
 bool StreamPager_CollisionPopulation(NativeCollisionPopulation& out, std::string& error);
+// Read-only complete IDE identity retained by the sole pager startup parser.
+bool StreamPager_KnownModelId(int modelId, std::string* modelName = nullptr);
+bool StreamPager_KnownModelName(std::string_view modelName, int* modelId = nullptr);
+bool StreamPager_KnownModelIdentity(int modelId, std::string& modelName, std::string& textureName);
 // Optional single-chain LOD supplement (P1-A04): real paired render for one
 // catalog-validated child/parent pair (no hardcoded IDs here).
 // Called after Init and before the first Update. Validates exact full

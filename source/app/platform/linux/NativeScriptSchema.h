@@ -20,6 +20,10 @@ enum class NativeScriptOperandType : std::uint8_t {
     // One tag0-terminated START_NEW_* parameter. Variable operands carry raw
     // 32-bit union data, so their int/float intent is not encoded in bytecode.
     Argument,
+    DebugString,
+    DebugString128,
+    IgnoredString,
+    StringOutput,
 };
 
 enum class NativeScriptSemanticCoverage : std::uint8_t {
@@ -27,7 +31,7 @@ enum class NativeScriptSemanticCoverage : std::uint8_t {
     Unsupported,
 };
 
-constexpr std::size_t NativeScriptMaxFixedOperands = 16;
+constexpr std::size_t NativeScriptMaxFixedOperands = 18;
 // START_NEW_SCRIPT/START_NEW_STREAMED_SCRIPT have one fixed operand followed
 // by up to all 32 source local-parameter slots and a tag-zero terminator.
 constexpr std::size_t NativeScriptMaxOperands = 33;

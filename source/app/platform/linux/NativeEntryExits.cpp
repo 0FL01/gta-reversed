@@ -261,6 +261,21 @@ NativeScriptServiceResult NativeEntryExits::SetFlag(const NativeScriptEntryExitF
     flags = request.State ? std::uint16_t(flags | mask) : std::uint16_t(flags & ~mask);
     ++m_Revision; return {NativeScriptServiceStatus::Ready, {}};
 }
+NativeScriptServiceResult NativeEntryExits::SetEnabledByName(const NativeScriptEntryExitSwitchRequest& request) {
+    if (!m_Loaded) return {NativeScriptServiceStatus::Unsupported, "ENEX requires owned IPL registry and prepared marker assets"};
+    const auto name = Lower(std::string(request.Name.data(), request.Name.size()));
+    const auto found = std::ranges::find_if(m_Entries, [&](const auto& entry) {
+        return Lower(std::string(entry.Name.data(), entry.Name.size())) == name;
+    });
+    // Source SetEnabledByName is void: names absent from the current pool are a
+    // completed no-op. This also preserves the explicit text-only registry
+    // boundary for dynamic DFF 2DFX entry-exits.
+    if (found == m_Entries.end()) return {NativeScriptServiceStatus::Ready, "ENEX source name is absent from the owned pool"};
+    if (request.Enabled) found->Flags |= 0x4000;
+    else found->Flags &= std::uint16_t(~0x4000u);
+    ++m_Revision;
+    return {NativeScriptServiceStatus::Ready, {}};
+}
 NativeEntryExitActivation NativeEntryExits::Activation(const NativeEntryExitView& view) const {
     if (!m_Registry || Suppressed(view) || view.TransitionState || !view.CanStartMission || view.Hour > 23 || !Finite(view.Player)) return {};
     for (auto i : PointCandidates(view.Player.X, view.Player.Y)) {

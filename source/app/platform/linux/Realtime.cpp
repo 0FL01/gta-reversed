@@ -426,7 +426,16 @@ struct LiveWorld {
     }
 
     void Start(bool collision) {
-        worker = std::make_unique<realtime_streaming::Worker>(collision, collisionContext, active->cpu->Overrides, active->cpu->Generation);
+        worker = std::make_unique<realtime_streaming::Worker>(collision, collisionContext,
+            active->cpu->Overrides,active->cpu->Generation,nullptr,
+            [](const realtime_streaming::StaticModelRequest& request,WorldShotScene& scene,std::string& error){
+                NativeScriptStaticModelOptions options;
+                options.VehicleShared=request.Vehicle;
+                options.RequireTexture=!request.Vehicle;
+                options.ResidencyOnly=true;
+                return NativeScriptEntities_LoadStaticModel(request.GameDir.c_str(),request.Model,
+                    request.Texture,scene,error,options);
+            });
     }
 
     // Call once, BEFORE Tick: physics and draw see exactly the same generation.
@@ -551,17 +560,22 @@ static bool ScriptFault(const RealtimeScriptHost& host, const NativeScriptResult
         static_cast<unsigned long long>(generation), result.IP, result.Opcode, result.Executed, result.Message.c_str());
     if (result.ThreadIndex < threads.size()) {
         const auto& thread = threads[result.ThreadIndex];
-        std::printf("play-script-state main=%llu threadCommands=%llu ip=%u previous=%04X@%u hospitals=%zu police=%zu stuntJumps=%zu runtimeUpdate=%d save=%d\n",
+        const auto active=std::ranges::count_if(threads,[](const auto& value){return value.Active;});
+        const auto missions=std::ranges::count_if(threads,[](const auto& value){return value.Active&&value.MissionIndex>=0;});
+        const auto pickups=std::ranges::count_if(host.Entities().Pickups(),[](const auto& value){return value.Active;});
+        std::printf("play-script-state main=%llu threadCommands=%llu ip=%u previous=%04X@%u mission=%d base=%u active=%zu missions=%zu hospitals=%zu police=%zu stuntJumps=%zu plates=%zu setPieces=%zu zoneRevision=%llu pickups=%zu runtimeUpdate=%d save=%d\n",
             static_cast<unsigned long long>(host.State().Commands), static_cast<unsigned long long>(thread.Commands),
-            thread.IP, thread.LastOpcode, thread.LastInstructionIP,
+            thread.IP, thread.LastOpcode, thread.LastInstructionIP,thread.MissionIndex,thread.BaseIP,active,missions,
             host.Restarts().Points(NativeRestartKind::Hospital).size(), host.Restarts().Points(NativeRestartKind::Police).size(),
-            host.StuntJumps().Entries().size(), NativeStuntJumps::Coverage.RuntimeUpdate, NativeStuntJumps::Coverage.SaveLoad);
+            host.StuntJumps().Entries().size(),host.CarGenerators().Plates().size(),host.SetPieces().Entries().size(),
+            static_cast<unsigned long long>(host.ZonePopulation().Revision()),pickups,
+            NativeStuntJumps::Coverage.RuntimeUpdate, NativeStuntJumps::Coverage.SaveLoad);
     }
     std::fflush(stdout);
     return true;
 }
 
-static void DrawScriptFade(const NativeScriptFade& fade) {
+static void DrawScriptFade(const NativeScriptFade& fade, const std::array<std::uint8_t, 3>& colour) {
     if (fade.Alpha <= 0) {
         return;
     }
@@ -579,7 +593,8 @@ static void DrawScriptFade(const NativeScriptFade& fade) {
     glMatrixMode(GL_MODELVIEW);
     glPushMatrix();
     glLoadIdentity();
-    glColor4f(0, 0, 0, std::clamp(fade.Alpha / 255.0f, 0.0f, 1.0f));
+    glColor4f(colour[0] / 255.0f, colour[1] / 255.0f, colour[2] / 255.0f,
+        std::clamp(fade.Alpha / 255.0f, 0.0f, 1.0f));
     glBegin(GL_QUADS);
     glVertex2f(-1, -1); glVertex2f(1, -1); glVertex2f(1, 1); glVertex2f(-1, 1);
     glEnd();
@@ -855,11 +870,37 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             std::printf("play-pad-feedback status=%d message=%s\n", static_cast<int>(result.Status), result.Message.c_str());
     };
     reportPad(padFeedback.Initialize());
+    bool scriptWorldPending = false;
     if (newGame) {
         scriptHost.SetRadarSpriteReady([&hud](std::int32_t sprite) { return hud.IsRadarSpriteUploaded(sprite); });
-        scriptHost.SealStartup(); // no live LOAD_SCENE callback yet: explicitly Unsupported
+        scriptHost.SealStartup();
     }
     world.Start(gameplayEnabled); // final startup parser has returned; transfer exclusive pager ownership
+    if (newGame) {
+        scriptHost.SetLiveWorldLoader(
+            [&](const NativeScriptSceneRequest& request, const NativeScriptServiceTicket&,
+                RealtimeScriptWorldPublication& publication) {
+                if (auto cpu = world.worker->TakeReady()) {
+                    if (cpu->Position.X != request.Position.X || cpu->Position.Y != request.Position.Y ||
+                        cpu->Position.Z != request.Position.Z || !cpu->Error.empty()) {
+                        scriptWorldPending = false;
+                        return NativeScriptAsyncPrepareResult{NativeScriptAsyncPrepareStatus::Error,
+                            cpu->Error.empty() ? "world worker returned a mismatched script center" : cpu->Error};
+                    }
+                    publication.Center = request.Position;
+                    publication.Frame = cpu->Frame;
+                    publication.Overrides = cpu->Overrides;
+                    publication.Scene = std::make_shared<const WorldShotScene>(cpu->Scene);
+                    world.worker->Discard(std::move(cpu));
+                    scriptWorldPending = false;
+                    return NativeScriptAsyncPrepareResult{NativeScriptAsyncPrepareStatus::Prepared, {}};
+                }
+                world.worker->Request({request.Position.X,request.Position.Y,request.Position.Z},true);
+                scriptWorldPending = true;
+                return NativeScriptAsyncPrepareResult{NativeScriptAsyncPrepareStatus::Pending,"world worker request pending"};
+            },
+            [&](const NativeScriptServiceTicket&) { scriptWorldPending = false; });
+    }
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_ALPHA_TEST);
     glAlphaFunc(GL_GREATER, 0.5f); // TXD cutouts (foliage/fences), no opaque rectangles.
@@ -869,6 +910,8 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
     const Uint64 start = SDL_GetTicksNS();
     Uint64 previous = start, report = start;
     uint64_t frames = 0, reportFrames = 0;
+    uint64_t scriptExecuted = 0;
+    NativeScriptStatus lastScriptStatus = NativeScriptStatus::Waiting;
     double reportMaxFrameMs = 0, reportMaxStreamMs = 0;
     bool running = true;
     bool demoJumped = false;
@@ -927,7 +970,33 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
                 std::printf("play-fail script clock: %s\n", gameplayError.c_str());
                 return 1;
             }
-            if (ScriptFault(scriptHost, scriptHost.RunPass(scriptQuota))) {
+            const auto scriptResult = scriptHost.RunPass(scriptQuota);
+            scriptExecuted += scriptResult.Executed;
+            lastScriptStatus = scriptResult.Status;
+            if (scriptResult.Status == NativeScriptStatus::Pending) {
+                if (const auto& pending = scriptHost.PendingModel()) {
+                    const auto ticket = pending->Id.Instruction;
+                    auto completion = world.worker->TakeStaticModel(ticket);
+                    if (completion) {
+                        if (!completion->Error.empty() || !scriptHost.FulfillPendingModel(
+                            pending->Id, std::move(completion->Scene), gameplayError)) {
+                            if (gameplayError.empty()) gameplayError = completion->Error;
+                            std::printf("play-fail script model: %s\n", gameplayError.c_str());
+                            return 1;
+                        }
+                    } else if (!world.worker->RequestStaticModel({ticket, gameDir, pending->Name, pending->Texture,
+                        pending->Vehicle})) {
+                        std::printf("play-fail script model request admission\n");
+                        return 1;
+                    }
+                } else if (scriptHost.WorldTransaction().Phase != NativeScriptServiceTransactionPhase::Idle) {
+                    // The sole world loader is polled by the repeated SCM service call.
+                } else if (!scriptHost.FulfillPendingStreamedScript(gameDir, gameplayError)) {
+                    std::printf("play-fail streamed script: %s\n", gameplayError.c_str());
+                    return 1;
+                }
+            }
+            if (ScriptFault(scriptHost, scriptResult)) {
                 return 1; // no physics, presentation, retry, or main-thread resumption after fault
             }
         }
@@ -939,7 +1008,7 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
         }
         const double streamStart = realtime_streaming::Milliseconds();
         bool published = false;
-        if (!world.Advance({camera.x, camera.y, camera.z}, published)) {
+        if (!scriptWorldPending && !world.Advance({camera.x, camera.y, camera.z}, published)) {
             return 1;
         }
         reportMaxStreamMs = std::max(reportMaxStreamMs, realtime_streaming::Milliseconds() - streamStart);
@@ -997,6 +1066,7 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             } else {
                 input = {};
             }
+            if (!scriptHost.PlayerControlEnabled()) input = {};
             gameplay.Tick(dt, input, world.active->Collision());
             if (!freecam) {
                 const auto& view = gameplay.Camera();
@@ -1214,7 +1284,7 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
         }
         hud.Draw(hudView, hudState, width, height);
         if (newGame) {
-            DrawScriptFade(scriptHost.State().Fade);
+            DrawScriptFade(scriptHost.State().Fade, scriptHost.FadeColour());
         }
         const auto glError = glGetError();
         if (glError != GL_NO_ERROR || !SDL_GL_SwapWindow(window.window)) {
@@ -1256,8 +1326,32 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
         }
     }
     if (newGame) {
-        std::printf("play-script-stopped swaps=%llu startup-incomplete=1\n", static_cast<unsigned long long>(frames));
-        return 1;
+        const auto& session = scriptHost.Session();
+        const auto mission0Active = std::ranges::any_of(session.Threads(), [](const auto& thread) {
+            return thread.Active && thread.MissionIndex == 0;
+        });
+        const auto active = std::ranges::count_if(session.Threads(), [](const auto& thread) { return thread.Active; });
+        const auto missions = std::ranges::count_if(session.Threads(), [](const auto& thread) {
+            return thread.Active && thread.MissionIndex >= 0;
+        });
+        const auto mission = std::ranges::find_if(session.Threads(), [](const auto& thread) {
+            return thread.Active && thread.MissionIndex >= 0;
+        });
+        const auto& fade = session.State().Fade;
+        const bool live = !mission0Active && session.State().Commands >= 451 &&
+            scriptHost.PlayerControlEnabled() && !fade.Fading && fade.Alpha <= 0.0f &&
+            lastScriptStatus == NativeScriptStatus::Waiting && !session.PassOutstanding();
+        std::printf("play-script-live ready=%d main=%llu active=%zu missions=%zu mission0=%d "
+            "mission-index=%d mission-ip=%u mission-commands=%llu control=%d fade=%.0f/%u cutscene=%d/%d "
+            "commands=%llu draws=%zu status=%s\n",
+            live, static_cast<unsigned long long>(session.State().Commands), active, missions, mission0Active,
+            mission == session.Threads().end() ? -1 : mission->MissionIndex,
+            mission == session.Threads().end() ? 0 : mission->IP,
+            static_cast<unsigned long long>(mission == session.Threads().end() ? 0 : mission->Commands),
+            scriptHost.PlayerControlEnabled(), fade.Alpha, fade.Direction,
+            scriptHost.Cutscene().Loaded(), scriptHost.Cutscene().Started(), static_cast<unsigned long long>(scriptExecuted),
+            scriptHost.MissionText().Draws().size(), lastScriptStatus == NativeScriptStatus::Waiting ? "Waiting" : "Other");
+        if (!live) return 1;
     }
     std::printf("play-ok swaps=%llu seconds=%.3f sceneUpdates=%d\n",
         static_cast<unsigned long long>(frames), static_cast<double>(SDL_GetTicksNS() - start) / 1e9, updates);

@@ -10,8 +10,10 @@
 #include <condition_variable>
 #include <cstdio>
 #include <exception>
+#include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 
 namespace realtime_streaming {
@@ -23,6 +25,17 @@ inline double Milliseconds() {
 struct Center {
     float X{}, Y{}, Z{};
 };
+struct StaticModelRequest {
+    std::uint64_t Ticket = 0;
+    std::string GameDir, Model, Texture;
+    bool Vehicle = false;
+};
+struct StaticModelCompletion {
+    std::uint64_t Ticket = 0;
+    std::shared_ptr<const WorldShotScene> Scene;
+    std::string Error;
+};
+using StaticModelLoader = std::function<bool(const StaticModelRequest&, WorldShotScene&, std::string&)>;
 
 struct CpuWorld {
     Center Position;
@@ -84,10 +97,11 @@ struct CpuWorld {
 class Worker {
 public:
     explicit Worker(bool collision, std::shared_ptr<const NativeCollisionContext> context = {},
-                    std::shared_ptr<const NativePlacementOverrides> overrides = {}, uint64_t initialGeneration = 1,
-                    std::shared_ptr<const NativeVehicleAssetSource> vehicleSource = {})
+                     std::shared_ptr<const NativePlacementOverrides> overrides = {}, uint64_t initialGeneration = 1,
+                     std::shared_ptr<const NativeVehicleAssetSource> vehicleSource = {}, StaticModelLoader modelLoader = {})
         : m_Collision(collision), m_Context(std::move(context)), m_Overrides(std::move(overrides)),
-          m_Generation(initialGeneration), m_VehicleSource(std::move(vehicleSource)), m_Thread([this] { Run(); }) {}
+          m_Generation(initialGeneration), m_VehicleSource(std::move(vehicleSource)),
+          m_StaticModelLoader(std::move(modelLoader)), m_Thread([this] { Run(); }) {}
     ~Worker() { Stop({}, {}); }
     Worker(const Worker&) = delete;
     Worker& operator=(const Worker&) = delete;
@@ -128,9 +142,34 @@ public:
         return m_Stop ? nullptr : m_Vehicles.Take(ticket);
     }
 
+    bool RequestStaticModel(const StaticModelRequest& request) {
+        std::lock_guard lock(m_Mutex);
+        if (m_Stop || !request.Ticket || request.GameDir.empty() || request.Model.empty() || request.Texture.empty()) return false;
+        if ((m_StaticModelWaiting && m_StaticModelWaiting->Ticket != request.Ticket) ||
+            (m_StaticModelReady && m_StaticModelReady->Ticket != request.Ticket)) return false;
+        if (!m_StaticModelWaiting && !m_StaticModelReady) m_StaticModelWaiting = request;
+        m_Wake.notify_one();
+        return true;
+    }
+
+    std::optional<StaticModelCompletion> TakeStaticModel(std::uint64_t ticket) {
+        std::lock_guard lock(m_Mutex);
+        if (!m_StaticModelReady || m_StaticModelReady->Ticket != ticket) return std::nullopt;
+        auto result = std::move(m_StaticModelReady);
+        m_StaticModelReady.reset();
+        return result;
+    }
+
     std::unique_ptr<CpuWorld> TakeReady() {
         std::lock_guard lock(m_Mutex);
         return std::move(m_Ready);
+    }
+    void Discard(std::unique_ptr<CpuWorld> world) {
+        std::lock_guard lock(m_Mutex);
+        assert(m_Busy && !m_Retired && !m_Ready);
+        m_Retired = std::move(world);
+        m_Busy = false;
+        m_Wake.notify_one();
     }
 
     bool Building() {
@@ -176,7 +215,7 @@ private:
         std::unique_lock lock(m_Mutex);
         for (;;) {
             m_Wake.wait(lock, [&] { return m_Stop || m_Retired || m_Vehicles.Retiring() ||
-                m_Vehicles.Waiting() || (!m_Busy && m_Wanted); });
+                m_Vehicles.Waiting() || m_StaticModelWaiting || (!m_Busy && m_Wanted); });
             if (m_Stop) {
                 auto ready = std::move(m_Ready);
                 auto retired = std::move(m_Retired);
@@ -198,6 +237,19 @@ private:
                 lock.unlock();
                 vehicle.reset();
                 lock.lock();
+                continue;
+            }
+            if (m_StaticModelWaiting) {
+                auto request = std::move(*m_StaticModelWaiting);
+                m_StaticModelWaiting.reset();
+                lock.unlock();
+                StaticModelCompletion completion{.Ticket=request.Ticket,.Scene={},.Error={}};
+                auto scene = std::make_shared<WorldShotScene>();
+                if (m_StaticModelLoader && m_StaticModelLoader(request,*scene,completion.Error)) completion.Scene = std::move(scene);
+                else if (!m_StaticModelLoader) completion.Error = "script model loader is unavailable";
+                else completion.Error = request.Model + ": " + completion.Error;
+                lock.lock();
+                m_StaticModelReady = std::move(completion);
                 continue;
             }
             // Alternate eligible parser jobs, without waiting for world GPU
@@ -264,7 +316,10 @@ private:
     Center m_Center;
     uint64_t m_Generation = 1;
     const std::shared_ptr<const NativeVehicleAssetSource> m_VehicleSource;
+    StaticModelLoader m_StaticModelLoader;
     NativeVehicleAssetQueue m_Vehicles;
+    std::optional<StaticModelRequest> m_StaticModelWaiting;
+    std::optional<StaticModelCompletion> m_StaticModelReady;
     bool m_LastWasVehicle = false;
     std::unique_ptr<CpuWorld> m_Ready, m_Retired, m_StopActive, m_StopPending;
     // Last: every field above is initialized before Run can observe it.

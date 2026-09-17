@@ -46,6 +46,17 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
         app/platform/linux/NativeScriptServiceTransaction.cpp
         app/platform/linux/NativeScriptPortableSave.cpp
         app/platform/linux/NativeStuntJumps.cpp
+        app/platform/linux/NativeSetPieces.cpp
+        app/platform/linux/NativeZonePopulation.cpp
+        app/platform/linux/NativePathPolicy.cpp
+        app/platform/linux/NativeExternalScriptTriggers.cpp
+        app/platform/linux/NativeScriptModelAnims.cpp
+        app/platform/linux/NativeScriptIplRequests.cpp
+        app/platform/linux/NativeWorldObjectOverrides.cpp
+        app/platform/linux/NativeScriptWeather.cpp
+        app/platform/linux/NativeScriptClothes.cpp
+        app/platform/linux/NativeMissionText.cpp
+        app/platform/linux/NativeCutscene.cpp
         app/platform/linux/NativeScriptObjects.cpp
         app/platform/linux/NativeScriptEntities.cpp
         app/platform/linux/NativeEntryExits.cpp

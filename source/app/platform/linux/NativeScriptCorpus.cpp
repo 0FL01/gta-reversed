@@ -63,7 +63,12 @@ bool NativeScriptCorpusManifest::ObserveInPlace(const NativeScriptInstructionFor
         switch (type) {
         case NativeScriptOperandType::Integer: return tag == 1 || tag == 2 || tag == 3 || tag == 4 || tag == 5 || tag == 7 || tag == 8;
         case NativeScriptOperandType::Float: return tag == 2 || tag == 3 || tag == 6 || tag == 7 || tag == 8;
-        case NativeScriptOperandType::String: return tag == 9;
+        case NativeScriptOperandType::String: return tag >= 9 && tag <= 19;
+        case NativeScriptOperandType::DebugString: return tag == 14;
+        case NativeScriptOperandType::DebugString128: return tag == 0;
+        case NativeScriptOperandType::IgnoredString: return tag >= 9 && tag <= 19;
+        case NativeScriptOperandType::StringOutput:
+            return (tag >= 10 && tag <= 13) || (tag >= 16 && tag <= 19);
         case NativeScriptOperandType::Output:
         case NativeScriptOperandType::FloatOutput:
         case NativeScriptOperandType::InOutInteger:
@@ -117,7 +122,9 @@ bool NativeScriptCorpusManifest::ObserveInPlace(const NativeScriptInstructionFor
             error = "operand tag contradicts classified schema";
             return false;
         }
-        const bool array = form.OperandTags[i] == 7 || form.OperandTags[i] == 8;
+        const bool stringArray = form.OperandTags[i] == 12 || form.OperandTags[i] == 13 ||
+            form.OperandTags[i] == 18 || form.OperandTags[i] == 19;
+        const bool array = form.OperandTags[i] == 7 || form.OperandTags[i] == 8 || stringArray;
         if (array != (form.ArrayCounts[i] != 0) || (!array && form.ArrayFlags[i])) {
             error = "invalid array operand form";
             return false;
@@ -126,7 +133,9 @@ bool NativeScriptCorpusManifest::ObserveInPlace(const NativeScriptInstructionFor
         const bool floating = form.OperandTypes[i] == NativeScriptOperandType::Float ||
             form.OperandTypes[i] == NativeScriptOperandType::FloatOutput ||
             form.OperandTypes[i] == NativeScriptOperandType::InOutFloat;
-        if (array && (argument ? (form.ArrayFlags[i] & 0x7F) > 1 :
+        const auto expectedStringType = form.OperandTags[i] >= 18 ? 3u : 2u;
+        if (array && (stringArray ? (form.ArrayFlags[i] & 0x7F) != expectedStringType :
+            argument ? (form.ArrayFlags[i] & 0x7F) > 1 :
             (form.ArrayFlags[i] & 0x7F) != (floating ? 1 : 0))) {
             error = "array element type contradicts schema";
             return false;
