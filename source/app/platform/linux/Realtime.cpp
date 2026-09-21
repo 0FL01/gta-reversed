@@ -659,7 +659,7 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
     bool demoCurb = false;
     bool freecam = false;
     bool playerCj = false;
-    bool newGame = false, bootGate = false, explicitCamera = false, explicitHour = false;
+    bool newGame = false, bootGate = false, firstMissionGate = false, explicitCamera = false, explicitHour = false;
     bool freezeTime = false;
     float hour = 12.0f;
     const char* weather = "EXTRASUNNY_LA";
@@ -688,6 +688,8 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             newGame = true;
         } else if (std::strcmp(argv[i], "--boot-gate") == 0) {
             bootGate = true;
+        } else if (std::strcmp(argv[i], "--first-mission-gate") == 0) {
+            firstMissionGate = bootGate = true;
         } else if (std::strcmp(argv[i], "--freeze-time") == 0) {
             freezeTime = true;
         } else if (std::strcmp(argv[i], "--hour") == 0) {
@@ -720,7 +722,7 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
         }
     }
     if (bootGate && !newGame) {
-        std::printf("play-fail --boot-gate requires --new-game\n");
+        std::printf("play-fail --boot-gate/--first-mission-gate requires --new-game\n");
         return 1;
     }
     if (newGame && (demo || demoCurb || playerCj || freecam || explicitCamera || explicitHour || freezeTime)) {
@@ -1105,8 +1107,27 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
                 if (!mission2Active && scriptHost.PlayerControlEnabled() &&
                     scriptHost.State().Fade.Alpha <= 0.0f && !scriptHost.State().Fade.Fading) {
                     const auto position = scriptHost.ScriptPlayerPosition().value_or(NativeScriptPosition{});
+                    bool missionAudioComplete = true;
+                    for (std::int32_t slot = 1; slot <= 4; ++slot) {
+                        if (const auto* audio = scriptHost.MissionAudio().Slot(slot);
+                            audio && audio->Loaded && !audio->Finished) missionAudioComplete = false;
+                    }
+                    const bool ownerCleanup = scriptHost.ScriptCameraCommandCount() > 0 &&
+                        scriptHost.MissionText().Revision() > 0 && scriptHost.Cutscene().Revision() > 0 &&
+                        !scriptHost.Cutscene().Loaded() && missionAudioComplete &&
+                        !scriptHost.BeatTrack().State().PlaybackRequested && scriptHost.ScriptTrains().Alive() == 0;
+                    if (firstMissionGate && !ownerCleanup) {
+                        std::printf("play-fail first mission owners did not reach cleanup boundary\n");
+                        return 1;
+                    }
                     std::printf("play-boot-gate-ok mission0=done mission2=done control=1 fade=0 script-ped=%.3f,%.3f,%.3f no-fault=1\n",
                         position.X, position.Y, position.Z);
+                    if (firstMissionGate) {
+                        std::printf("play-first-mission-gate-ok launch=normal camera=%zu text-revision=%llu cutscene-cleared=1 audio-finished=1 beat-stopped=1 trains=0 peds=%zu presentation-feedback=0\n",
+                            scriptHost.ScriptCameraCommandCount(),
+                            static_cast<unsigned long long>(scriptHost.MissionText().Revision()),
+                            scriptHost.ScriptPeds().Alive());
+                    }
                     return 0;
                 }
             }

@@ -72,6 +72,7 @@ void PrintUsage(const char* prog) {
                       "  --player-cj: actual modular CJ with startup outfit (not SCM boot).\n"
                       "  --new-game: bounded real SCM startup; unsupported mission services exit 1.\n"
                       "  --boot-gate: with --new-game, exit 0 at first source mission completion/live control.\n"
+                      "  --first-mission-gate: also require camera/text/audio/cutscene/train owner cleanup.\n"
                       "  WASD move/drive, arrows orbit, Shift sprint, Space jump/handbrake, Ctrl brake,\n"
                       "  F enter/exit, Tab free camera (Q/E descend/ascend), Esc quit.\n",
                       prog ? prog : "mad-sa-linux");

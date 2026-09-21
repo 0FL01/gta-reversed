@@ -156,6 +156,12 @@ public:
     const NativeMissionText& MissionText() const { return m_MissionText; }
     const NativeCutscene& Cutscene() const { return m_Cutscene; }
     const NativeCarRecordings& CarRecordings() const { return m_CarRecordings; }
+    const NativeMissionAudio& MissionAudio() const { return m_MissionAudio; }
+    const NativeBeatTrack& BeatTrack() const { return m_BeatTrack; }
+    const NativeScriptPeds& ScriptPeds() const { return m_ScriptPeds; }
+    const NativeScriptTrains& ScriptTrains() const { return m_ScriptTrains; }
+    std::size_t ScriptCameraCommandCount() const { return m_ScriptCameraCommands.size(); }
+    bool Widescreen() const { return m_ScriptWidescreen; }
     bool ZoneNamesVisible() const { return m_ZoneNamesVisible; }
     const std::array<std::uint8_t, 3>& FadeColour() const { return m_FadeColour; }
     bool PlayerControlEnabled() const { return m_PlayerControlEnabled; }
