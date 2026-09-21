@@ -27,6 +27,7 @@ struct NativeScriptPedState {
     bool MissionCleanupRegistered = false;
     bool InWorld = false;
     bool InVehicle = false;
+    float Health = 100.0f;
     bool operator==(const NativeScriptPedState&) const = default;
 };
 
@@ -46,11 +47,22 @@ public:
     NativeScriptPedStatus CreateDriver(std::int32_t pedType, std::int32_t modelId,
         NativeScriptVehicleRef vehicle, NativeScriptPosition vehiclePosition,
         bool missionCleanup, NativeScriptPedRef& out, std::string& error);
+    NativeScriptPedStatus CreateOnFoot(std::int32_t pedType, std::int32_t modelId,
+        NativeScriptPosition position, bool missionCleanup,
+        NativeScriptPedRef& out, std::string& error);
+    NativeScriptPedStatus CreatePassenger(std::int32_t pedType, std::int32_t modelId,
+        NativeScriptVehicleRef vehicle, std::int32_t seat, NativeScriptPosition vehiclePosition,
+        bool missionCleanup, NativeScriptPedRef& out, std::string& error);
     NativeScriptPedStatus WarpPassenger(NativeScriptPedRef ped, NativeScriptVehicleRef vehicle,
         std::int32_t seat, NativeScriptPosition vehiclePosition, std::string& error);
+    NativeScriptPedStatus LeaveVehicle(NativeScriptPedRef ped, NativeScriptVehicleRef vehicle,
+        std::string& error);
+    NativeScriptPedStatus Release(NativeScriptPedRef, std::string& error);
+    NativeScriptPedStatus SetHealth(NativeScriptPedRef, float health, std::string& error);
 
     const NativeScriptPedState* Resolve(NativeScriptPedRef) const noexcept;
     const NativeScriptVehicleOccupancy* Occupancy(NativeScriptVehicleRef) const noexcept;
+    NativeScriptVehicleRef VehicleForPed(NativeScriptPedRef) const noexcept;
     std::size_t Alive() const noexcept;
     std::uint64_t Revision() const noexcept { return m_Revision; }
     static constexpr bool RuntimePresentation = false;

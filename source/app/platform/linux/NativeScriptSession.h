@@ -79,6 +79,16 @@ template<typename Ref> struct NativeScriptReferenceResult {
     NativeScriptServiceResult Result;
     Ref Reference;
 };
+using NativeScriptVehicleResult = NativeScriptReferenceResult<NativeScriptVehicleRef>;
+struct NativeScriptVehicleStatsResult {
+    NativeScriptServiceResult Result;
+    std::array<std::int32_t, 3> Times{};
+    std::array<float, 3> Distances{};
+};
+struct NativeScriptCarModelResult {
+    NativeScriptServiceResult Result;
+    std::int32_t ModelId = -1, VehicleClass = -1;
+};
 struct NativeScriptCarGeneratorRequest {
     NativeScriptRequestId Id;
     NativeScriptPosition Position;
@@ -113,6 +123,59 @@ struct NativeScriptCreatePedInVehicleRequest {
     NativeScriptVehicleRef Vehicle;
     std::int32_t PedType = 0;
     std::int32_t ModelId = 0;
+    std::int32_t Seat = -1; // -1 is the source driver command; nonnegative is passenger index.
+};
+struct NativeScriptPedCreateRequest {
+    NativeScriptRequestId Id;
+    std::int32_t PedType = 0;
+    std::int32_t ModelId = 0;
+    NativeScriptPosition Position;
+};
+struct NativeScriptTrainCreateRequest {
+    NativeScriptRequestId Id;
+    std::int32_t Type = 0;
+    NativeScriptPosition Position;
+    bool Clockwise = false;
+};
+struct NativeScriptTrainSpeedRequest {
+    NativeScriptRequestId Id;
+    NativeScriptVehicleRef Train;
+    float Speed = 0.0f;
+};
+struct NativeScriptCarDriveTaskRequest {
+    NativeScriptRequestId Id;
+    NativeScriptPedRef Ped;
+    NativeScriptVehicleRef Vehicle;
+    NativeScriptPosition Target;
+    float Speed = 0.0f;
+    std::int32_t DriveStyle = 0, ModelId = 0, DrivingStyle = 0;
+};
+struct NativeScriptGoStraightTaskRequest {
+    NativeScriptRequestId Id;
+    NativeScriptPedRef Ped;
+    NativeScriptPosition Target;
+    std::int32_t MoveState = 0;
+    std::int32_t TimeMs = 0;
+};
+struct NativeScriptSkipCutsceneRequest {
+    NativeScriptRequestId Id;
+    std::int32_t Target = 0;
+};
+struct NativeScriptCameraCommandRequest {
+    NativeScriptRequestId Id;
+    std::uint16_t Opcode = 0;
+    std::array<float, 6> Floats{};
+    std::array<std::int32_t, 2> Integers{};
+};
+struct NativeScriptFixedCameraRequest {
+    NativeScriptRequestId Id;
+    NativeScriptPosition Position;
+    NativeScriptPosition Offset;
+};
+struct NativeScriptPointCameraRequest {
+    NativeScriptRequestId Id;
+    NativeScriptPosition Position;
+    std::int32_t SwitchType = 0;
 };
 struct NativeScriptCarGeneratorPlateRequest {
     NativeScriptCarGeneratorRequest Generator;
@@ -131,6 +194,11 @@ struct NativeScriptCarGeneratorOwnedRequest {
 struct NativeScriptPlayerLookupRequest {
     NativeScriptRequestId Id;
     std::int32_t PlayerIndex = 0;
+};
+struct NativeScriptScoreRequest {
+    NativeScriptRequestId Id;
+    std::int32_t PlayerIndex = 0;
+    std::int32_t Amount = 0;
 };
 struct NativeScriptCameraRequest { NativeScriptRequestId Id; };
 struct NativeScriptHeadingRequest {
@@ -251,6 +319,11 @@ struct NativeScriptPedWeaponRequest {
     NativeScriptPedRef Ped;
     std::int32_t Weapon = 0;
 };
+struct NativeScriptPedStateRequest {
+    NativeScriptRequestId Id;
+    NativeScriptPedRef Ped;
+    bool Value = false;
+};
 struct NativeScriptModelRequest {
     NativeScriptRequestId Id;
     std::int32_t Model = 0;
@@ -268,6 +341,11 @@ struct NativeScriptCarRecordingRequest {
 struct NativeScriptBeatTrackRequest {
     NativeScriptRequestId Id;
     std::int32_t Track = 0;
+};
+struct NativeScriptMissionAudioRequest {
+    NativeScriptRequestId Id;
+    std::int32_t Slot = 0;
+    std::int32_t AudioId = 0;
 };
 struct NativeScriptBooleanRequest {
     NativeScriptRequestId Id;
@@ -294,6 +372,11 @@ struct NativeScriptPlayerControlRequest {
     NativeScriptRequestId Id;
     std::int32_t PlayerIndex = 0;
     bool Enabled = false;
+};
+struct NativeScriptPedHealthRequest {
+    NativeScriptRequestId Id;
+    NativeScriptPedRef Ped;
+    std::int32_t Health = 0;
 };
 struct NativeScriptClothesRequest {
     NativeScriptRequestId Id;
@@ -322,6 +405,11 @@ struct NativeScriptTextDisplayRequest {
     float Y = 0.0f;
     std::array<char, 8> Key{};
 };
+struct NativeScriptPrintRequest {
+    NativeScriptRequestId Id;
+    std::array<char, 8> Key{};
+    std::int32_t TimeMs = 0, Flag = 0;
+};
 struct NativeScriptCutsceneRequest {
     NativeScriptRequestId Id;
     std::array<char, 8> Name{};
@@ -347,6 +435,7 @@ struct NativeScriptLocateCharRequest {
     bool OnFoot = false;
     bool Highlight = false;
     bool TwoDimensional = false;
+    bool Stopped = false;
 };
 struct NativeScriptLocateCharObjectRequest {
     NativeScriptRequestId Id;
@@ -375,6 +464,20 @@ struct NativeScriptBlipDisplayRequest {
     NativeScriptRequestId Id;
     NativeScriptBlipRef Blip;
     std::int32_t Display = 0;
+};
+struct NativeScriptBlipReferenceRequest {
+    NativeScriptRequestId Id;
+    NativeScriptBlipRef Blip;
+};
+struct NativeScriptUserMarkerRef { std::int32_t Value = -1; };
+struct NativeScriptUserMarkerRequest {
+    NativeScriptRequestId Id;
+    NativeScriptPosition Position;
+    std::int32_t Colour = 0;
+};
+struct NativeScriptUserMarkerReferenceRequest {
+    NativeScriptRequestId Id;
+    NativeScriptUserMarkerRef Marker;
 };
 // 09B4: XY, search range, low-16-bit flag mask, integer boolean (nonzero).
 // No Z, output handle or compare update. Host owns nearest lookup + word write.
@@ -430,7 +533,7 @@ struct NativeScriptZoneGangRequest {
     std::array<char,8> Name{};
     std::int32_t Gang = 0, Strength = 0;
 };
-enum class NativePathPolicyKind : std::uint8_t { VehicleOn,VehicleOff,VehicleOriginal,PedOn,PedOff };
+enum class NativePathPolicyKind : std::uint8_t { VehicleOn,VehicleOff,VehicleOriginal,PedOn,PedOff,PedOriginal };
 struct NativeScriptPathPolicyRequest {
     NativeScriptRequestId Id;
     NativePathPolicyKind Kind;
@@ -456,7 +559,7 @@ struct NativeScriptModelAnimRequest {
 };
 struct NativeScriptIplRequest {
     NativeScriptRequestId Id;
-    std::array<char, 8> Name{};
+    std::array<char, 16> Name{};
     bool Requested = true;
 };
 struct NativeScriptWorldObjectVisibilityRequest {
@@ -518,6 +621,10 @@ public:
     virtual NativeScriptReferenceResult<NativeScriptBlipRef> CreateContactBlip(const NativeScriptContactBlipRequest&) { return {}; }
     virtual NativeScriptReferenceResult<NativeScriptBlipRef> CreateCoordinateBlip(const NativeScriptCoordinateBlipRequest&) { return {}; }
     virtual NativeScriptServiceResult SetBlipDisplay(const NativeScriptBlipDisplayRequest&) { return {}; }
+    virtual NativeScriptServiceResult RemoveBlip(const NativeScriptBlipReferenceRequest&) { return {}; }
+    virtual NativeScriptBooleanResult DoesBlipExist(const NativeScriptBlipReferenceRequest&) { return {}; }
+    virtual NativeScriptReferenceResult<NativeScriptUserMarkerRef> CreateUserMarker(const NativeScriptUserMarkerRequest&) { return {}; }
+    virtual NativeScriptServiceResult RemoveUserMarker(const NativeScriptUserMarkerReferenceRequest&) { return {}; }
     virtual NativeScriptServiceResult SetEntryExitFlag(const NativeScriptEntryExitFlagRequest&) { return {}; }
     virtual NativeScriptServiceResult SwitchEntryExit(const NativeScriptEntryExitSwitchRequest&) { return {}; }
     virtual NativeScriptServiceResult DeactivateGarage(const NativeScriptGarageRequest&) { return {}; }
@@ -549,6 +656,7 @@ public:
     virtual NativeScriptBooleanResult AreCarCheatsActivated(const NativeScriptRequestId&) { return {}; }
     virtual NativeScriptBooleanResult HasDeathArrestBeenExecuted(const NativeScriptRequestId&) { return {}; }
     virtual NativeScriptBooleanResult IsCharDead(const NativeScriptPedQueryRequest&) { return {}; }
+    virtual NativeScriptServiceResult SetPedSpeechDisabled(const NativeScriptPedStateRequest&) { return {}; }
     virtual NativeScriptBooleanResult IsGarageOpen(const NativeScriptGarageRequest&) { return {}; }
     virtual NativeScriptBooleanResult HasCharGotWeapon(const NativeScriptPedWeaponRequest&) { return {}; }
     virtual NativeScriptServiceResult RequestModel(const NativeScriptModelRequest&) { return {}; }
@@ -556,9 +664,21 @@ public:
     virtual NativeScriptServiceResult MarkModelNoLongerNeeded(const NativeScriptModelRequest&) { return {}; }
     virtual NativeScriptServiceResult LoadSpecialCharacter(const NativeScriptSpecialModelRequest&) { return {}; }
     virtual NativeScriptBooleanResult HasSpecialCharacterLoaded(const NativeScriptSpecialModelRequest&) { return {}; }
+    virtual NativeScriptServiceResult UnloadSpecialCharacter(const NativeScriptSpecialModelRequest&) { return {}; }
     virtual NativeScriptServiceResult RequestCarRecording(const NativeScriptCarRecordingRequest&) { return {}; }
     virtual NativeScriptBooleanResult HasCarRecordingLoaded(const NativeScriptCarRecordingRequest&) { return {}; }
     virtual NativeScriptServiceResult PreloadBeatTrack(const NativeScriptBeatTrackRequest&) { return {}; }
+    virtual NativeScriptServiceResult PlayBeatTrack(const NativeScriptRequestId&) { return {}; }
+    virtual NativeScriptServiceResult StopBeatTrack(const NativeScriptRequestId&) { return {}; }
+    virtual NativeScriptServiceResult BeginSkippableCutscene(const NativeScriptSkipCutsceneRequest&) { return {}; }
+    virtual NativeScriptServiceResult EndSkippableCutscene(const NativeScriptRequestId&) { return {}; }
+    virtual NativeScriptServiceResult ApplyCameraCommand(const NativeScriptCameraCommandRequest&) { return {}; }
+    virtual NativeScriptServiceResult ClearPrints(const NativeScriptRequestId&) { return {}; }
+    virtual NativeScriptServiceResult ClearMissionAudio(const NativeScriptRequestId&, std::int32_t) { return {}; }
+    virtual NativeScriptServiceResult LoadMissionAudio(const NativeScriptMissionAudioRequest&) { return {}; }
+    virtual NativeScriptBooleanResult HasMissionAudioLoaded(const NativeScriptRequestId&, std::int32_t) { return {}; }
+    virtual NativeScriptServiceResult PlayMissionAudio(const NativeScriptRequestId&, std::int32_t) { return {}; }
+    virtual NativeScriptBooleanResult HasMissionAudioFinished(const NativeScriptRequestId&, std::int32_t) { return {}; }
     virtual NativeScriptIntegerResult GetBeatTrackStatus(const NativeScriptRequestId&) { return {}; }
     virtual NativeScriptBooleanResult AreSubtitlesEnabled(const NativeScriptRequestId&) { return {}; }
     virtual NativeScriptServiceResult SetDensityMultiplier(const NativeScriptDensityRequest&) { return {}; }
@@ -566,8 +686,32 @@ public:
     virtual NativeScriptReferenceResult<NativeScriptVehicleRef> CreateVehicle(const NativeScriptVehicleCreateRequest&) { return {}; }
     virtual NativeScriptServiceResult SetVehicleHeading(const NativeScriptVehicleHeadingRequest&) { return {}; }
     virtual NativeScriptServiceResult SetVehicleLights(const NativeScriptVehicleStateRequest&) { return {}; }
+    virtual NativeScriptServiceResult SetVehicleCollision(const NativeScriptVehicleStateRequest&) { return {}; }
+    virtual NativeScriptServiceResult AddScore(const NativeScriptScoreRequest&) { return {}; }
     virtual NativeScriptServiceResult WarpPedIntoVehiclePassenger(const NativeScriptPedVehicleRequest&) { return {}; }
+    virtual NativeScriptServiceResult TaskLeaveVehicleImmediately(const NativeScriptPedVehicleRequest&) { return {}; }
     virtual NativeScriptReferenceResult<NativeScriptPedRef> CreatePedInsideVehicle(const NativeScriptCreatePedInVehicleRequest&) { return {}; }
+    virtual NativeScriptReferenceResult<NativeScriptPedRef> CreatePed(const NativeScriptPedCreateRequest&) { return {}; }
+    virtual NativeScriptServiceResult SetFixedCameraPosition(const NativeScriptFixedCameraRequest&) { return {}; }
+    virtual NativeScriptServiceResult PointCameraAtPoint(const NativeScriptPointCameraRequest&) { return {}; }
+    virtual NativeScriptServiceResult SetWidescreen(const NativeScriptBooleanRequest&) { return {}; }
+    virtual NativeScriptVehicleResult GetPedVehicleNoSave(const NativeScriptPedQueryRequest&) { return {}; }
+    virtual NativeScriptVehicleStatsResult GetWheelieStats(const NativeScriptVehicleStateRequest&) { return {}; }
+    virtual NativeScriptBooleanResult IsVehicleInAirProper(const NativeScriptVehicleStateRequest&) { return {}; }
+    virtual NativeScriptBooleanResult IsVehicleDead(const NativeScriptVehicleStateRequest&) { return {}; }
+    virtual NativeScriptBooleanResult IsVehiclePlaybackActive(const NativeScriptVehicleStateRequest&) { return {}; }
+    virtual NativeScriptServiceResult StartVehiclePlayback(const NativeScriptVehicleStateRequest&) { return {}; }
+    virtual NativeScriptReferenceResult<NativeScriptVehicleRef> CreateMissionTrain(const NativeScriptTrainCreateRequest&) { return {}; }
+    virtual NativeScriptServiceResult SetTrainSpeed(const NativeScriptTrainSpeedRequest&, bool) { return {}; }
+    virtual NativeScriptServiceResult DeleteMissionTrains(const NativeScriptRequestId&) { return {}; }
+    virtual NativeScriptCarModelResult GetRandomResidentCarModel(const NativeScriptRequestId&, bool) { return {}; }
+    virtual NativeScriptServiceResult MarkPedNoLongerNeeded(const NativeScriptPedQueryRequest&) { return {}; }
+    virtual NativeScriptServiceResult MarkVehicleNoLongerNeeded(const NativeScriptVehicleStateRequest&) { return {}; }
+    virtual NativeScriptServiceResult DeletePed(const NativeScriptPedQueryRequest&) { return {}; }
+    virtual NativeScriptServiceResult DeleteVehicle(const NativeScriptVehicleStateRequest&) { return {}; }
+    virtual NativeScriptReferenceResult<NativeScriptPedRef> CreateRandomDriver(const NativeScriptVehicleStateRequest&) { return {}; }
+    virtual NativeScriptServiceResult AssignCarDriveTask(const NativeScriptCarDriveTaskRequest&) { return {}; }
+    virtual NativeScriptServiceResult AssignGoStraightTask(const NativeScriptGoStraightTaskRequest&) { return {}; }
     virtual NativeScriptBooleanResult QueryPlayerState(const NativeScriptPlayerStateQueryRequest&) { return {}; }
     virtual NativeScriptServiceResult ForceWeatherNow(const NativeScriptWeatherRequest&) { return {}; }
     virtual NativeScriptServiceResult ReleaseWeather(const NativeScriptRequestId&) { return {}; }
@@ -577,12 +721,18 @@ public:
     virtual NativeScriptServiceResult SetFadeColour(const NativeScriptFadeColourRequest&) { return {}; }
     virtual NativeScriptServiceResult SetAreaVisible(const NativeScriptAreaRequest&) { return {}; }
     virtual NativeScriptServiceResult SetPlayerControl(const NativeScriptPlayerControlRequest&) { return {}; }
+    virtual NativeScriptServiceResult SetPedHealth(const NativeScriptPedHealthRequest&) { return {}; }
+    virtual NativeScriptServiceResult RemoveAllPedWeapons(const NativeScriptPedQueryRequest&) { return {}; }
+    virtual NativeScriptBooleanResult IsPedSwimming(const NativeScriptPedQueryRequest&) { return {}; }
+    virtual NativeScriptServiceResult SetPlayerNeverTired(const NativeScriptPlayerControlRequest&) { return {}; }
     virtual NativeScriptServiceResult LoadMissionText(const NativeScriptMissionTextRequest&) { return {}; }
+    virtual NativeScriptServiceResult ClearText(const NativeScriptMissionTextRequest&) { return {}; }
     virtual NativeScriptServiceResult UseTextCommands(const NativeScriptTextCommandsRequest&) { return {}; }
     virtual NativeScriptServiceResult SetTextDrawBeforeFade(const NativeScriptRequestId&, bool) { return {}; }
     virtual NativeScriptServiceResult SetTextFont(const NativeScriptRequestId&, std::int32_t) { return {}; }
     virtual NativeScriptServiceResult SetTextStyle(const NativeScriptTextStyleRequest&) { return {}; }
     virtual NativeScriptServiceResult DisplayText(const NativeScriptTextDisplayRequest&) { return {}; }
+    virtual NativeScriptServiceResult PrintNow(const NativeScriptPrintRequest&) { return {}; }
     virtual NativeScriptServiceResult LoadCutscene(const NativeScriptCutsceneRequest&) { return {}; }
     virtual NativeScriptServiceResult StartCutscene(const NativeScriptRequestId&) { return {}; }
     virtual NativeScriptServiceResult ClearCutscene(const NativeScriptRequestId&) { return {}; }
@@ -657,6 +807,8 @@ struct NativeScriptThreadState {
     std::uint8_t StackDepth = 0;
     bool Condition = false;
     std::uint8_t AndOrState = 0;
+    std::int32_t SwitchValue = 0, SwitchRemaining = 0, SwitchDefault = 0;
+    bool SwitchHasDefault = false, SwitchActive = false;
     std::uint64_t Commands = 0;
     std::uint64_t Generation = 1; // owned thread-slot lifetime, incremented on idle reuse
     NativeScriptWriteEvent LastOutputWrite;

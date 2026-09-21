@@ -22,7 +22,9 @@
 #include "app/platform/linux/NativeCutscene.h"
 #include "app/platform/linux/NativeCarRecordings.h"
 #include "app/platform/linux/NativeBeatTrack.h"
+#include "app/platform/linux/NativeMissionAudio.h"
 #include "app/platform/linux/NativeScriptPeds.h"
+#include "app/platform/linux/NativeScriptTrains.h"
 #include "app/platform/linux/NativeScriptObjects.h"
 #include "app/platform/linux/NativeVehiclePool.h"
 #include "app/platform/linux/NativeCarGeneratorResidency.h"
@@ -41,6 +43,7 @@ struct RealtimeScriptWorldPublication {
     std::shared_ptr<const RealtimeGameplayWorld> Collision;
     std::shared_ptr<const NativeCollisionSnapshot> SourceCollision;
     std::shared_ptr<const NativePlacementOverrides> Overrides;
+    std::uint64_t Generation = 0;
 };
 
 struct RealtimeScriptGroup {
@@ -152,9 +155,11 @@ public:
     const NativeScriptClothes& Clothes() const { return m_Clothes; }
     const NativeMissionText& MissionText() const { return m_MissionText; }
     const NativeCutscene& Cutscene() const { return m_Cutscene; }
+    const NativeCarRecordings& CarRecordings() const { return m_CarRecordings; }
     bool ZoneNamesVisible() const { return m_ZoneNamesVisible; }
     const std::array<std::uint8_t, 3>& FadeColour() const { return m_FadeColour; }
     bool PlayerControlEnabled() const { return m_PlayerControlEnabled; }
+    std::optional<NativeScriptPosition> ScriptPlayerPosition() const { return m_ScriptPlayerPosition; }
     bool UpdateStatsVisible() const { return m_UpdateStatsVisible; }
     const NativeScriptObjects& Objects() const { return m_Objects; }
     // Explicit query inputs carry source area/ENEX authority; city unlock is
@@ -211,6 +216,10 @@ public:
     NativeScriptReferenceResult<NativeScriptBlipRef> CreateContactBlip(const NativeScriptContactBlipRequest&) override;
     NativeScriptReferenceResult<NativeScriptBlipRef> CreateCoordinateBlip(const NativeScriptCoordinateBlipRequest&) override;
     NativeScriptServiceResult SetBlipDisplay(const NativeScriptBlipDisplayRequest&) override;
+    NativeScriptServiceResult RemoveBlip(const NativeScriptBlipReferenceRequest&) override;
+    NativeScriptBooleanResult DoesBlipExist(const NativeScriptBlipReferenceRequest&) override;
+    NativeScriptReferenceResult<NativeScriptUserMarkerRef> CreateUserMarker(const NativeScriptUserMarkerRequest&) override;
+    NativeScriptServiceResult RemoveUserMarker(const NativeScriptUserMarkerReferenceRequest&) override;
     NativeScriptServiceResult SetEntryExitFlag(const NativeScriptEntryExitFlagRequest&) override;
     NativeScriptServiceResult SwitchEntryExit(const NativeScriptEntryExitSwitchRequest&) override;
     NativeScriptServiceResult DeactivateGarage(const NativeScriptGarageRequest&) override;
@@ -242,6 +251,7 @@ public:
     NativeScriptBooleanResult AreCarCheatsActivated(const NativeScriptRequestId&) override;
     NativeScriptBooleanResult HasDeathArrestBeenExecuted(const NativeScriptRequestId&) override;
     NativeScriptBooleanResult IsCharDead(const NativeScriptPedQueryRequest&) override;
+    NativeScriptServiceResult SetPedSpeechDisabled(const NativeScriptPedStateRequest&) override;
     NativeScriptBooleanResult IsGarageOpen(const NativeScriptGarageRequest&) override;
     NativeScriptBooleanResult HasCharGotWeapon(const NativeScriptPedWeaponRequest&) override;
     NativeScriptServiceResult RequestModel(const NativeScriptModelRequest&) override;
@@ -249,9 +259,21 @@ public:
     NativeScriptServiceResult MarkModelNoLongerNeeded(const NativeScriptModelRequest&) override;
     NativeScriptServiceResult LoadSpecialCharacter(const NativeScriptSpecialModelRequest&) override;
     NativeScriptBooleanResult HasSpecialCharacterLoaded(const NativeScriptSpecialModelRequest&) override;
+    NativeScriptServiceResult UnloadSpecialCharacter(const NativeScriptSpecialModelRequest&) override;
     NativeScriptServiceResult RequestCarRecording(const NativeScriptCarRecordingRequest&) override;
     NativeScriptBooleanResult HasCarRecordingLoaded(const NativeScriptCarRecordingRequest&) override;
     NativeScriptServiceResult PreloadBeatTrack(const NativeScriptBeatTrackRequest&) override;
+    NativeScriptServiceResult PlayBeatTrack(const NativeScriptRequestId&) override;
+    NativeScriptServiceResult StopBeatTrack(const NativeScriptRequestId&) override;
+    NativeScriptServiceResult BeginSkippableCutscene(const NativeScriptSkipCutsceneRequest&) override;
+    NativeScriptServiceResult EndSkippableCutscene(const NativeScriptRequestId&) override;
+    NativeScriptServiceResult ApplyCameraCommand(const NativeScriptCameraCommandRequest&) override;
+    NativeScriptServiceResult ClearPrints(const NativeScriptRequestId&) override;
+    NativeScriptServiceResult ClearMissionAudio(const NativeScriptRequestId&, std::int32_t slot) override;
+    NativeScriptServiceResult LoadMissionAudio(const NativeScriptMissionAudioRequest&) override;
+    NativeScriptBooleanResult HasMissionAudioLoaded(const NativeScriptRequestId&, std::int32_t slot) override;
+    NativeScriptServiceResult PlayMissionAudio(const NativeScriptRequestId&, std::int32_t slot) override;
+    NativeScriptBooleanResult HasMissionAudioFinished(const NativeScriptRequestId&, std::int32_t slot) override;
     NativeScriptIntegerResult GetBeatTrackStatus(const NativeScriptRequestId&) override;
     NativeScriptBooleanResult AreSubtitlesEnabled(const NativeScriptRequestId&) override;
     NativeScriptServiceResult SetDensityMultiplier(const NativeScriptDensityRequest&) override;
@@ -259,8 +281,32 @@ public:
     NativeScriptReferenceResult<NativeScriptVehicleRef> CreateVehicle(const NativeScriptVehicleCreateRequest&) override;
     NativeScriptServiceResult SetVehicleHeading(const NativeScriptVehicleHeadingRequest&) override;
     NativeScriptServiceResult SetVehicleLights(const NativeScriptVehicleStateRequest&) override;
+    NativeScriptServiceResult SetVehicleCollision(const NativeScriptVehicleStateRequest&) override;
+    NativeScriptServiceResult AddScore(const NativeScriptScoreRequest&) override;
     NativeScriptServiceResult WarpPedIntoVehiclePassenger(const NativeScriptPedVehicleRequest&) override;
+    NativeScriptServiceResult TaskLeaveVehicleImmediately(const NativeScriptPedVehicleRequest&) override;
     NativeScriptReferenceResult<NativeScriptPedRef> CreatePedInsideVehicle(const NativeScriptCreatePedInVehicleRequest&) override;
+    NativeScriptReferenceResult<NativeScriptPedRef> CreatePed(const NativeScriptPedCreateRequest&) override;
+    NativeScriptServiceResult SetFixedCameraPosition(const NativeScriptFixedCameraRequest&) override;
+    NativeScriptServiceResult PointCameraAtPoint(const NativeScriptPointCameraRequest&) override;
+    NativeScriptServiceResult SetWidescreen(const NativeScriptBooleanRequest&) override;
+    NativeScriptVehicleResult GetPedVehicleNoSave(const NativeScriptPedQueryRequest&) override;
+    NativeScriptVehicleStatsResult GetWheelieStats(const NativeScriptVehicleStateRequest&) override;
+    NativeScriptBooleanResult IsVehicleInAirProper(const NativeScriptVehicleStateRequest&) override;
+    NativeScriptBooleanResult IsVehicleDead(const NativeScriptVehicleStateRequest&) override;
+    NativeScriptBooleanResult IsVehiclePlaybackActive(const NativeScriptVehicleStateRequest&) override;
+    NativeScriptServiceResult StartVehiclePlayback(const NativeScriptVehicleStateRequest&) override;
+    NativeScriptReferenceResult<NativeScriptVehicleRef> CreateMissionTrain(const NativeScriptTrainCreateRequest&) override;
+    NativeScriptServiceResult SetTrainSpeed(const NativeScriptTrainSpeedRequest&, bool cruise) override;
+    NativeScriptServiceResult DeleteMissionTrains(const NativeScriptRequestId&) override;
+    NativeScriptCarModelResult GetRandomResidentCarModel(const NativeScriptRequestId&, bool normalOnly) override;
+    NativeScriptServiceResult MarkPedNoLongerNeeded(const NativeScriptPedQueryRequest&) override;
+    NativeScriptServiceResult MarkVehicleNoLongerNeeded(const NativeScriptVehicleStateRequest&) override;
+    NativeScriptServiceResult DeletePed(const NativeScriptPedQueryRequest&) override;
+    NativeScriptServiceResult DeleteVehicle(const NativeScriptVehicleStateRequest&) override;
+    NativeScriptReferenceResult<NativeScriptPedRef> CreateRandomDriver(const NativeScriptVehicleStateRequest&) override;
+    NativeScriptServiceResult AssignCarDriveTask(const NativeScriptCarDriveTaskRequest&) override;
+    NativeScriptServiceResult AssignGoStraightTask(const NativeScriptGoStraightTaskRequest&) override;
     struct PendingScriptModel {
         NativeScriptRequestId Id;
         std::int32_t Model = 0;
@@ -279,12 +325,18 @@ public:
     NativeScriptServiceResult SetFadeColour(const NativeScriptFadeColourRequest&) override;
     NativeScriptServiceResult SetAreaVisible(const NativeScriptAreaRequest&) override;
     NativeScriptServiceResult SetPlayerControl(const NativeScriptPlayerControlRequest&) override;
+    NativeScriptServiceResult SetPedHealth(const NativeScriptPedHealthRequest&) override;
+    NativeScriptServiceResult RemoveAllPedWeapons(const NativeScriptPedQueryRequest&) override;
+    NativeScriptBooleanResult IsPedSwimming(const NativeScriptPedQueryRequest&) override;
+    NativeScriptServiceResult SetPlayerNeverTired(const NativeScriptPlayerControlRequest&) override;
     NativeScriptServiceResult LoadMissionText(const NativeScriptMissionTextRequest&) override;
+    NativeScriptServiceResult ClearText(const NativeScriptMissionTextRequest&) override;
     NativeScriptServiceResult UseTextCommands(const NativeScriptTextCommandsRequest&) override;
     NativeScriptServiceResult SetTextDrawBeforeFade(const NativeScriptRequestId&, bool) override;
     NativeScriptServiceResult SetTextFont(const NativeScriptRequestId&, std::int32_t) override;
     NativeScriptServiceResult SetTextStyle(const NativeScriptTextStyleRequest&) override;
     NativeScriptServiceResult DisplayText(const NativeScriptTextDisplayRequest&) override;
+    NativeScriptServiceResult PrintNow(const NativeScriptPrintRequest&) override;
     NativeScriptServiceResult LoadCutscene(const NativeScriptCutsceneRequest&) override;
     NativeScriptServiceResult StartCutscene(const NativeScriptRequestId&) override;
     NativeScriptServiceResult ClearCutscene(const NativeScriptRequestId&) override;
@@ -352,7 +404,9 @@ private:
     NativeCutscene m_Cutscene;
     NativeCarRecordings m_CarRecordings;
     NativeBeatTrack m_BeatTrack;
+    NativeMissionAudio m_MissionAudio;
     NativeScriptPeds m_ScriptPeds;
+    NativeScriptTrains m_ScriptTrains;
     float m_CarDensityMultiplier = 1.0f, m_PedDensityMultiplier = 1.0f;
     bool m_RandomTrains = true;
     bool m_ZoneNamesVisible = true;
@@ -361,15 +415,31 @@ private:
     bool m_CarCheatsActivated = false;
     bool m_DeathArrestExecuted = false;
     std::array<bool, 47> m_PlayerWeapons{};
+    struct UserMarker { NativeScriptPosition Position; std::int32_t Colour = 0; bool Used = false; };
+    std::array<UserMarker, 5> m_UserMarkers{};
     std::optional<PendingScriptModel> m_PendingModel;
     std::map<std::int32_t, std::shared_ptr<const WorldShotScene>> m_ScriptModels;
     std::map<std::int32_t, std::shared_ptr<const NativeCollisionModel>> m_ScriptModelCollisions;
     std::map<std::int32_t, std::int32_t> m_ScriptVehicleLights;
+    std::map<std::int32_t, bool> m_ScriptVehicleCollision;
     std::optional<NativeScriptVehicleRef> m_PlayerScriptVehicle;
     std::int32_t m_PlayerScriptSeat = -1;
+    std::optional<NativeScriptPosition> m_ScriptPlayerPosition;
+    std::map<std::int32_t, NativeScriptCarDriveTaskRequest> m_ScriptCarDriveTasks;
+    std::map<std::int32_t, NativeScriptGoStraightTaskRequest> m_ScriptGoStraightTasks;
+    std::map<std::int32_t, bool> m_ScriptPedSpeechDisabled;
+    NativeScriptPosition m_ScriptCameraPosition{}, m_ScriptCameraOffset{}, m_ScriptCameraTarget{};
+    std::int32_t m_ScriptCameraSwitchType = 0;
+    bool m_ScriptCameraFixed = false;
+    bool m_ScriptWidescreen = false;
     std::array<bool, 82> m_StreamedNoLongerNeeded{};
     bool m_PlayerControlEnabled = true;
+    float m_PlayerHealth = 100.0f;
+    bool m_PlayerNeverTired = false;
     bool m_UpdateStatsVisible = true;
+    std::optional<std::int32_t> m_CutsceneSkipTarget;
+    std::optional<NativeScriptPrintRequest> m_LastPrint;
+    std::map<std::uint16_t, NativeScriptCameraCommandRequest> m_ScriptCameraCommands;
     std::array<std::uint8_t, 3> m_FadeColour{};
     NativeScriptObjects m_Objects;
     NativeVehiclePool m_Vehicles;

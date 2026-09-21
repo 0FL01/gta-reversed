@@ -71,6 +71,7 @@ void PrintUsage(const char* prog) {
                       "  --demo-curb: real street curb walk/sprint up/down regression replay.\n"
                       "  --player-cj: actual modular CJ with startup outfit (not SCM boot).\n"
                       "  --new-game: bounded real SCM startup; unsupported mission services exit 1.\n"
+                      "  --boot-gate: with --new-game, exit 0 at first source mission completion/live control.\n"
                       "  WASD move/drive, arrows orbit, Shift sprint, Space jump/handbrake, Ctrl brake,\n"
                       "  F enter/exit, Tab free camera (Q/E descend/ascend), Esc quit.\n",
                       prog ? prog : "mad-sa-linux");

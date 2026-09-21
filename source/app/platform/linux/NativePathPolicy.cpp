@@ -6,7 +6,7 @@ NativeScriptServiceResult NativePathPolicy::Add(const NativeScriptPathPolicyRequ
     for (float value : request.Coordinates) if (!std::isfinite(value)) {
         return {NativeScriptServiceStatus::Error, "nonfinite path policy box"};
     }
-    if (request.Kind > NativePathPolicyKind::PedOff) {
+    if (request.Kind > NativePathPolicyKind::PedOriginal) {
         return {NativeScriptServiceStatus::Error, "unknown path policy kind"};
     }
     NativePathPolicyEntry entry;

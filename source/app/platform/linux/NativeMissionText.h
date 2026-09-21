@@ -36,6 +36,7 @@ public:
     static constexpr bool RuntimePresentation = false;
     bool LoadBeforeWorker(const char* gameDir, std::string& error);
     void BeginFrame();
+    void ClearDraws() { m_DrawCount = 0; }
     NativeScriptServiceResult Select(const std::array<char, 8>& name);
     NativeScriptServiceResult SetCommandsEnabled(bool enabled);
     NativeScriptServiceResult SetDrawBeforeFade(bool enabled);
@@ -43,6 +44,8 @@ public:
     NativeScriptServiceResult SetStyle(std::uint16_t opcode, const std::array<float, 2>& floats,
         const std::array<std::int32_t, 5>& integers);
     NativeScriptServiceResult Display(float x, float y, const std::array<char, 8>& key);
+    NativeScriptServiceResult Remove(const std::array<char, 8>& key);
+    bool HasActiveKey(const std::array<char, 8>& key) const;
     const std::vector<NativeMissionTextTable>& Tables() const { return m_Tables; }
     const std::array<char, 8>& Active() const { return m_Active; }
     std::uint64_t Revision() const { return m_Revision; }

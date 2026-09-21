@@ -118,3 +118,15 @@ NativeScriptServiceResult NativeBeatTrack::Preload(std::int32_t scriptTrack) {
     m_State = {scriptTrack, sourceTrack, lookup.Offset, lookup.Size, Hash(info.data(), info.size()), 2};
     return {NativeScriptServiceStatus::Ready, {}};
 }
+
+NativeScriptServiceResult NativeBeatTrack::Play() {
+    if (!m_Ready || m_State.Status != 2 || m_State.SourceTrack < 0)
+        return {NativeScriptServiceStatus::Error, "beat track is not preloaded"};
+    m_State.PlaybackRequested = true;
+    return {NativeScriptServiceStatus::Ready, {}};
+}
+
+NativeScriptServiceResult NativeBeatTrack::Stop() {
+    m_State.PlaybackRequested = false;
+    return {NativeScriptServiceStatus::Ready, {}};
+}

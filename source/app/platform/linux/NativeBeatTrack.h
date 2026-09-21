@@ -13,6 +13,7 @@ struct NativeBeatTrackState {
     std::uint32_t Size = 0;
     std::uint64_t InfoHash = 0;
     std::uint8_t Status = 0;
+    bool PlaybackRequested = false;
 };
 
 class NativeBeatTrack {
@@ -21,6 +22,8 @@ public:
 
     bool LoadBeforeWorker(const char* gameDir, std::string& error);
     NativeScriptServiceResult Preload(std::int32_t scriptTrack);
+    NativeScriptServiceResult Play();
+    NativeScriptServiceResult Stop();
     const NativeBeatTrackState& State() const { return m_State; }
 
 private:

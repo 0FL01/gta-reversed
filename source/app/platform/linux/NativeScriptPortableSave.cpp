@@ -137,6 +137,8 @@ void WriteThread(Writer& writer, const NativeScriptThreadState& thread) {
     writer.I32(thread.StreamedIndex); writer.U64(thread.StreamedGeneration);
     for (const auto value : thread.ReturnStack) writer.U32(value);
     writer.U8(thread.StackDepth); writer.Bool(thread.Condition); writer.U8(thread.AndOrState);
+    writer.I32(thread.SwitchValue); writer.I32(thread.SwitchRemaining); writer.I32(thread.SwitchDefault);
+    writer.Bool(thread.SwitchHasDefault); writer.Bool(thread.SwitchActive);
     writer.U64(thread.Commands); writer.U64(thread.Generation); WriteEvent(writer, thread.LastOutputWrite);
     writer.U32(thread.LastInstructionIP); writer.U16(thread.LastOpcode);
 }
@@ -156,6 +158,8 @@ bool ReadThread(Reader& reader, NativeScriptThreadState& thread) {
         !reader.I32(thread.StreamedIndex) || !reader.U64(thread.StreamedGeneration)) return false;
     for (auto& value : thread.ReturnStack) if (!reader.U32(value)) return false;
     return reader.U8(thread.StackDepth) && reader.Bool(thread.Condition) && reader.U8(thread.AndOrState) &&
+        reader.I32(thread.SwitchValue) && reader.I32(thread.SwitchRemaining) && reader.I32(thread.SwitchDefault) &&
+        reader.Bool(thread.SwitchHasDefault) && reader.Bool(thread.SwitchActive) &&
         reader.U64(thread.Commands) && reader.U64(thread.Generation) && ReadEvent(reader, thread.LastOutputWrite) &&
         reader.U32(thread.LastInstructionIP) && reader.U16(thread.LastOpcode);
 }
@@ -301,6 +305,7 @@ bool NativeScriptPortableSave::ValidateGraph(const NativeScriptSession& session,
     for (std::size_t i = 0; i < session.m_Threads.size(); ++i) {
         const auto& thread = session.m_Threads[i];
         if (!thread.Generation || thread.StackDepth > thread.ReturnStack.size() || thread.AndOrState > 28 ||
+            thread.SwitchRemaining < 0 || thread.SwitchRemaining > 68 || (!thread.SwitchActive && thread.SwitchRemaining) ||
             thread.TimeMs != session.m_State.TimeMs || thread.LastOutputWrite.Sequence > thread.Commands)
             return reject("portable thread scalar state is invalid");
         for (std::size_t stack = thread.StackDepth; stack < thread.ReturnStack.size(); ++stack)

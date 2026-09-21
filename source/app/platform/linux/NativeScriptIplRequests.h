@@ -7,7 +7,7 @@
 #include <span>
 
 struct NativeScriptIplRequestState {
-    std::array<char, 8> Name{};
+    std::array<char, 16> Name{};
     bool Requested = false;
     bool operator==(const NativeScriptIplRequestState&) const = default;
 };

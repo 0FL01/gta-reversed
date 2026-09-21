@@ -36,9 +36,13 @@ int main(int argc, char** argv) {
     Check(text.SetFont(1).Status == NativeScriptServiceStatus::Ready && text.Font() == 1 && text.Revision() == 4);
     Check(text.SetStyle(0x033F,{0.5f,1.25f},{}).Status == NativeScriptServiceStatus::Ready &&
         text.Style().ScaleX == 0.5f && text.Style().ScaleY == 1.25f && text.Revision() == 5);
+    auto sourceDual = Name("DUAL");
+    sourceDual[5] = '|';
+    Check(text.Select(sourceDual).Status == NativeScriptServiceStatus::Ready &&
+        text.Active() == Name("DUAL") && text.Revision() == 6);
     const auto active = text.Active();
     Check(text.Select(Name("MISSING")).Status == NativeScriptServiceStatus::Error &&
-        text.Active() == active && text.Revision() == 5);
+        text.Active() == active && text.Revision() == 6);
     std::cout << "native-mission-text-ok checks=" << s_Checks
               << " tables=127 active=INTRO1 presentation=0\n";
 }

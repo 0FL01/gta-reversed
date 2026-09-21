@@ -689,6 +689,34 @@ void NumericAndRelationships() {
     LoadFixture(session, services, code);
     Check(session.Run(services, 50).Status == Status::Waiting && session.State().Commands == 15, "AND with NOT condition and untaken conditional branch");
     Check(session.State().Condition && session.State().AndOrState == 0 && session.State().Locals[0] == 5 && std::bit_cast<float>(session.State().Locals[1]) == 3.5f, "numeric bit-preserving assignments and compare aggregation");
+    code.clear();
+    Op(code, 6); Var(code, 0, false); I8(code, 1);
+    Op(code, 6); Var(code, 1, false); I8(code, 0);
+    Op(code, 6); Var(code, 2, false); I32(code, 43201);
+    Op(code, 0x008A); Var(code, 8); Array(code, false, 1, false, 0, 2);
+    Op(code, 1); I8(code, 0);
+    LoadFixture(session, services, code);
+    std::int32_t copied = 0;
+    Check(session.Run(services, 50).Status == Status::Waiting && session.ReadGlobal(8, copied) && copied == 43201,
+        "008A copies indexed mission-style local array value to global output");
+    code.clear();
+    Op(code, 4); Var(code, 12); I8(code, 1);
+    Op(code, 6); Var(code, 0, false); I8(code, 1);
+    Op(code, 0x008A); Array(code, true, 16, true, 12, 2); Var(code, 0, false);
+    Op(code, 0x00D6); I8(code, 0);
+    Op(code, 0x0038); Array(code, true, 16, true, 12, 2); I8(code, 0);
+    const auto branchAt = code.size();
+    Op(code, 0x004D); I32(code, 0);
+    Op(code, 4); Var(code, 8); I8(code, 99);
+    const auto waitAt = code.size();
+    Op(code, 1); I8(code, 0);
+    Patch(code, branchAt + 3, std::uint32_t(FixtureCode + waitAt));
+    LoadFixture(session, services, code);
+    std::int32_t indexed = 0, skipped = 0;
+    Check(session.Run(services, 50).Status == Status::Waiting &&
+        session.ReadGlobal(20, indexed) && indexed == 1 &&
+        session.ReadGlobal(8, skipped) && skipped == 0,
+        "008A global array result drives false comparison branch without skipped write");
     code.clear(); Op(code, 0x801A); I8(code, 4);
     LoadFixture(session, services, code);
     const auto malformedNot = session.Step(services);

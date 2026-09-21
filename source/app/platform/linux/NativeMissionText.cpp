@@ -47,6 +47,13 @@ std::uint32_t KeyHash(const std::array<char, 8>& key) {
     }
     return hash;
 }
+bool EqualCString(const std::array<char, 8>& left, const std::array<char, 8>& right) {
+    for (std::size_t i = 0; i < left.size(); ++i) {
+        if (left[i] != right[i]) return false;
+        if (!left[i]) return true;
+    }
+    return true;
+}
 }
 
 bool NativeMissionText::LoadBeforeWorker(const char* gameDir, std::string& error) {
@@ -126,12 +133,14 @@ void NativeMissionText::BeginFrame() {
 
 NativeScriptServiceResult NativeMissionText::Select(const std::array<char, 8>& name) {
     if (!m_Loaded || !NameValid(name)) return {NativeScriptServiceStatus::Error, "invalid mission text selection"};
-    const auto found = std::ranges::find(m_Tables, name, &NativeMissionTextTable::Name);
+    const auto found = std::ranges::find_if(m_Tables, [&](const auto& table) {
+        return EqualCString(table.Name, name);
+    });
     if (found == m_Tables.end()) return {NativeScriptServiceStatus::Error, "mission text table is absent"};
     if (m_Revision == std::numeric_limits<std::uint64_t>::max()) {
         return {NativeScriptServiceStatus::Error, "mission text revision exhausted"};
     }
-    m_Active = name;
+    m_Active = found->Name;
     ++m_Revision;
     return {NativeScriptServiceStatus::Ready, {}};
 }
@@ -237,4 +246,30 @@ NativeScriptServiceResult NativeMissionText::Display(float x, float y, const std
     m_Draws[m_DrawCount++] = {key, x, y, m_Style};
     ++m_Revision;
     return {NativeScriptServiceStatus::Ready, {}};
+}
+
+NativeScriptServiceResult NativeMissionText::Remove(const std::array<char, 8>& key) {
+    if (!m_Loaded) return {NativeScriptServiceStatus::Error, "mission text is not loaded"};
+    if (m_Revision == std::numeric_limits<std::uint64_t>::max())
+        return {NativeScriptServiceStatus::Error, "mission text revision exhausted"};
+    // CMessages::ClearThisPrint is void. TheText may resolve a key whose text
+    // is not in the currently selected mission table; an absent queued print
+    // is an intentional no-op, not a service failure.
+    std::size_t out = 0;
+    for (std::size_t i = 0; i < m_DrawCount; ++i) {
+        if (m_Draws[i].Key != key) m_Draws[out++] = m_Draws[i];
+    }
+    m_DrawCount = out;
+    ++m_Revision;
+    return {NativeScriptServiceStatus::Ready, {}};
+}
+
+bool NativeMissionText::HasActiveKey(const std::array<char, 8>& key) const {
+    const auto hash = KeyHash(key);
+    const auto table = std::ranges::find(m_Tables, m_Active, &NativeMissionTextTable::Name);
+    if (table != m_Tables.end() && std::ranges::find(table->KeyHashes, hash) != table->KeyHashes.end())
+        return true;
+    constexpr std::array<char, 8> mainName{'M', 'A', 'I', 'N'};
+    const auto main = std::ranges::find(m_Tables, mainName, &NativeMissionTextTable::Name);
+    return main != m_Tables.end() && std::ranges::find(main->KeyHashes, hash) != main->KeyHashes.end();
 }

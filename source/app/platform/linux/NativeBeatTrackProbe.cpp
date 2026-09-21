@@ -15,7 +15,9 @@ int main(int argc, char** argv) {
         const auto before = owner.State();
         if (owner.Preload(14).Status != NativeScriptServiceStatus::Error || owner.State().InfoHash != before.InfoHash)
             throw std::runtime_error("invalid beat-track request changed owner");
-        std::printf("native-beat-track-ok checks=7 script=10 source=184 status=2 metadata=%llu playback=0\n",
+        if (owner.Play().Status != NativeScriptServiceStatus::Ready || !owner.State().PlaybackRequested)
+            throw std::runtime_error("source beat playback request");
+        std::printf("native-beat-track-ok checks=8 script=10 source=184 status=2 metadata=%llu playback-request=1 audio=0\n",
             static_cast<unsigned long long>(owner.State().InfoHash));
         return 0;
     } catch (const std::exception& exception) {

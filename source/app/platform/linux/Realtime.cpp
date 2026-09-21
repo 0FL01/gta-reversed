@@ -476,14 +476,24 @@ struct LiveWorld {
             uploadMs += realtime_streaming::Milliseconds() - start;
             if (pending->gpu.complete) {
                 if (scriptHost) {
+                    struct Cleanup final : NativeCarGeneratorResidencyCleanup {
+                        const NativeVehiclePool& Pool;
+                        explicit Cleanup(const NativeVehiclePool& pool) : Pool(pool) {}
+                        bool Complete(const NativeCarGeneratorRemovalObligation& obligation) const noexcept override {
+                            return obligation.Vehicle.Value == -1 || !Pool.Resolve(obligation.Vehicle);
+                        }
+                    } cleanup(scriptHost->Vehicles());
                     const auto residency = scriptHost->ReconcileCarGeneratorsBeforeWorldCommit(
-                        pending->cpu->Generation, pending->cpu->SourceCollision);
-                    if (residency.Status != NativeCarGeneratorResidencyStatus::Ready) {
-                        // No removal/model-retention owner yet. Never publish
-                        // a new world beside old definitions or acknowledge cleanup.
-                        std::printf("play-cargen-residency-terminal status=%s generation=%llu removals=%zu message=%s\n",
-                            residency.Status == NativeCarGeneratorResidencyStatus::PendingCleanup ? "Unsupported" : "Error",
-                            static_cast<unsigned long long>(pending->cpu->Generation), residency.Removals.size(), residency.Detail.c_str());
+                        pending->cpu->Generation, pending->cpu->SourceCollision, &cleanup);
+                    if (residency.Status == NativeCarGeneratorResidencyStatus::PendingCleanup) {
+                        // Keep the old world and complete upload resident until
+                        // the exact vehicle reference disappears from the pool.
+                        return true;
+                    }
+                    if (residency.Status == NativeCarGeneratorResidencyStatus::Error) {
+                        std::printf("play-cargen-residency-error generation=%llu removals=%zu message=%s\n",
+                            static_cast<unsigned long long>(pending->cpu->Generation),
+                            residency.Removals.size(), residency.Detail.c_str());
                         return false;
                     }
                     auto collision=pending->cpu->BorrowedCollision;
@@ -495,6 +505,7 @@ struct LiveWorld {
                     publication.SourceCollision=pending->cpu->SourceCollision;
                     publication.Overrides=pending->cpu->Overrides;
                     publication.Frame=pending->cpu->Frame;
+                    publication.Generation=pending->cpu->Generation;
                     std::string adoptError;
                     if(!scriptHost->AdoptLiveWorld(pending->cpu->Generation,std::move(publication),adoptError)){
                         std::printf("play-fail adopt live world: %s\n",adoptError.c_str());return false;
@@ -586,6 +597,26 @@ static bool ScriptFault(const RealtimeScriptHost& host, const NativeScriptResult
             host.StuntJumps().Entries().size(),host.CarGenerators().Plates().size(),host.SetPieces().Entries().size(),
             static_cast<unsigned long long>(host.ZonePopulation().Revision()),pickups,
             NativeStuntJumps::Coverage.RuntimeUpdate, NativeStuntJumps::Coverage.SaveLoad);
+        const auto scriptPed = host.ScriptPlayerPosition().value_or(NativeScriptPosition{});
+        std::printf("play-script-live-state script-ped=%.3f,%.3f,%.3f control=%d fade=%.3f fading=%d\n",
+            scriptPed.X, scriptPed.Y, scriptPed.Z, host.PlayerControlEnabled(), host.State().Fade.Alpha,
+            host.State().Fade.Fading ? 1 : 0);
+        if (thread.Locals.size() >= 3) {
+            std::printf("play-script-locals local0=%u local1=%u local2=%u count=%zu\n",
+                thread.Locals[0], thread.Locals[1], thread.Locals[2], thread.Locals.size());
+        }
+        for (const auto& value : threads) {
+            if (!value.Active || value.MissionIndex < 0 || value.Locals.size() <= 163) continue;
+            std::int32_t audioId = 0, audioIndex = 0;
+            std::int32_t audioState = 0, audioPed = 0;
+            (void)host.Session().ReadGlobal(5104, audioId);
+            (void)host.Session().ReadGlobal(5152, audioIndex);
+            (void)host.Session().ReadGlobal(std::uint16_t(5048 + audioIndex * 4), audioState);
+            (void)host.Session().ReadGlobal(std::uint16_t(5064 + audioIndex * 4), audioPed);
+            std::printf("play-script-mission-audio mission=%d index=%u local157=%u local163=%u global5104=%d global5152=%d state=%d ped=%d\n",
+                value.MissionIndex, value.Locals[156], value.Locals[157], value.Locals[163],
+                audioId, audioIndex, audioState, audioPed);
+        }
     }
     std::fflush(stdout);
     return true;
@@ -628,7 +659,7 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
     bool demoCurb = false;
     bool freecam = false;
     bool playerCj = false;
-    bool newGame = false, explicitCamera = false, explicitHour = false;
+    bool newGame = false, bootGate = false, explicitCamera = false, explicitHour = false;
     bool freezeTime = false;
     float hour = 12.0f;
     const char* weather = "EXTRASUNNY_LA";
@@ -655,6 +686,8 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             playerCj = true;
         } else if (std::strcmp(argv[i], "--new-game") == 0) {
             newGame = true;
+        } else if (std::strcmp(argv[i], "--boot-gate") == 0) {
+            bootGate = true;
         } else if (std::strcmp(argv[i], "--freeze-time") == 0) {
             freezeTime = true;
         } else if (std::strcmp(argv[i], "--hour") == 0) {
@@ -685,6 +718,10 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
                 return 1;
             }
         }
+    }
+    if (bootGate && !newGame) {
+        std::printf("play-fail --boot-gate requires --new-game\n");
+        return 1;
     }
     if (newGame && (demo || demoCurb || playerCj || freecam || explicitCamera || explicitHour || freezeTime)) {
         std::printf("play-fail --new-game conflicts with --demo/--demo-curb/--player-cj/--freecam/--cam/--hour/--freeze-time\n");
@@ -928,6 +965,7 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
                             "stale world packet retired; exact script center pending"};
                     }
                     publication.Center = request.Position;
+                    publication.Generation = cpu->Generation;
                     publication.Frame = cpu->Frame;
                     publication.Overrides = cpu->Overrides;
                     publication.Scene = std::make_shared<const WorldShotScene>(cpu->Scene);
@@ -952,6 +990,7 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
     uint64_t frames = 0, reportFrames = 0;
     uint64_t scriptExecuted = 0;
     NativeScriptStatus lastScriptStatus = NativeScriptStatus::Waiting;
+    bool bootGateSawMission2 = false, bootGateSingleStep = false;
     double reportMaxFrameMs = 0, reportMaxStreamMs = 0;
     bool running = true;
     bool demoJumped = false;
@@ -1010,7 +1049,14 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
                 std::printf("play-fail script clock: %s\n", gameplayError.c_str());
                 return 1;
             }
-            const auto scriptResult = scriptHost.RunPass(scriptQuota);
+            if (bootGate) {
+                for (const auto& thread : scriptHost.Session().Threads()) {
+                    if (!thread.Active || thread.MissionIndex != 2) continue;
+                    bootGateSawMission2 = true;
+                    bootGateSingleStep |= thread.IP >= 207000;
+                }
+            }
+            const auto scriptResult = scriptHost.RunPass(bootGateSingleStep ? 1 : scriptQuota);
             scriptExecuted += scriptResult.Executed;
             lastScriptStatus = scriptResult.Status;
             if (scriptResult.Status == NativeScriptStatus::Pending) {
@@ -1051,6 +1097,18 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             }
             if (ScriptFault(scriptHost, scriptResult)) {
                 return 1; // no physics, presentation, retry, or main-thread resumption after fault
+            }
+            if (bootGate && bootGateSawMission2) {
+                const bool mission2Active = std::ranges::any_of(scriptHost.Session().Threads(), [](const auto& thread) {
+                    return thread.Active && thread.MissionIndex == 2;
+                });
+                if (!mission2Active && scriptHost.PlayerControlEnabled() &&
+                    scriptHost.State().Fade.Alpha <= 0.0f && !scriptHost.State().Fade.Fading) {
+                    const auto position = scriptHost.ScriptPlayerPosition().value_or(NativeScriptPosition{});
+                    std::printf("play-boot-gate-ok mission0=done mission2=done control=1 fade=0 script-ped=%.3f,%.3f,%.3f no-fault=1\n",
+                        position.X, position.Y, position.Z);
+                    return 0;
+                }
             }
         }
         paused = false;
@@ -1397,12 +1455,15 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             return thread.Active && thread.MissionIndex >= 0;
         });
         const auto& fade = session.State().Fade;
+        const auto recording = scriptHost.CarRecordings().Inspect();
+        const auto scriptPed = scriptHost.ScriptPlayerPosition();
         const bool live = !mission0Active && session.State().Commands >= 451 &&
             scriptHost.PlayerControlEnabled() && !fade.Fading && fade.Alpha <= 0.0f &&
             lastScriptStatus == NativeScriptStatus::Waiting && !session.PassOutstanding();
         std::printf("play-script-live ready=%d main=%llu active=%zu missions=%zu mission0=%d "
             "mission-index=%d mission-ip=%u mission-commands=%llu control=%d fade=%.0f/%u cutscene=%d/%d "
-            "commands=%llu draws=%zu status=%s world-phase=%u vehicles=%zu\n",
+            "commands=%llu draws=%zu status=%s world-phase=%u vehicles=%zu time=%u loop=%d/%d "
+            "recording=%d:%d/%.0f/%.0f script-ped=%.1f,%.1f,%.1f\n",
             live, static_cast<unsigned long long>(session.State().Commands), active, missions, mission0Active,
             mission == session.Threads().end() ? -1 : mission->MissionIndex,
             mission == session.Threads().end() ? 0 : mission->IP,
@@ -1410,7 +1471,14 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             scriptHost.PlayerControlEnabled(), fade.Alpha, fade.Direction,
             scriptHost.Cutscene().Loaded(), scriptHost.Cutscene().Started(), static_cast<unsigned long long>(scriptExecuted),
             scriptHost.MissionText().Draws().size(), lastScriptStatus == NativeScriptStatus::Waiting ? "Waiting" : "Other",
-            unsigned(scriptHost.WorldTransaction().Phase),scriptHost.Vehicles().Census().Alive);
+            unsigned(scriptHost.WorldTransaction().Phase),scriptHost.Vehicles().Census().Alive,
+            session.State().TimeMs,
+            mission == session.Threads().end() ? 0 : mission->Locals[39],
+            mission == session.Threads().end() ? 0 : mission->Locals[40],
+            recording.Recording, recording.Vehicle.Value, recording.RunningTime, float(recording.EndTime),
+            scriptPed ? scriptPed->X : gameplay.State().PedRoot.X,
+            scriptPed ? scriptPed->Y : gameplay.State().PedRoot.Y,
+            scriptPed ? scriptPed->Z : gameplay.State().PedRoot.Z);
         if (!live) return 1;
     }
     std::printf("play-ok swaps=%llu seconds=%.3f sceneUpdates=%d\n",

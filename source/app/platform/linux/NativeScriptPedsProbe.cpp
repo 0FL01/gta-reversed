@@ -29,6 +29,23 @@ int main() {
     Check(peds.WarpPassenger({1}, vehicle, 2, position, error) ==
         NativeScriptPedStatus::SeatUnavailable && peds.Revision() == before + 1,
         "duplicate passenger atomic rejection");
+    NativeScriptPedRef onFoot;
+    Check(peds.CreateOnFoot(4, 7, {4, 5, 6}, true, onFoot, error) == NativeScriptPedStatus::Ok &&
+        peds.Resolve(onFoot) && !peds.Resolve(onFoot)->InVehicle,
+        "on-foot mission ped value owner");
+    NativeScriptPedRef passenger;
+    Check(peds.CreatePassenger(23, 290, vehicle, 0, position, true, passenger, error) ==
+        NativeScriptPedStatus::Ok && peds.Resolve(passenger) && peds.Resolve(passenger)->Seat == 0,
+        "create mission passenger");
+    NativeScriptPeds cycling;
+    bool cycled = true;
+    for (int i = 0; i < 300; ++i) {
+        NativeScriptPedRef transient;
+        cycled = cycled && cycling.CreateDriver(4, 7, {0x201}, position, true, transient, error) ==
+            NativeScriptPedStatus::Ok;
+        cycled = cycled && cycling.Release(transient, error) == NativeScriptPedStatus::Ok;
+    }
+    Check(cycled && cycling.Alive() == 0, "source 7-bit generation wraps under repeated helper allocation");
     Check(!NativeScriptPeds::RuntimePresentation, "no presentation claim");
     std::printf("native-script-peds-ok checks=%d capacity=%zu driver=%d passenger-seat=2 presentation=0\n",
         g_Checks, NativeScriptPeds::Capacity, driver.Value);

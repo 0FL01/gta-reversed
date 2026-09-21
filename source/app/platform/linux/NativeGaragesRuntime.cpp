@@ -34,18 +34,6 @@ NativeGarageTidyPlan NativeGaragesRuntime::PlanTidy(const NativeGarageEntry& gar
         plan.Requirement=NativeGarageTidyRequirement::VehicleAuthority;
         return plan;
     }
-    if (tidyClose) {
-        if (!vehicles.Census().Alive) {
-            plan.Status = NativeScriptServiceStatus::Ready;
-            plan.Requirement = NativeGarageTidyRequirement::None;
-            return plan; // Source collision/destruction loops are vacuous for the qualified empty pool.
-        }
-        // TidyUpGarageClose needs source COL spheres and door-state destruction
-        // ordering. This slice implements only the selected counter-12 far body.
-        plan.Status=NativeScriptServiceStatus::Unsupported;
-        plan.Requirement=NativeGarageTidyRequirement::NearVehicleCollision;
-        return plan;
-    }
     const auto inside=[&](NativeCollisionVector point) {
         const float x=point[0]-garage.Origin[0],y=point[1]-garage.Origin[1];
         const float a=x*garage.DirectionA[0]+y*garage.DirectionA[1];
@@ -53,6 +41,19 @@ NativeGarageTidyPlan NativeGaragesRuntime::PlanTidy(const NativeGarageEntry& gar
         return point[2]>=garage.Origin[2] && point[2]<=garage.Top &&
             a>=0.0f && a<=garage.Width && b>=0.0f && b<=garage.Height;
     };
+    if (tidyClose) {
+        for (std::size_t slot = 0; slot < NativeVehiclePool::Capacity; ++slot) {
+            const auto* vehicle = vehicles.AtSlot(slot);
+            if (vehicle && vehicle->State.InWorld && inside(vehicle->State.Matrix.Position)) {
+                plan.Status = NativeScriptServiceStatus::Unsupported;
+                plan.Requirement = NativeGarageTidyRequirement::NearVehicleCollision;
+                return plan;
+            }
+        }
+        plan.Status = NativeScriptServiceStatus::Ready;
+        plan.Requirement = NativeGarageTidyRequirement::None;
+        return plan; // Source collision/destruction loops are vacuous in the qualified garage volume.
+    }
     for (std::size_t slot=NativeVehiclePool::Capacity;--slot>0;) {
         ++plan.Examined;
         const auto* vehicle=vehicles.AtSlot(slot);

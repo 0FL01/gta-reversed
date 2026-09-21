@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <atomic>
 #include <bit>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <exception>
@@ -29,6 +30,15 @@ constexpr uint32 MainCapacity = 200000;
 constexpr uint32 ExternalBase = 300000;
 constexpr uint32 ExternalStride = 65536;
 std::atomic<uint64> s_NextSession{1};
+
+bool EqualNameNoCase(const std::array<char, 8>& left, const std::array<char, 8>& right) {
+    for (std::size_t i = 0; i < left.size(); ++i) {
+        if (std::tolower(static_cast<unsigned char>(left[i])) !=
+            std::tolower(static_cast<unsigned char>(right[i]))) return false;
+        if (!left[i] && !right[i]) return true;
+    }
+    return true;
+}
 
 // Explicit little-endian reads avoid alignment, aliasing and host-endian UB.
 struct Reader {
@@ -606,7 +616,39 @@ bool NativeScriptSession::Decode(std::size_t thread, uint32 ip, Instruction& d, 
                 }
                 d.ArrayCounts[i] = uint8(count);
                 d.ArrayFlags[i] = uint8(flags);
-                if (validateRuntimeValues) { error = "unsupported runtime string array"; return false; }
+                const uint32 length = tag >= 18 ? 16 : 8;
+                if (!count || (flags & 0x7F) != (length == 16 ? 3u : 2u)) {
+                    error = "invalid string array metadata";
+                    return false;
+                }
+                if (!validateRuntimeValues) return true;
+                const bool global = tag == 12 || tag == 18;
+                const bool globalIndex = (flags & 0x80) != 0;
+                int32 index = 0;
+                if (globalIndex) {
+                    if (!IsGlobal(uint16(indexVar))) { error = "global string array index out of bounds"; return false; }
+                    index = int32(Word(m_Memory, indexVar));
+                } else {
+                    if (indexVar >= state.Locals.size()) { error = "local string array index out of bounds"; return false; }
+                    index = int32(state.Locals[indexVar]);
+                }
+                if (index < 0 || uint32(index) >= count) { error = "string array index outside declared count"; return false; }
+                const uint64 address = uint64(bits) + uint64(index) * (global ? length : length / 4);
+                if (global) {
+                    if (address < 8 || address + length > 8 + m_Metadata.GlobalBytes) {
+                        error = "global string array value out of bounds";
+                        return false;
+                    }
+                    std::copy_n(reinterpret_cast<const char*>(m_Memory.data() + address), length, d.LongText.data());
+                } else {
+                    if (address + length / 4 > state.Locals.size()) {
+                        error = "local string array value out of bounds";
+                        return false;
+                    }
+                    std::memcpy(d.LongText.data(), state.Locals.data() + address, length);
+                }
+                std::copy_n(d.LongText.data(), d.Text.size(), d.Text.data());
+                d.Strings[i] = d.LongText;
                 return true;
             }
             if (tag == 15) {
@@ -810,8 +852,8 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
     case 0x0020:case 0x0021:case 0x0022:case 0x0023:case 0x0024:case 0x0025:case 0x0030:case 0x0043:
     case 0x0846:case 0x016B:case 0x08B4:case 0x08B5:case 0x08B6:case 0x0256:case 0x056A:case 0x02E9:
     case 0x06B9:case 0x0118:case 0x0112:case 0x0445:case 0x00A3:case 0x00EC:case 0x00FE:case 0x00FF:
-    case 0x03CA:case 0x03B0:case 0x0491:case 0x023D:case 0x0248:case 0x07C1:case 0x0A0F:case 0x09C8:case 0x08AB:case 0x0471:
-    case 0x09AE:case 0x04C8:case 0x04A7:case 0x09E7:case 0x00DD:case 0x00DF:case 0x03EE:case 0x0214:return true;
+    case 0x03CA:case 0x075C:case 0x0965:case 0x03B0:case 0x0491:case 0x023D:case 0x0248:case 0x07C1:case 0x0A0F:case 0x09C8:case 0x08AB:case 0x0471:
+    case 0x09AE:case 0x04C8:case 0x04A7:case 0x09E7:case 0x00DD:case 0x00DF:case 0x03EE:case 0x0214:case 0x0424:case 0x01F3:case 0x0103:case 0x0119:case 0x060E:case 0x03D0:case 0x03D2:return true;
     default:return false;}};
     if(d.Negated&&!conditionOpcode(d.Opcode))return invalid("NOT prefix requires a condition opcode");
     std::vector<uint8> mission;
@@ -819,6 +861,9 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
     std::optional<NativeScriptPosition> objectCoordinates;
     std::optional<float> objectHeading;
     std::optional<uint32> switchTarget;
+    bool switchActivate = false, switchClear = false;
+    int32 switchValue = 0, switchRemaining = 0, switchDefault = 0;
+    bool switchHasDefault = false;
     int32 streamedLaunch = -1;
     uint32 arithmeticResult = 0;
     uint32 statResult = 0;
@@ -850,6 +895,18 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
             return invalid("progress percentage is nonfinite");
         }
         progressResult = std::bit_cast<uint32>(percentage);
+    }
+    if (d.Opcode == 0x008C) {
+        if (d.Tags[0] != 2 || d.RawTags[1] != 2 || !FitsInt(d.Float(1))) {
+            return invalid("008C requires global int/float variables and finite int32 conversion");
+        }
+        arithmeticResult = uint32(int32(d.Float(1)));
+    }
+    if (d.Opcode == 0x008D) {
+        if (d.Tags[0] != 2 || d.RawTags[1] != 2) return invalid("008D requires global float/int variables");
+        const float converted = float(b);
+        if (!std::isfinite(converted)) return invalid("008D conversion is nonfinite");
+        arithmeticResult = std::bit_cast<uint32>(converted);
     }
     if (d.Opcode >= 0x0008 && d.Opcode <= 0x0017) {
         if (d.OutputGlobal != ((d.Opcode & 2) == 0)) return invalid("arithmetic variable bank mismatch");
@@ -884,7 +941,7 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         const bool localSource = d.Opcode == 0x005A || d.Opcode == 0x005B || d.Opcode == 0x005E ||
             d.Opcode == 0x005F || d.Opcode == 0x0062 || d.Opcode == 0x0063 || d.Opcode == 0x006A ||
             d.Opcode == 0x006B || d.Opcode == 0x006D || d.Opcode == 0x0072 || d.Opcode == 0x0073;
-        if (d.Tags[0] != (localDestination ? 3 : 2) || d.RawTags[1] != (localSource ? 3 : 2)) {
+        if (d.Tags[0] != (localDestination ? 3 : 2) || d.Tags[1] != (localSource ? 3 : 2)) {
             return invalid("variable arithmetic bank mismatch");
         }
         const bool subtract = d.Opcode >= 0x0060 && d.Opcode <= 0x0065;
@@ -929,6 +986,10 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         }
     }
     switch (d.Opcode) {
+    case 0x0317:
+        if (m_State.IntStats[146 - 120] == std::numeric_limits<int32>::max())
+            return invalid("mission-attempt stat overflow");
+        break;
     case 0x0001:
     case 0x016A:
         if (a < 0 || uint64(state.TimeMs) + uint32(a) > std::numeric_limits<uint32>::max())
@@ -968,10 +1029,11 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         break;
     case 0x0871: {
         const int32 cases = d.Int(1), hasDefault = d.Int(2);
-        if (cases < 0 || cases > 7 || (hasDefault != 0 && hasDefault != 1)) {
+        if (cases < 0 || cases > 75 || (hasDefault != 0 && hasDefault != 1)) {
             return invalid("unsupported switch-start case count/default");
         }
-        for (int32 i = 0; i < cases; ++i) {
+        const int32 inThisInstruction = std::min(cases, 7);
+        for (int32 i = 0; i < inThisInstruction; ++i) {
             if (a == d.Int(4 + unsigned(i) * 2)) {
                 const int32 label = d.Int(5 + unsigned(i) * 2);
                 if (!IsTarget(thread, label)) return invalid("switch case target is not an instruction boundary: " + m_TargetError);
@@ -979,10 +1041,40 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
                 break;
             }
         }
-        if (!switchTarget && hasDefault) {
+        if (!switchTarget && cases > inThisInstruction) {
+            switchActivate = true;
+            switchValue = a;
+            switchRemaining = cases - inThisInstruction;
+            switchDefault = d.Int(3);
+            switchHasDefault = hasDefault != 0;
+        } else if (!switchTarget && hasDefault) {
             const int32 label = d.Int(3);
             if (!IsTarget(thread, label)) return invalid("switch default target is not an instruction boundary: " + m_TargetError);
             switchTarget = Target(thread, label);
+        }
+        if (switchTarget || cases <= inThisInstruction) switchClear = true;
+        break;
+    }
+    case 0x0872: {
+        if (!state.SwitchActive || state.SwitchRemaining <= 0)
+            return invalid("switch continuation has no active switch");
+        const int32 inThisInstruction = std::min(state.SwitchRemaining, 9);
+        for (int32 i = 0; i < inThisInstruction; ++i) {
+            if (state.SwitchValue == d.Int(unsigned(i) * 2)) {
+                const int32 label = d.Int(1 + unsigned(i) * 2);
+                if (!IsTarget(thread, label)) return invalid("switch continuation target is not an instruction boundary: " + m_TargetError);
+                switchTarget = Target(thread, label);
+                break;
+            }
+        }
+        switchRemaining = state.SwitchRemaining - inThisInstruction;
+        if (switchTarget) switchClear = true;
+        else if (switchRemaining == 0) {
+            if (state.SwitchHasDefault) {
+                if (!IsTarget(thread, state.SwitchDefault)) return invalid("switch default target is not an instruction boundary: " + m_TargetError);
+                switchTarget = Target(thread, state.SwitchDefault);
+            }
+            switchClear = true;
         }
         break;
     }
@@ -1014,6 +1106,12 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         break;
     case 0x0085:
         if (d.Tags[0] != 3 || d.RawTags[1] != 3) return invalid("0085 requires local source and destination");
+        break;
+    case 0x008A:
+        if (d.Tags[0] != 2 || d.Tags[1] != 3) return invalid("008A requires global destination and local source");
+        break;
+    case 0x008B:
+        if (d.Tags[0] != 3 || d.Tags[1] != 2) return invalid("008B requires local destination and global source");
         break;
     case 0x0086:
         // The pinned SA schema and BasicCommands::AssignTo<float,float> both
@@ -1075,19 +1173,156 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
     int32 reference = -1;
     bool pickupCollected = false;
     bool booleanResult = false;
-    int32 integerResult = 0;
+    int32 integerResult = 0, integerResult2 = 0;
+    std::array<int32, 3> statsTimes{};
+    std::array<float, 3> statsDistances{};
     std::array<char, 16> stringResult{};
-    if (d.Opcode == 0x0430 || d.Opcode == 0x0129 || d.Opcode == 0x067F || d.Opcode == 0x00A5 || d.Opcode == 0x0175 || d.Opcode == 0x06D7 || d.Opcode == 0x01EB || d.Opcode == 0x03DE || d.Opcode == 0x09C8 || d.Opcode == 0x0952 || d.Opcode == 0x0953 || d.Opcode == 0x094B || d.Opcode == 0x02E4 || d.Opcode == 0x02E7 || d.Opcode == 0x02E9 || d.Opcode == 0x02EA || d.Opcode == 0x056A || d.Opcode == 0x06B9 || d.Opcode == 0x033E || d.Opcode == 0x060D || d.Opcode == 0x033F || d.Opcode == 0x0340 || d.Opcode == 0x0341 || d.Opcode == 0x0342 || d.Opcode == 0x0343 || d.Opcode == 0x0344 || d.Opcode == 0x0345 || d.Opcode == 0x0348 || d.Opcode == 0x0395 || d.Opcode == 0x0A0B || d.Opcode == 0x0A0F || d.Opcode == 0x03E6 || d.Opcode == 0x08E1 || d.Opcode == 0x0349 || d.Opcode == 0x03E0 || d.Opcode == 0x00A3 || d.Opcode == 0x090F || d.Opcode == 0x0491 || d.Opcode == 0x023C || d.Opcode == 0x023D || d.Opcode == 0x0247 || d.Opcode == 0x0248 || d.Opcode == 0x0249 || d.Opcode == 0x07C0 || d.Opcode == 0x07C1 || d.Opcode == 0x08A9 || d.Opcode == 0x03B0 || d.Opcode == 0x0842 || d.Opcode == 0x09FB || d.Opcode == 0x07D0 || d.Opcode == 0x077E || d.Opcode == 0x08F8 || d.Opcode == 0x0118 || d.Opcode == 0x03F0 || d.Opcode == 0x054C || d.Opcode == 0x0112 || d.Opcode == 0x01B7 || d.Opcode == 0x01B4 || d.Opcode == 0x04BB || d.Opcode == 0x0169 || d.Opcode == 0x0793 || d.Opcode == 0x070D || d.Opcode == 0x087B || d.Opcode == 0x0471 || d.Opcode == 0x03CA || d.Opcode == 0x00EC || d.Opcode == 0x00FE || d.Opcode == 0x00FF || d.Opcode == 0x09E8 || d.Opcode == 0x0445 || d.Opcode == 0x09AE ||
+    if (d.Opcode == 0x03D2 || d.Opcode == 0x03D1 || d.Opcode == 0x03D5 || d.Opcode == 0x009A || d.Opcode == 0x0A09 || d.Opcode == 0x03D0 || d.Opcode == 0x03CF || d.Opcode == 0x0296 || d.Opcode == 0x009B || d.Opcode == 0x00A6 || d.Opcode == 0x05D3 || d.Opcode == 0x0622 || d.Opcode == 0x00BE || d.Opcode == 0x040D || d.Opcode == 0x02EB || d.Opcode == 0x0925 || d.Opcode == 0x092F || d.Opcode == 0x0930 || d.Opcode == 0x0936 || d.Opcode == 0x0920 || d.Opcode == 0x099C || d.Opcode == 0x015A || d.Opcode == 0x00BC || d.Opcode == 0x0707 || d.Opcode == 0x0701 || d.Opcode == 0x0955 || d.Opcode == 0x05D1 || d.Opcode == 0x0560 || d.Opcode == 0x01C2 || d.Opcode == 0x01C3 || d.Opcode == 0x09B2 || d.Opcode == 0x06D8 || d.Opcode == 0x06DC || d.Opcode == 0x06DD || d.Opcode == 0x06D9 || d.Opcode == 0x0954 || d.Opcode == 0x099A || d.Opcode == 0x05EB || d.Opcode == 0x060E || d.Opcode == 0x0119 || d.Opcode == 0x02A3 || d.Opcode == 0x0103 || d.Opcode == 0x01F3 || d.Opcode == 0x0109 || d.Opcode == 0x04FC || d.Opcode == 0x03C0 || d.Opcode == 0x015F || d.Opcode == 0x0160 || d.Opcode == 0x0430 || d.Opcode == 0x0129 || d.Opcode == 0x01C8 || d.Opcode == 0x067F || d.Opcode == 0x00A5 || d.Opcode == 0x0175 || d.Opcode == 0x06D7 || d.Opcode == 0x01EB || d.Opcode == 0x03DE || d.Opcode == 0x09C8 || d.Opcode == 0x0952 || d.Opcode == 0x0953 || d.Opcode == 0x094B || d.Opcode == 0x02E4 || d.Opcode == 0x02E7 || d.Opcode == 0x02E9 || d.Opcode == 0x02EA || d.Opcode == 0x056A || d.Opcode == 0x06B9 || d.Opcode == 0x033E || d.Opcode == 0x060D || d.Opcode == 0x033F || d.Opcode == 0x0340 || d.Opcode == 0x0341 || d.Opcode == 0x0342 || d.Opcode == 0x0343 || d.Opcode == 0x0344 || d.Opcode == 0x0345 || d.Opcode == 0x0348 || d.Opcode == 0x0395 || d.Opcode == 0x0A0B || d.Opcode == 0x0A0F || d.Opcode == 0x03E6 || d.Opcode == 0x08E1 || d.Opcode == 0x0349 || d.Opcode == 0x03E0 || d.Opcode == 0x00A3 || d.Opcode == 0x090F || d.Opcode == 0x0491 || d.Opcode == 0x023C || d.Opcode == 0x023D || d.Opcode == 0x0247 || d.Opcode == 0x0248 || d.Opcode == 0x0249 || d.Opcode == 0x07C0 || d.Opcode == 0x07C1 || d.Opcode == 0x08A9 || d.Opcode == 0x03B0 || d.Opcode == 0x0842 || d.Opcode == 0x09FB || d.Opcode == 0x07D0 || d.Opcode == 0x077E || d.Opcode == 0x08F8 || d.Opcode == 0x0118 || d.Opcode == 0x03F0 || d.Opcode == 0x054C || d.Opcode == 0x0112 || d.Opcode == 0x01B7 || d.Opcode == 0x01B4 || d.Opcode == 0x04BB || d.Opcode == 0x0169 || d.Opcode == 0x0793 || d.Opcode == 0x070D || d.Opcode == 0x087B || d.Opcode == 0x0471 || d.Opcode == 0x03CA || d.Opcode == 0x00EC || d.Opcode == 0x00FE || d.Opcode == 0x00FF || d.Opcode == 0x09E8 || d.Opcode == 0x0445 || d.Opcode == 0x09AE ||
         d.Opcode == 0x04C8 || d.Opcode == 0x04A7 || d.Opcode == 0x09E7 || d.Opcode == 0x00DD ||
         d.Opcode == 0x00DF || d.Opcode == 0x03EE) {
         const NativeScriptRequestId id{m_SessionId, m_CommandSequence + 1, state.IP};
         NativeScriptServiceResult result;
         struct Guard { bool& Flag; Guard(bool& flag): Flag(flag) { Flag = true; } ~Guard() { Flag = false; } } guard{m_InService};
         try {
-            if (d.Opcode == 0x0430) {
+            if (d.Opcode == 0x03D2) {
+                auto queried = services.HasMissionAudioFinished(id, a);
+                result = std::move(queried.Result);
+                booleanResult = queried.Value;
+            } else if (d.Opcode == 0x03D1) {
+                result = services.PlayMissionAudio(id, a);
+            } else if (d.Opcode == 0x03D5) {
+                NativeScriptMissionTextRequest request{id, {}};
+                std::copy_n(d.Strings[0].begin(), request.Name.size(), request.Name.begin());
+                result = services.ClearText(request);
+            } else if (d.Opcode == 0x009A) {
+                auto created = services.CreatePed({id, a, b,
+                    {d.Float(2), d.Float(3), d.Float(4)}});
+                result = std::move(created.Result);
+                reference = created.Reference.Value;
+            } else if (d.Opcode == 0x0A09) {
+                if (b != 0 && b != 1) return invalid("script speech switch requires a Boolean");
+                result = services.SetPedSpeechDisabled({id, {a}, b != 0});
+            } else if (d.Opcode == 0x03D0) {
+                auto queried = services.HasMissionAudioLoaded(id, a);
+                result = std::move(queried.Result);
+                booleanResult = queried.Value;
+            } else if (d.Opcode == 0x03CF) {
+                result = services.LoadMissionAudio({id, a, b});
+            } else if (d.Opcode == 0x0296) {
+                result = services.UnloadSpecialCharacter({id, a, {}});
+            } else if (d.Opcode == 0x009B) {
+                result = services.DeletePed({id, {a}});
+            } else if (d.Opcode == 0x00A6) {
+                result = services.DeleteVehicle({id, {a}, 0});
+            } else if (d.Opcode == 0x05D3) {
+                result = services.AssignGoStraightTask({id, {a},
+                    {d.Float(1), d.Float(2), d.Float(3)}, d.Int(4), d.Int(5)});
+            } else if (d.Opcode == 0x0622) {
+                result = services.TaskLeaveVehicleImmediately({id, {a}, {b}, -1});
+            } else if (d.Opcode == 0x00BE) {
+                result = services.ClearPrints(id);
+            } else if (d.Opcode == 0x040D) {
+                result = services.ClearMissionAudio(id, a);
+            } else if (d.Opcode == 0x02EB || d.Opcode == 0x0925 || d.Opcode == 0x092F || d.Opcode == 0x0930 ||
+                d.Opcode == 0x0936 || d.Opcode == 0x0920 || d.Opcode == 0x099C || d.Opcode == 0x015A) {
+                NativeScriptCameraCommandRequest request{id, d.Opcode};
+                if (d.Opcode == 0x0936 || d.Opcode == 0x0920) {
+                    for (unsigned i = 0; i < 6; ++i) request.Floats[i] = d.Float(i);
+                    request.Integers = {d.Int(6), d.Int(7)};
+                } else if (d.Opcode == 0x099C) {
+                    request.Integers[0] = a;
+                    request.Floats[0] = d.Float(1);
+                    request.Floats[1] = d.Float(2);
+                } else if (d.Opcode == 0x092F || d.Opcode == 0x0930) request.Integers[0] = a;
+                result = services.ApplyCameraCommand(request);
+            } else if (d.Opcode == 0x00BC) {
+                NativeScriptPrintRequest request{id, {}, b, d.Int(2)};
+                std::copy_n(d.Strings[0].begin(), request.Key.size(), request.Key.begin());
+                result = services.PrintNow(request);
+            } else if (d.Opcode == 0x0707) {
+                result = services.BeginSkippableCutscene({id, a});
+            } else if (d.Opcode == 0x0701) {
+                result = services.EndSkippableCutscene(id);
+            } else if (d.Opcode == 0x0955) {
+                result = services.StopBeatTrack(id);
+            } else if (d.Opcode == 0x05D1) {
+                result = services.AssignCarDriveTask({id, {a}, {b},
+                    {d.Float(2), d.Float(3), d.Float(4)}, d.Float(5),
+                    d.Int(6), d.Int(7), d.Int(8)});
+            } else if (d.Opcode == 0x0560) {
+                auto created = services.CreateRandomDriver({id, {a}, 0});
+                result = std::move(created.Result);
+                reference = created.Reference.Value;
+            } else if (d.Opcode == 0x01C2) {
+                result = services.MarkPedNoLongerNeeded({id, {a}});
+            } else if (d.Opcode == 0x01C3) {
+                result = services.MarkVehicleNoLongerNeeded({id, {a}, 0});
+            } else if (d.Opcode == 0x09B2) {
+                if (a != 0 && a != 1) return invalid("random car model query requires a Boolean");
+                auto queried = services.GetRandomResidentCarModel(id, a != 0);
+                result = std::move(queried.Result);
+                integerResult = queried.ModelId;
+                integerResult2 = queried.VehicleClass;
+            } else if (d.Opcode == 0x06D8) {
+                auto created = services.CreateMissionTrain({id, a,
+                    {d.Float(1), d.Float(2), d.Float(3)}, d.Int(4) != 0});
+                result = std::move(created.Result);
+                reference = created.Reference.Value;
+            } else if (d.Opcode == 0x06DC || d.Opcode == 0x06DD) {
+                result = services.SetTrainSpeed({id, {a}, d.Float(1)}, d.Opcode == 0x06DD);
+            } else if (d.Opcode == 0x06D9) {
+                result = services.DeleteMissionTrains(id);
+            } else if (d.Opcode == 0x0954) {
+                result = services.PlayBeatTrack(id);
+            } else if (d.Opcode == 0x05EB) {
+                result = services.StartVehiclePlayback({id, {a}, b});
+            } else if (d.Opcode == 0x099A) {
+                if (b != 0 && b != 1) return invalid("vehicle collision switch requires a Boolean");
+                result = services.SetVehicleCollision({id, {a}, b});
+            } else if (d.Opcode == 0x060E) {
+                auto queried = services.IsVehiclePlaybackActive({id, {a}, 0});
+                result = std::move(queried.Result);
+                booleanResult = queried.Value;
+            } else if (d.Opcode == 0x0119) {
+                auto queried = services.IsVehicleDead({id, {a}, 0});
+                result = std::move(queried.Result);
+                booleanResult = queried.Value;
+            } else if (d.Opcode == 0x02A3) {
+                if (a != 0 && a != 1) return invalid("widescreen switch requires a Boolean");
+                result = services.SetWidescreen({id, a != 0});
+            } else if (d.Opcode == 0x0103) {
+                auto queried = services.LocateChar({id, {a},
+                    {d.Float(1), d.Float(2), d.Float(3)},
+                    {d.Float(4), d.Float(5), d.Float(6)}, false, d.Int(7) != 0, false, true});
+                result = std::move(queried.Result);
+                booleanResult = queried.Value;
+            } else if (d.Opcode == 0x01F3) {
+                auto queried = services.IsVehicleInAirProper({id, {a}, 0});
+                result = std::move(queried.Result);
+                booleanResult = queried.Value;
+            } else if (d.Opcode == 0x0109) {
+                result = services.AddScore({id, a, b});
+            } else if (d.Opcode == 0x04FC) {
+                auto queried = services.GetWheelieStats({id, {a}, 0});
+                result = std::move(queried.Result);
+                statsTimes = queried.Times;
+                statsDistances = queried.Distances;
+            } else if (d.Opcode == 0x03C0) {
+                auto queried = services.GetPedVehicleNoSave({id, {a}});
+                result = std::move(queried.Result);
+                reference = queried.Reference.Value;
+            } else if (d.Opcode == 0x015F) {
+                result = services.SetFixedCameraPosition({id,
+                    {d.Float(0), d.Float(1), d.Float(2)},
+                    {d.Float(3), d.Float(4), d.Float(5)}});
+            } else if (d.Opcode == 0x0160) {
+                result = services.PointCameraAtPoint({id,
+                    {d.Float(0), d.Float(1), d.Float(2)}, d.Int(3)});
+            } else if (d.Opcode == 0x0430) {
                 result = services.WarpPedIntoVehiclePassenger({id, {a}, {b}, d.Int(2)});
-            } else if (d.Opcode == 0x0129) {
-                auto created = services.CreatePedInsideVehicle({id, {a}, b, d.Int(2)});
+            } else if (d.Opcode == 0x0129 || d.Opcode == 0x01C8) {
+                auto created = services.CreatePedInsideVehicle({id, {a}, b, d.Int(2),
+                    d.Opcode == 0x01C8 ? d.Int(3) : -1});
                 result = std::move(created.Result);
                 reference = created.Reference.Value;
             } else if (d.Opcode == 0x067F) {
@@ -1293,7 +1528,117 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         default: return invalid("invalid service result");
         }
     }
-    if (d.Opcode == 0x01B6 || d.Opcode == 0x0256 || d.Opcode == 0x09BA || d.Opcode == 0x0363 || d.Opcode == 0x0776 || d.Opcode == 0x0777 || d.Opcode == 0x07D3 || d.Opcode == 0x0884 || d.Opcode == 0x08E8 || d.Opcode == 0x0928 || d.Opcode == 0x0929 || d.Opcode == 0x02A7 || d.Opcode == 0x04E4 || d.Opcode == 0x03CB || d.Opcode == 0x0053 || d.Opcode == 0x07AF || d.Opcode == 0x01F5 || d.Opcode == 0x0373 || d.Opcode == 0x0173 || d.Opcode == 0x0517 || d.Opcode == 0x0518 || d.Opcode == 0x0570 || d.Opcode == 0x04CE || d.Opcode == 0x018B || d.Opcode == 0x09B4 || d.Opcode == 0x02B9 || d.Opcode == 0x02FA || d.Opcode == 0x016C || d.Opcode == 0x016D || d.Opcode == 0x0814 || d.Opcode == 0x029B || d.Opcode == 0x0107 || d.Opcode == 0x0177 || d.Opcode == 0x01C7 || d.Opcode == 0x07F7 || d.Opcode == 0x0550 || d.Opcode == 0x0392 || d.Opcode == 0x09CA || d.Opcode == 0x034D || d.Opcode == 0x0566 || d.Opcode == 0x01BB || d.Opcode == 0x0176 || d.Opcode == 0x0827 || d.Opcode == 0x0381 || d.Opcode == 0x0400 || d.Opcode == 0x0453 || d.Opcode == 0x0A17 || d.Opcode == 0x09E2 || d.Opcode == 0x07FB || d.Opcode == 0x04F8 || d.Opcode == 0x08CA || d.Opcode == 0x0767 || d.Opcode == 0x0874 || d.Opcode == 0x076A || d.Opcode == 0x076C || d.Opcode == 0x09B7 || d.Opcode == 0x0958 || d.Opcode == 0x0959 || d.Opcode == 0x095A || d.Opcode == 0x032B || d.Opcode == 0x01E7 || d.Opcode == 0x01E8 || d.Opcode == 0x091D || d.Opcode == 0x022A || d.Opcode == 0x022B || d.Opcode == 0x0213 || d.Opcode == 0x0214 || d.Opcode == 0x0215 || d.Opcode == 0x014B || d.Opcode == 0x014C) {
+    if (d.Opcode == 0x041D) {
+        const NativeScriptRequestId id{m_SessionId, m_CommandSequence + 1, state.IP};
+        NativeScriptServiceResult result;
+        struct Guard { bool& Flag; Guard(bool& flag): Flag(flag) { Flag = true; } ~Guard() { Flag = false; } } guard{m_InService};
+        try {
+            NativeScriptCameraCommandRequest request{id, d.Opcode};
+            request.Floats[0] = d.Float(0);
+            result = services.ApplyCameraCommand(request);
+        } catch (const std::exception& exception) {
+            return Fail(thread, NativeScriptStatus::Error, rawOpcode, "service exception: " + std::string(exception.what()));
+        } catch (...) {
+            return invalid("unknown service exception");
+        }
+        if (result.Status == NativeScriptServiceStatus::Pending) {
+            m_Pending = true; m_PendingInstruction = d; m_PendingThread = thread;
+            return {NativeScriptStatus::Pending, state.IP, rawOpcode, 0, std::move(result.Message), thread};
+        }
+        if (result.Status == NativeScriptServiceStatus::Unsupported)
+            return Fail(thread, NativeScriptStatus::Unsupported, rawOpcode, "service unsupported: " + result.Message);
+        if (result.Status == NativeScriptServiceStatus::Error)
+            return Fail(thread, NativeScriptStatus::Error, rawOpcode, "service failed: " + result.Message);
+        if (result.Status != NativeScriptServiceStatus::Ready) return invalid("invalid service result");
+    }
+    if (d.Opcode == 0x02A8) {
+        const NativeScriptRequestId id{m_SessionId, m_CommandSequence + 1, state.IP};
+        NativeScriptServiceResult result;
+        struct Guard { bool& Flag; Guard(bool& flag): Flag(flag) { Flag = true; } ~Guard() { Flag = false; } } guard{m_InService};
+        try {
+            auto created = services.CreateCoordinateBlip({id,
+                {d.Float(0), d.Float(1), d.Float(2)}, d.Int(3)});
+            result = std::move(created.Result);
+            reference = created.Reference.Value;
+        } catch (const std::exception& exception) {
+            return Fail(thread, NativeScriptStatus::Error, rawOpcode, "service exception: " + std::string(exception.what()));
+        } catch (...) {
+            return invalid("unknown service exception");
+        }
+        if (result.Status == NativeScriptServiceStatus::Pending) {
+            m_Pending = true; m_PendingInstruction = d; m_PendingThread = thread;
+            return {NativeScriptStatus::Pending, state.IP, rawOpcode, 0, std::move(result.Message), thread};
+        }
+        if (result.Status == NativeScriptServiceStatus::Unsupported)
+            return Fail(thread, NativeScriptStatus::Unsupported, rawOpcode, "service unsupported: " + result.Message);
+        if (result.Status == NativeScriptServiceStatus::Error)
+            return Fail(thread, NativeScriptStatus::Error, rawOpcode, "service failed: " + result.Message);
+        if (result.Status != NativeScriptServiceStatus::Ready) return invalid("invalid service result");
+    }
+    if (d.Opcode == 0x0A40 || d.Opcode == 0x0A41) {
+        const NativeScriptRequestId id{m_SessionId, m_CommandSequence + 1, state.IP};
+        NativeScriptServiceResult result;
+        struct Guard { bool& Flag; Guard(bool& flag): Flag(flag) { Flag = true; } ~Guard() { Flag = false; } } guard{m_InService};
+        try {
+            if (d.Opcode == 0x0A40) {
+                auto created = services.CreateUserMarker({id,
+                    {d.Float(0), d.Float(1), d.Float(2)}, d.Int(3)});
+                result = std::move(created.Result);
+                reference = created.Reference.Value;
+            } else result = services.RemoveUserMarker({id, {a}});
+        } catch (const std::exception& exception) {
+            return Fail(thread, NativeScriptStatus::Error, rawOpcode, "service exception: " + std::string(exception.what()));
+        } catch (...) {
+            return invalid("unknown service exception");
+        }
+        if (result.Status == NativeScriptServiceStatus::Pending) {
+            m_Pending = true; m_PendingInstruction = d; m_PendingThread = thread;
+            return {NativeScriptStatus::Pending, state.IP, rawOpcode, 0, std::move(result.Message), thread};
+        }
+        if (result.Status == NativeScriptServiceStatus::Unsupported)
+            return Fail(thread, NativeScriptStatus::Unsupported, rawOpcode, "service unsupported: " + result.Message);
+        if (result.Status == NativeScriptServiceStatus::Error)
+            return Fail(thread, NativeScriptStatus::Error, rawOpcode, "service failed: " + result.Message);
+        if (result.Status != NativeScriptServiceStatus::Ready) return invalid("invalid service result");
+    }
+    if (d.Opcode == 0x0164 || d.Opcode == 0x0223 || d.Opcode == 0x0330 || d.Opcode == 0x048F || d.Opcode == 0x075C || d.Opcode == 0x0965) {
+        const NativeScriptRequestId id{m_SessionId, m_CommandSequence + 1, state.IP};
+        NativeScriptServiceResult result;
+        struct Guard { bool& Flag; Guard(bool& flag): Flag(flag) { Flag = true; } ~Guard() { Flag = false; } } guard{m_InService};
+        try {
+            if (d.Opcode == 0x0164) result = services.RemoveBlip({id, {a}});
+            else if (d.Opcode == 0x075C) {
+                auto queried = services.DoesBlipExist({id, {a}});
+                result = std::move(queried.Result);
+                booleanResult = queried.Value;
+            }
+            else if (d.Opcode == 0x0965) {
+                auto queried = services.IsPedSwimming({id, {a}});
+                result = std::move(queried.Result);
+                booleanResult = queried.Value;
+            }
+            else if (d.Opcode == 0x0223) result = services.SetPedHealth({id, {a}, b});
+            else if (d.Opcode == 0x048F) result = services.RemoveAllPedWeapons({id, {a}});
+            else {
+                if (b != 0 && b != 1) return invalid("never-tired switch requires a Boolean");
+                result = services.SetPlayerNeverTired({id, a, b != 0});
+            }
+        } catch (const std::exception& exception) {
+            return Fail(thread, NativeScriptStatus::Error, rawOpcode, "service exception: " + std::string(exception.what()));
+        } catch (...) {
+            return invalid("unknown service exception");
+        }
+        if (result.Status == NativeScriptServiceStatus::Pending) {
+            m_Pending = true; m_PendingInstruction = d; m_PendingThread = thread;
+            return {NativeScriptStatus::Pending, state.IP, rawOpcode, 0, std::move(result.Message), thread};
+        }
+        if (result.Status == NativeScriptServiceStatus::Unsupported)
+            return Fail(thread, NativeScriptStatus::Unsupported, rawOpcode, "service unsupported: " + result.Message);
+        if (result.Status == NativeScriptServiceStatus::Error)
+            return Fail(thread, NativeScriptStatus::Error, rawOpcode, "service failed: " + result.Message);
+        if (result.Status != NativeScriptServiceStatus::Ready) return invalid("invalid service result");
+    }
+    if (d.Opcode == 0x01B6 || d.Opcode == 0x0256 || d.Opcode == 0x09BA || d.Opcode == 0x0363 || d.Opcode == 0x0776 || d.Opcode == 0x0777 || d.Opcode == 0x07D3 || d.Opcode == 0x0884 || d.Opcode == 0x08E8 || d.Opcode == 0x0928 || d.Opcode == 0x0929 || d.Opcode == 0x02A7 || d.Opcode == 0x04E4 || d.Opcode == 0x03CB || d.Opcode == 0x0053 || d.Opcode == 0x07AF || d.Opcode == 0x01F5 || d.Opcode == 0x0373 || d.Opcode == 0x0173 || d.Opcode == 0x0517 || d.Opcode == 0x0518 || d.Opcode == 0x0570 || d.Opcode == 0x04CE || d.Opcode == 0x018B || d.Opcode == 0x09B4 || d.Opcode == 0x02B9 || d.Opcode == 0x02FA || d.Opcode == 0x016C || d.Opcode == 0x016D || d.Opcode == 0x0814 || d.Opcode == 0x029B || d.Opcode == 0x0107 || d.Opcode == 0x0177 || d.Opcode == 0x01C7 || d.Opcode == 0x07F7 || d.Opcode == 0x0550 || d.Opcode == 0x0392 || d.Opcode == 0x09CA || d.Opcode == 0x034D || d.Opcode == 0x0566 || d.Opcode == 0x01BB || d.Opcode == 0x0176 || d.Opcode == 0x0827 || d.Opcode == 0x0381 || d.Opcode == 0x0400 || d.Opcode == 0x0453 || d.Opcode == 0x0A17 || d.Opcode == 0x09E2 || d.Opcode == 0x07FB || d.Opcode == 0x04F8 || d.Opcode == 0x08CA || d.Opcode == 0x0767 || d.Opcode == 0x0874 || d.Opcode == 0x076A || d.Opcode == 0x076C || d.Opcode == 0x09B7 || d.Opcode == 0x0958 || d.Opcode == 0x0959 || d.Opcode == 0x095A || d.Opcode == 0x032B || d.Opcode == 0x01E7 || d.Opcode == 0x01E8 || d.Opcode == 0x091D || d.Opcode == 0x091E || d.Opcode == 0x022A || d.Opcode == 0x022B || d.Opcode == 0x0213 || d.Opcode == 0x0214 || d.Opcode == 0x0215 || d.Opcode == 0x014B || d.Opcode == 0x014C) {
         const NativeScriptRequestId id{m_SessionId, m_CommandSequence + 1, state.IP};
         NativeScriptServiceResult result;
         // All operands/output bounds have been checked before ANY host call.
@@ -1336,15 +1681,17 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
                 result=std::move(created.Result); reference=created.Reference.Value;
             }
             if(d.Opcode==0x032B){auto created=services.CreatePickupWithAmmo({id,d.Int(0),d.Int(1),d.Int(2),{d.Float(3),d.Float(4),d.Float(5)}});result=std::move(created.Result);reference=created.Reference.Value;}
-            if(d.Opcode==0x01E7||d.Opcode==0x01E8||d.Opcode==0x091D||d.Opcode==0x022A||d.Opcode==0x022B){
+            if(d.Opcode==0x01E7||d.Opcode==0x01E8||d.Opcode==0x091D||d.Opcode==0x091E||d.Opcode==0x022A||d.Opcode==0x022B){
                 const auto kind=d.Opcode==0x01E7?NativePathPolicyKind::VehicleOn:d.Opcode==0x01E8?NativePathPolicyKind::VehicleOff:
-                    d.Opcode==0x091D?NativePathPolicyKind::VehicleOriginal:d.Opcode==0x022A?NativePathPolicyKind::PedOn:NativePathPolicyKind::PedOff;
+                    d.Opcode==0x091D?NativePathPolicyKind::VehicleOriginal:d.Opcode==0x091E?NativePathPolicyKind::PedOriginal:
+                    d.Opcode==0x022A?NativePathPolicyKind::PedOn:NativePathPolicyKind::PedOff;
                 result=services.AddPathPolicy({id,kind,{d.Float(0),d.Float(1),d.Float(2),d.Float(3),d.Float(4),d.Float(5)}});
             }
             if(d.Opcode==0x0928||d.Opcode==0x0929){NativeScriptExternalTriggerRequest request{id,d.Int(0),d.Int(1),d.Int(2),d.Opcode==0x0929?d.Int(4):0,d.Opcode==0x0929?d.Float(3):0,{},{d.Opcode==0x0929}};if(request.ModelId<0){const auto index=uint64(-int64(request.ModelId));if(index>=m_Metadata.UsedObjects.size())return invalid("external trigger used-object index out of bounds");request.ModelName=m_Metadata.UsedObjects[index];}result=services.AddExternalScriptTrigger(request);}
             if (d.Opcode == 0x07D3 || d.Opcode == 0x0884) result = services.AddCodeScriptBrain({id, d.Int(0), d.Text, d.Opcode == 0x0884});
             if (d.Opcode == 0x08E8) result = services.AttachAnimsToModel({id, d.Int(0), d.Text});
-            if (d.Opcode == 0x0776 || d.Opcode == 0x0777) result = services.SetIplRequested({id, d.Text, d.Opcode == 0x0776});
+            if (d.Opcode == 0x0776 || d.Opcode == 0x0777)
+                result = services.SetIplRequested({id, d.Strings[0], d.Opcode == 0x0776});
             if (d.Opcode == 0x0363) {
                 NativeScriptWorldObjectVisibilityRequest request{id,{d.Float(0),d.Float(1),d.Float(2)},d.Float(3),d.Int(4),{},d.Int(5) != 0};
                 if (request.ModelId < 0) {
@@ -1541,9 +1888,24 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         d.Next = state.ReturnStack[--state.StackDepth];
         state.ReturnStack[state.StackDepth] = 0;
         break;
-    case 0x0871: if (switchTarget) d.Next = *switchTarget; break;
+    case 0x0871:
+        if (switchActivate) {
+            state.SwitchValue = switchValue;
+            state.SwitchRemaining = switchRemaining;
+            state.SwitchDefault = switchDefault;
+            state.SwitchHasDefault = switchHasDefault;
+            state.SwitchActive = true;
+        }
+        if (switchClear) state.SwitchActive = false;
+        if (switchTarget) d.Next = *switchTarget;
+        break;
+    case 0x0872:
+        state.SwitchRemaining = switchRemaining;
+        if (switchClear) state.SwitchActive = false;
+        if (switchTarget) d.Next = *switchTarget;
+        break;
     case 0x01BD: write(0, state.TimeMs); break;
-    case 0x0004: case 0x0005: case 0x0006: case 0x0007: case 0x0084: case 0x0085: case 0x0086: write(0, d.Values[1]); break;
+    case 0x0004: case 0x0005: case 0x0006: case 0x0007: case 0x0084: case 0x0085: case 0x0086: case 0x008A: case 0x008B: write(0, d.Values[1]); break;
     case 0x08E1: write(0, uint32(integerResult)); break;
     case 0x0842: write(1, uint32(integerResult)); break;
     case 0x09FB:
@@ -1551,7 +1913,19 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
     case 0x077E: write(0, uint32(integerResult)); break;
     case 0x0953: write(0, uint32(integerResult)); break;
     case 0x00A5: write(4, uint32(reference)); break;
+    case 0x009A: write(5, uint32(reference)); break;
     case 0x0129: write(3, uint32(reference)); break;
+    case 0x01C8: write(4, uint32(reference)); break;
+    case 0x06D8: write(5, uint32(reference)); break;
+    case 0x09B2: write(1, uint32(integerResult)); write(2, uint32(integerResult2)); break;
+    case 0x0560: write(1, uint32(reference)); break;
+    case 0x03C0: write(1, uint32(reference)); break;
+    case 0x04FC:
+        write(1, uint32(statsTimes[0])); write(2, std::bit_cast<uint32>(statsDistances[0]));
+        write(3, uint32(statsTimes[1])); write(4, std::bit_cast<uint32>(statsDistances[1]));
+        write(5, uint32(statsTimes[2])); write(6, std::bit_cast<uint32>(statsDistances[2]));
+        break;
+    case 0x008C: case 0x008D: write(0, arithmeticResult); break;
     case 0x0652: write(1, statResult); break;
     case 0x0926: write(1, streamedUsersResult); break;
     case 0x058C: write(0, progressResult); break;
@@ -1605,6 +1979,10 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
     case 0x016B: updateCondition(m_State.Fade.Fading); break;
     case 0x08B4: case 0x08B5: case 0x08B6: updateCondition((uint32(a) & (uint32(1) << unsigned(b))) != 0); break;
     case 0x0256: updateCondition(booleanResult); break;
+    case 0x0424: updateCondition(true); break;
+    case 0x01F3: updateCondition(booleanResult); break;
+    case 0x0103: updateCondition(booleanResult); break;
+    case 0x0119: case 0x060E: case 0x03D0: case 0x03D2: updateCondition(booleanResult); break;
     case 0x056A:
     case 0x02E9:
     case 0x06B9:
@@ -1612,7 +1990,7 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
     case 0x0112:
     case 0x0445: updateCondition(booleanResult); break;
     case 0x00A3: case 0x00EC: case 0x00FE: case 0x00FF: updateCondition(booleanResult); break;
-    case 0x03CA: updateCondition(booleanResult); break;
+    case 0x03CA: case 0x075C: case 0x0965: updateCondition(booleanResult); break;
     case 0x03B0: updateCondition(booleanResult); break;
     case 0x0491: updateCondition(booleanResult); break;
     case 0x0248: updateCondition(booleanResult); break;
@@ -1636,6 +2014,29 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         m_Idle.push_back(thread); // AddScriptToList(idle): head insertion
         break;
     case 0x03A4: state.Name = d.Text; break;
+    case 0x00D8:
+        if (m_State.OnAMissionFlag && IsGlobal(m_State.OnAMissionFlag)) {
+            const auto offset = m_State.OnAMissionFlag;
+            for (unsigned i = 0; i < 4; ++i) m_Memory[offset + i] = 0;
+        }
+        state.UsesMissionCleanup = false;
+        break;
+    case 0x0459: {
+        const auto active = m_Active;
+        for (const auto victim : active) {
+            auto& candidate = m_Threads[victim];
+            if (!candidate.Active || !EqualNameNoCase(candidate.Name, d.Text)) continue;
+            candidate.Active = false;
+            if (candidate.ThisMustBeTheOnlyMissionRunning) m_State.AlreadyRunningMission = false;
+            if (candidate.IsExternal && candidate.StreamedIndex >= 0 &&
+                std::size_t(candidate.StreamedIndex) < m_StreamedStates.size() &&
+                m_StreamedStates[std::size_t(candidate.StreamedIndex)].Users)
+                --m_StreamedStates[std::size_t(candidate.StreamedIndex)].Users;
+            std::erase(m_Active, victim);
+            m_Idle.push_back(victim);
+        }
+        break;
+    }
     case 0x016A: {
         auto& fade = m_State.Fade;
         fade.DurationSeconds = float(a) / 1000.0f;
@@ -1651,6 +2052,7 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
     // Dedicated totals use documented opcode contracts. Their complete original
     // internal notification/call sequence is NOT established by the schema.
     case 0x042C: m_State.IntStats[148 - 120] = a; ++m_State.StatWrites; break;
+    case 0x0317: ++m_State.IntStats[146 - 120]; ++m_State.StatWrites; break;
     case 0x030D: setStat(1, float(a), false); break;
     case 0x0997: m_State.IntStats[228 - 120] = a; ++m_State.StatWrites; break;
     case 0x01F0: {
@@ -1694,7 +2096,8 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         write(6, std::bit_cast<std::uint32_t>(objectCoordinates->Z));
         break;
     case 0x0518: case 0x0213: write(5, uint32(reference)); break;
-    case 0x02A7: write(4,uint32(reference)); break;
+    case 0x02A7: case 0x02A8: write(4,uint32(reference)); break;
+    case 0x0A40: write(4, uint32(reference)); break;
     case 0x014B: write(12, uint32(reference)); break;
     case 0x09E2: write(13, uint32(reference)); break;
     case 0x07AF: case 0x01F5: write(1, uint32(reference)); break;

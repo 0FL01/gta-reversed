@@ -59,7 +59,9 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
         app/platform/linux/NativeCutscene.cpp
         app/platform/linux/NativeCarRecordings.cpp
         app/platform/linux/NativeBeatTrack.cpp
+        app/platform/linux/NativeMissionAudio.cpp
         app/platform/linux/NativeScriptPeds.cpp
+        app/platform/linux/NativeScriptTrains.cpp
         app/platform/linux/NativeScriptObjects.cpp
         app/platform/linux/NativeScriptEntities.cpp
         app/platform/linux/NativeEntryExits.cpp
