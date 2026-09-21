@@ -1528,14 +1528,18 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         default: return invalid("invalid service result");
         }
     }
-    if (d.Opcode == 0x041D) {
+    if (d.Opcode == 0x041D || d.Opcode == 0x0391) {
         const NativeScriptRequestId id{m_SessionId, m_CommandSequence + 1, state.IP};
         NativeScriptServiceResult result;
         struct Guard { bool& Flag; Guard(bool& flag): Flag(flag) { Flag = true; } ~Guard() { Flag = false; } } guard{m_InService};
         try {
-            NativeScriptCameraCommandRequest request{id, d.Opcode};
-            request.Floats[0] = d.Float(0);
-            result = services.ApplyCameraCommand(request);
+            if (d.Opcode == 0x0391) {
+                result = services.RemoveTextureDictionary(id);
+            } else {
+                NativeScriptCameraCommandRequest request{id, d.Opcode};
+                request.Floats[0] = d.Float(0);
+                result = services.ApplyCameraCommand(request);
+            }
         } catch (const std::exception& exception) {
             return Fail(thread, NativeScriptStatus::Error, rawOpcode, "service exception: " + std::string(exception.what()));
         } catch (...) {
@@ -1601,7 +1605,8 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
             return Fail(thread, NativeScriptStatus::Error, rawOpcode, "service failed: " + result.Message);
         if (result.Status != NativeScriptServiceStatus::Ready) return invalid("invalid service result");
     }
-    if (d.Opcode == 0x0164 || d.Opcode == 0x0223 || d.Opcode == 0x0330 || d.Opcode == 0x048F || d.Opcode == 0x075C || d.Opcode == 0x0965) {
+    if (d.Opcode == 0x0164 || d.Opcode == 0x0223 || d.Opcode == 0x0330 || d.Opcode == 0x048F ||
+        d.Opcode == 0x075C || d.Opcode == 0x0965 || d.Opcode == 0x09F5 || d.Opcode == 0x00A0) {
         const NativeScriptRequestId id{m_SessionId, m_CommandSequence + 1, state.IP};
         NativeScriptServiceResult result;
         struct Guard { bool& Flag; Guard(bool& flag): Flag(flag) { Flag = true; } ~Guard() { Flag = false; } } guard{m_InService};
@@ -1619,9 +1624,17 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
             }
             else if (d.Opcode == 0x0223) result = services.SetPedHealth({id, {a}, b});
             else if (d.Opcode == 0x048F) result = services.RemoveAllPedWeapons({id, {a}});
-            else {
+            else if (d.Opcode == 0x00A0) {
+                auto queried = services.GetPedCoordinates({id, {a}});
+                result = std::move(queried.Result);
+                if (result.Status == NativeScriptServiceStatus::Ready) objectCoordinates = queried.Value;
+            }
+            else if (d.Opcode == 0x0330) {
                 if (b != 0 && b != 1) return invalid("never-tired switch requires a Boolean");
                 result = services.SetPlayerNeverTired({id, a, b != 0});
+            } else {
+                if (a != 0 && a != 1) return invalid("speech suppression requires a Boolean");
+                result = services.ShutAllCharsUp({id, a != 0});
             }
         } catch (const std::exception& exception) {
             return Fail(thread, NativeScriptStatus::Error, rawOpcode, "service exception: " + std::string(exception.what()));
@@ -1913,6 +1926,12 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
     case 0x077E: write(0, uint32(integerResult)); break;
     case 0x0953: write(0, uint32(integerResult)); break;
     case 0x00A5: write(4, uint32(reference)); break;
+    case 0x00A0:
+        if (!objectCoordinates) return invalid("ped coordinate service returned no value");
+        write(1, std::bit_cast<std::uint32_t>(objectCoordinates->X));
+        write(2, std::bit_cast<std::uint32_t>(objectCoordinates->Y));
+        write(3, std::bit_cast<std::uint32_t>(objectCoordinates->Z));
+        break;
     case 0x009A: write(5, uint32(reference)); break;
     case 0x0129: write(3, uint32(reference)); break;
     case 0x01C8: write(4, uint32(reference)); break;

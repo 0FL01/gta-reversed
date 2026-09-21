@@ -306,6 +306,10 @@ struct NativeScriptIntegerResult {
     NativeScriptServiceResult Result;
     std::int32_t Value = 0;
 };
+struct NativeScriptPositionResult {
+    NativeScriptServiceResult Result;
+    NativeScriptPosition Value;
+};
 struct NativeScriptStringResult {
     NativeScriptServiceResult Result;
     std::array<char, 16> Value{};
@@ -725,6 +729,9 @@ public:
     virtual NativeScriptServiceResult RemoveAllPedWeapons(const NativeScriptPedQueryRequest&) { return {}; }
     virtual NativeScriptBooleanResult IsPedSwimming(const NativeScriptPedQueryRequest&) { return {}; }
     virtual NativeScriptServiceResult SetPlayerNeverTired(const NativeScriptPlayerControlRequest&) { return {}; }
+    virtual NativeScriptServiceResult ShutAllCharsUp(const NativeScriptBooleanRequest&) { return {}; }
+    virtual NativeScriptPositionResult GetPedCoordinates(const NativeScriptPedQueryRequest&) { return {}; }
+    virtual NativeScriptServiceResult RemoveTextureDictionary(const NativeScriptRequestId&) { return {}; }
     virtual NativeScriptServiceResult LoadMissionText(const NativeScriptMissionTextRequest&) { return {}; }
     virtual NativeScriptServiceResult ClearText(const NativeScriptMissionTextRequest&) { return {}; }
     virtual NativeScriptServiceResult UseTextCommands(const NativeScriptTextCommandsRequest&) { return {}; }

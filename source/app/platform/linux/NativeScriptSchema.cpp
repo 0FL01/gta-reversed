@@ -7,6 +7,7 @@ using C = NativeScriptSemanticCoverage;
 // Sanny Builder Library sa/sa.json, default extension, pinned rather than read
 // at runtime. Behavioral ownership is verified independently against game_sa.
 constexpr NativeScriptOpcodeSchema s_Schema[]{
+    {0x09F5, {O::Integer}, 1, C::Implemented},
     {0x0000, {}, 0, C::Implemented},
     {0x0001, {O::Integer}, 1, C::Implemented}, {0x0002, {O::Integer}, 1, C::Implemented},
     {0x0004, {O::Output, O::Integer}, 2, C::Implemented}, {0x0005, {O::FloatOutput, O::Float}, 2, C::Implemented},
@@ -371,7 +372,7 @@ constexpr NativeScriptOpcodeSchema s_Schema[]{
     {0x006F, {O::InOutFloat, O::Float}, 2, C::Implemented},
     {0x03E3, {O::Integer}, 1, C::Unsupported},
     {0x038D, {O::Integer,O::Float,O::Float,O::Float,O::Float,O::Integer,O::Integer,O::Integer,O::Integer}, 9, C::Unsupported},
-    {0x0391, {}, 0, C::Unsupported},
+    {0x0391, {}, 0, C::Implemented},
     {0x002B, {O::Integer, O::Integer}, 2, C::Implemented},
     {0x001D, {O::Integer, O::Integer}, 2, C::Implemented},
     {0x0072, {O::InOutInteger, O::Integer}, 2, C::Implemented},
@@ -396,7 +397,7 @@ constexpr NativeScriptOpcodeSchema s_Schema[]{
     {0x00BB, {O::String,O::Integer,O::Integer}, 3, C::Unsupported},
     {0x0103, {O::Integer,O::Float,O::Float,O::Float,O::Float,O::Float,O::Float,O::Integer}, 8, C::Implemented},
     {0x0797, {O::Integer,O::Float}, 2, C::Unsupported},
-    {0x00A0, {O::Integer,O::FloatOutput,O::FloatOutput,O::FloatOutput}, 4, C::Unsupported},
+    {0x00A0, {O::Integer,O::FloatOutput,O::FloatOutput,O::FloatOutput}, 4, C::Implemented},
     {0x00AB, {O::Integer,O::Float,O::Float,O::Float}, 4, C::Unsupported},
     {0x0227, {O::Integer,O::Output}, 2, C::Unsupported},
     {0x0091, {O::Float,O::Integer}, 2, C::Unsupported},

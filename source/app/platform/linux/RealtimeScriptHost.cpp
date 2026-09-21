@@ -1593,6 +1593,54 @@ NativeScriptServiceResult RealtimeScriptHost::SetPlayerNeverTired(const NativeSc
     Commit(event);
     return Ready();
 }
+NativeScriptServiceResult RealtimeScriptHost::ShutAllCharsUp(const NativeScriptBooleanRequest& request) {
+    RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=0x09F5,
+        .StateArgument=request.Value ? 1 : 0};
+    if (auto old = Replay(event)) return *old;
+    m_AllCharsShutUp = request.Value;
+    Commit(event);
+    return Ready();
+}
+NativeScriptPositionResult RealtimeScriptHost::GetPedCoordinates(const NativeScriptPedQueryRequest& request) {
+    NativeScriptPositionResult result;
+    if (!m_Initialized) {
+        result.Result = Error("ped-coordinate query requires initialized host");
+        return result;
+    }
+    if (request.Ped.Value == PedRef().Value && ResolvePed(request.Ped)) {
+        result.Value = m_ScriptPlayerPosition.value_or(NativeScriptPosition{
+            m_Gameplay.State().PedRoot.X, m_Gameplay.State().PedRoot.Y, m_Gameplay.State().PedRoot.Z});
+    } else if (const auto* ped = m_ScriptPeds.Resolve(request.Ped)) {
+        result.Value = ped->Position;
+        if (ped->InVehicle) {
+            if (const auto* vehicle = m_Vehicles.Resolve({ped->Vehicle.Value})) {
+                const auto& p = vehicle->State.Matrix.Position;
+                result.Value = {p[0], p[1], p[2]};
+            }
+        }
+    } else {
+        result.Result = Error("ped-coordinate reference is stale");
+        return result;
+    }
+    RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=0x00A0,
+        .Arguments={result.Value.X, result.Value.Y, result.Value.Z}, .Reference=request.Ped.Value};
+    if (auto old = Replay(event)) {
+        result.Result = *old;
+        return result;
+    }
+    Commit(event);
+    result.Result = Ready();
+    return result;
+}
+NativeScriptServiceResult RealtimeScriptHost::RemoveTextureDictionary(const NativeScriptRequestId& id) {
+    RealtimeScriptHostEvent event{.Id=id, .Opcode=0x0391};
+    if (auto old = Replay(event)) return *old;
+    if (m_ScriptTextureRevision == std::numeric_limits<std::uint64_t>::max())
+        return Error("script texture revision exhausted");
+    ++m_ScriptTextureRevision;
+    Commit(event);
+    return Ready();
+}
 NativeScriptServiceResult RealtimeScriptHost::LoadMissionText(const NativeScriptMissionTextRequest& request) {
     if (!m_Initialized) return Error("mission text service requires initialized host");
     RealtimeScriptHostEvent event{.Id=request.Id,.Opcode=0x054C,.Name=request.Name};

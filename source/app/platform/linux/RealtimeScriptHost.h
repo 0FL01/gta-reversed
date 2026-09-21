@@ -335,6 +335,9 @@ public:
     NativeScriptServiceResult RemoveAllPedWeapons(const NativeScriptPedQueryRequest&) override;
     NativeScriptBooleanResult IsPedSwimming(const NativeScriptPedQueryRequest&) override;
     NativeScriptServiceResult SetPlayerNeverTired(const NativeScriptPlayerControlRequest&) override;
+    NativeScriptServiceResult ShutAllCharsUp(const NativeScriptBooleanRequest&) override;
+    NativeScriptPositionResult GetPedCoordinates(const NativeScriptPedQueryRequest&) override;
+    NativeScriptServiceResult RemoveTextureDictionary(const NativeScriptRequestId&) override;
     NativeScriptServiceResult LoadMissionText(const NativeScriptMissionTextRequest&) override;
     NativeScriptServiceResult ClearText(const NativeScriptMissionTextRequest&) override;
     NativeScriptServiceResult UseTextCommands(const NativeScriptTextCommandsRequest&) override;
@@ -442,6 +445,8 @@ private:
     bool m_PlayerControlEnabled = true;
     float m_PlayerHealth = 100.0f;
     bool m_PlayerNeverTired = false;
+    bool m_AllCharsShutUp = false;
+    std::uint64_t m_ScriptTextureRevision = 0;
     bool m_UpdateStatsVisible = true;
     std::optional<std::int32_t> m_CutsceneSkipTarget;
     std::optional<NativeScriptPrintRequest> m_LastPrint;
