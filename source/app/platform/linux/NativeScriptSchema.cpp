@@ -598,7 +598,6 @@ constexpr NativeScriptOpcodeSchema s_Schema[]{
     {0x099C, {O::Integer,O::Float,O::Float}, 3, C::Implemented},
     {0x015A, {}, 0, C::Implemented},
     {0x0362, {O::Integer,O::Float,O::Float,O::Float}, 4, C::Unsupported},
-    {0x091E, {O::Float,O::Float,O::Float,O::Float,O::Float,O::Float}, 6, C::Unsupported},
     {0x041D, {O::Float}, 1, C::Implemented},
     {0x02A8, {O::Float,O::Float,O::Float,O::Integer,O::Output}, 5, C::Implemented},
     {0x0330, {O::Integer,O::Integer}, 2, C::Implemented},

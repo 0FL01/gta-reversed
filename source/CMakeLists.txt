@@ -42,6 +42,7 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
         app/platform/linux/NativeCollisionAssets.cpp
         app/platform/linux/NativeScriptSchema.cpp
         app/platform/linux/NativeScriptCorpus.cpp
+        app/platform/linux/NativeScriptContentLedger.cpp
         app/platform/linux/NativeScriptSession.cpp
         app/platform/linux/NativeScriptServiceTransaction.cpp
         app/platform/linux/NativeScriptPortableSave.cpp
