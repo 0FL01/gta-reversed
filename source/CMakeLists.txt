@@ -68,6 +68,7 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
         app/platform/linux/NativeSourceEventFlow.cpp
         app/platform/linux/NativePopulationRuntime.cpp
         app/platform/linux/NativeCombatRuntime.cpp
+        app/platform/linux/NativeWantedRuntime.cpp
         app/platform/linux/NativeScriptTrains.cpp
         app/platform/linux/NativeScriptObjects.cpp
         app/platform/linux/NativeScriptEntities.cpp
