@@ -12,6 +12,7 @@
 #include "app/platform/linux/NativeGaragesRuntime.h"
 #include "app/platform/linux/NativeCarGeneratorRuntime.h"
 #include "app/platform/linux/NativePadFeedback.h"
+#include "app/platform/linux/NativeInputLifecycle.h"
 
 #ifndef GL_GLEXT_PROTOTYPES
 #define GL_GLEXT_PROTOTYPES
@@ -27,6 +28,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <unordered_map>
 #include <vector>
 #include <string>
 
@@ -925,6 +927,27 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             std::printf("play-pad-feedback status=%d message=%s\n", static_cast<int>(result.Status), result.Message.c_str());
     };
     reportPad(padFeedback.Initialize());
+    NativeInputLifecycle inputLifecycle;
+    NativeInputDeviceRef keyboardDevice, mouseDevice;
+    std::string inputLifecycleError;
+    if (inputLifecycle.Connect(NativeInputDeviceKind::Keyboard, 1, false, keyboardDevice, inputLifecycleError) != NativeInputLifecycleStatus::Ok ||
+        inputLifecycle.Connect(NativeInputDeviceKind::Mouse, 2, false, mouseDevice, inputLifecycleError) != NativeInputLifecycleStatus::Ok ||
+        inputLifecycle.BindSourceDefaults(inputLifecycleError) != NativeInputLifecycleStatus::Ok) {
+        std::printf("play-fail input lifecycle: %s\n", inputLifecycleError.c_str());
+        return 1;
+    }
+    std::unordered_map<SDL_JoystickID, NativeInputDeviceRef> gamepadDevices;
+    int initialGamepadCount = 0;
+    if (auto* ids = SDL_GetGamepads(&initialGamepadCount)) {
+        for (int i = 0; i < initialGamepadCount; ++i) {
+            NativeInputDeviceRef ref;
+            if (inputLifecycle.Connect(NativeInputDeviceKind::Gamepad,
+                static_cast<std::uint32_t>(ids[i]), true, ref, inputLifecycleError) == NativeInputLifecycleStatus::Ok) {
+                gamepadDevices[ids[i]] = ref;
+            }
+        }
+        SDL_free(ids);
+    }
     bool scriptWorldPending = false;
     if (newGame) {
         scriptHost.SetRadarSpriteReady([&hud](std::int32_t sprite) { return hud.IsRadarSpriteUploaded(sprite); });
@@ -1015,6 +1038,54 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
         bool collectJustDown = false;
         while (SDL_PollEvent(&event)) {
             reportPad(padFeedback.HandleEvent(event));
+            if (event.type == SDL_EVENT_GAMEPAD_ADDED) {
+                NativeInputDeviceRef ref;
+                if (inputLifecycle.Connect(NativeInputDeviceKind::Gamepad,
+                    static_cast<std::uint32_t>(event.gdevice.which), true, ref, inputLifecycleError) == NativeInputLifecycleStatus::Ok) {
+                    gamepadDevices[event.gdevice.which] = ref;
+                }
+            } else if (event.type == SDL_EVENT_GAMEPAD_REMOVED) {
+                if (const auto found = gamepadDevices.find(event.gdevice.which); found != gamepadDevices.end()) {
+                    (void)inputLifecycle.Disconnect(found->second, inputLifecycleError);
+                    gamepadDevices.erase(found);
+                }
+            } else if (event.type == SDL_EVENT_GAMEPAD_AXIS_MOTION) {
+                if (const auto found = gamepadDevices.find(event.gaxis.which); found != gamepadDevices.end()) {
+                    const float value = std::clamp(float(event.gaxis.value) / 32767.0f, -1.0f, 1.0f);
+                    (void)inputLifecycle.SubmitAxis(found->second, event.gaxis.axis, value, inputLifecycleError);
+                }
+            } else if (event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || event.type == SDL_EVENT_GAMEPAD_BUTTON_UP) {
+                if (const auto found = gamepadDevices.find(event.gbutton.which); found != gamepadDevices.end()) {
+                    (void)inputLifecycle.SubmitDigital(found->second, std::uint16_t(event.gbutton.button + 1u),
+                        event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN, inputLifecycleError);
+                }
+            } else if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
+                (void)inputLifecycle.SubmitDigital(mouseDevice, event.button.button,
+                    event.type == SDL_EVENT_MOUSE_BUTTON_DOWN, inputLifecycleError);
+            } else if (event.type == SDL_EVENT_MOUSE_MOTION) {
+                (void)inputLifecycle.SubmitAxis(mouseDevice, 0,
+                    std::clamp(event.motion.xrel / 50.0f, -1.0f, 1.0f), inputLifecycleError);
+                (void)inputLifecycle.SubmitAxis(mouseDevice, 1,
+                    std::clamp(event.motion.yrel / 50.0f, -1.0f, 1.0f), inputLifecycleError);
+            } else if (event.type == SDL_EVENT_MOUSE_WHEEL) {
+                (void)inputLifecycle.SubmitAxis(mouseDevice, 2,
+                    std::clamp(event.wheel.y, -1.0f, 1.0f), inputLifecycleError);
+            } else if (event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP) {
+                std::uint16_t control = 0;
+                const auto key = event.key.key;
+                if (key >= SDLK_A && key <= SDLK_Z) control = std::uint16_t('A' + (key - SDLK_A));
+                else if (key == SDLK_LSHIFT || key == SDLK_RSHIFT) control = NativeInputControls::KeyShift;
+                else if (key == SDLK_LCTRL || key == SDLK_RCTRL) control = NativeInputControls::KeyControl;
+                else if (key == SDLK_ESCAPE) control = NativeInputControls::KeyEscape;
+                else if (key == SDLK_SPACE) control = std::uint16_t(' ');
+                else if (key == SDLK_LEFT) control = NativeInputControls::KeyLeft;
+                else if (key == SDLK_RIGHT) control = NativeInputControls::KeyRight;
+                else if (key == SDLK_UP) control = NativeInputControls::KeyUp;
+                else if (key == SDLK_DOWN) control = NativeInputControls::KeyDown;
+                else if (key == SDLK_RETURN) control = NativeInputControls::KeyEnter;
+                if (control) (void)inputLifecycle.SubmitDigital(keyboardDevice, control,
+                    event.type == SDL_EVENT_KEY_DOWN, inputLifecycleError);
+            }
             if (event.type == SDL_EVENT_QUIT || event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED ||
                 (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE)) {
                 running = false;
@@ -1135,6 +1206,15 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
         paused = false;
         reportPad(padFeedback.Update(false));
         const bool* keys = SDL_GetKeyboardState(nullptr);
+        NativeInputLifecycleSnapshot lifecycleInput;
+        if (inputLifecycle.Sample(frames + 1u, gameNs / 1'000'000u, lifecycleInput,
+            inputLifecycleError) != NativeInputLifecycleStatus::Ok) {
+            std::printf("play-fail input sample: %s\n", inputLifecycleError.c_str());
+            return 1;
+        }
+        (void)inputLifecycle.SubmitAxis(mouseDevice, 0, 0.0f, inputLifecycleError);
+        (void)inputLifecycle.SubmitAxis(mouseDevice, 1, 0.0f, inputLifecycleError);
+        (void)inputLifecycle.SubmitAxis(mouseDevice, 2, 0.0f, inputLifecycleError);
         if (freecam) {
             camera.Update(dt, keys, demo);
         }
@@ -1155,13 +1235,16 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
         }
         if (gameplayEnabled && (!newGame || frames)) {
             if (!freecam) {
-                input.Forward = keys[SDL_SCANCODE_W] - keys[SDL_SCANCODE_S];
-                input.Side = keys[SDL_SCANCODE_D] - keys[SDL_SCANCODE_A];
-                input.Sprint = keys[SDL_SCANCODE_LSHIFT];
-                input.Brake = keys[SDL_SCANCODE_LCTRL];
-                input.Handbrake = keys[SDL_SCANCODE_SPACE];
-                input.LookYaw = (keys[SDL_SCANCODE_LEFT] - keys[SDL_SCANCODE_RIGHT]) * dt;
-                input.LookPitch = (keys[SDL_SCANCODE_UP] - keys[SDL_SCANCODE_DOWN]) * dt;
+                input.Forward = -float(lifecycleInput.Pad.Sample.MoveY) / 128.0f;
+                input.Side = float(lifecycleInput.Pad.Sample.MoveX) / 128.0f;
+                input.Jump |= lifecycleInput.Actions[std::size_t(NativeInputAction::Jump)] > 0.0f;
+                input.Interact |= (lifecycleInput.Pad.Pressed & 4u) != 0;
+                input.Sprint = lifecycleInput.Actions[std::size_t(NativeInputAction::Sprint)] > 0.0f;
+                input.Brake = lifecycleInput.Actions[std::size_t(NativeInputAction::VehicleBrake)] > 0.0f ||
+                    lifecycleInput.Actions[std::size_t(NativeInputAction::Fire)] > 0.0f;
+                input.Handbrake = lifecycleInput.Actions[std::size_t(NativeInputAction::Handbrake)] > 0.0f;
+                input.LookYaw = lifecycleInput.Actions[std::size_t(NativeInputAction::LookX)] * dt;
+                input.LookPitch = lifecycleInput.Actions[std::size_t(NativeInputAction::LookY)] * dt;
                 if (demo) {
                     // Use the interactive input/state path, never teleports
                     // or forced vehicle ownership to make a demo appear green.
