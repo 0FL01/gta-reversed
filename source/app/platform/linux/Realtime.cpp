@@ -58,6 +58,42 @@ static GLint WrapMode(uint32_t mode) {
     }
     return mode == 3 || mode == 4 ? GL_CLAMP_TO_EDGE : GL_REPEAT;
 }
+static std::size_t ImageBytes(const WorldShotImage& image) {
+    if (image.w <= 0 || image.h <= 0 || image.mipmaps <= 0 || image.mipmaps > 13) return 0;
+    std::size_t total = 0;
+    int width = image.w, height = image.h;
+    for (int level = 0; level < image.mipmaps; ++level) {
+        total += std::size_t(width) * height * 4;
+        width = std::max(1, width / 2);
+        height = std::max(1, height / 2);
+    }
+    return total;
+}
+static GLint MinFilter(const WorldShotImage& image) {
+    const auto mode = image.filter & 0xFFu;
+    if (image.mipmaps <= 1) return mode == 1 ? GL_NEAREST : GL_LINEAR;
+    switch (mode) {
+    case 1: return GL_NEAREST;
+    case 2: return GL_LINEAR;
+    case 3: return GL_NEAREST_MIPMAP_NEAREST;
+    case 4: return GL_NEAREST_MIPMAP_LINEAR;
+    case 5: return GL_LINEAR_MIPMAP_NEAREST;
+    default: return GL_LINEAR_MIPMAP_LINEAR;
+    }
+}
+static bool UploadImage(const WorldShotImage& image) {
+    if (!ImageBytes(image) || image.rgba.size() != ImageBytes(image)) return false;
+    std::size_t offset = 0;
+    int width = image.w, height = image.h;
+    for (int level = 0; level < image.mipmaps; ++level) {
+        glTexImage2D(GL_TEXTURE_2D, level, GL_RGBA8, width, height, 0,
+            GL_RGBA, GL_UNSIGNED_BYTE, image.rgba.data() + offset);
+        offset += std::size_t(width) * height * 4;
+        width = std::max(1, width / 2);
+        height = std::max(1, height / 2);
+    }
+    return true;
+}
 
 // Compatibility GL is already a native-track dependency. Static geometry uses
 // bounded lists, preserving precisely the dynamic Draw vertex/material path.
@@ -94,18 +130,16 @@ struct GpuScene {
         glGenTextures(static_cast<GLsizei>(textures.size()), textures.data());
         for (size_t i = 0; i < scene.images.size(); ++i) {
             const auto& image = scene.images[i];
-            if (image.w <= 0 || image.h <= 0 ||
-                image.rgba.size() != static_cast<size_t>(image.w) * image.h * 4) {
+            if (!ImageBytes(image) || image.rgba.size() != ImageBytes(image)) {
                 std::printf("play-fail invalid texture %s\n", image.name);
                 return false;
             }
             glBindTexture(GL_TEXTURE_2D, textures[i]);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, MinFilter(image));
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (image.filter & 0xFFu) == 1 ? GL_NEAREST : GL_LINEAR);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, WrapMode((image.filter >> 8) & 15));
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, WrapMode((image.filter >> 12) & 15));
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, image.w, image.h, 0,
-                         GL_RGBA, GL_UNSIGNED_BYTE, image.rgba.data());
+            if (!UploadImage(image)) return false;
         }
         return glGetError() == GL_NO_ERROR;
     }
@@ -131,8 +165,7 @@ struct GpuScene {
         do {
             if (uploadImage < scene.images.size()) {
                 const auto& image = scene.images[uploadImage];
-                if (image.w <= 0 || image.h <= 0 ||
-                    image.rgba.size() != static_cast<size_t>(image.w) * image.h * 4) {
+                if (!ImageBytes(image) || image.rgba.size() != ImageBytes(image)) {
                     std::printf("play-fail invalid texture %s\n", image.name);
                     return false;
                 }
@@ -140,13 +173,12 @@ struct GpuScene {
                 if (uploadRow < 0) {
                     glGenTextures(1, &texture);
                     glBindTexture(GL_TEXTURE_2D, texture);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, MinFilter(image));
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (image.filter & 0xFFu) == 1 ? GL_NEAREST : GL_LINEAR);
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, WrapMode((image.filter >> 8) & 15));
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, WrapMode((image.filter >> 12) & 15));
-                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, image.w, image.h, 0,
-                                 GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-                    uploadRow = 0;
+                    if (!UploadImage(image)) return false;
+                    ++uploadImage;
                 } else {
                     glBindTexture(GL_TEXTURE_2D, texture);
                     const int rows = std::min(image.h - uploadRow, std::max(1, 65536 / (image.w * 4)));
@@ -439,6 +471,11 @@ struct LiveWorld {
                 options.CollisionOut = request.Vehicle ? &collision : nullptr;
                 return NativeScriptEntities_LoadStaticModel(request.GameDir.c_str(),request.Model,
                     request.Texture,scene,error,options);
+            },
+            [](const realtime_streaming::ScriptTextureRequest& request,
+                NativeScriptTextureDictionaryPacket& packet, std::string& error) {
+                return NativeScriptEntities_LoadTextureDictionary(
+                    request.GameDir.c_str(), request.Name, packet, error);
             });
     }
 
@@ -1146,6 +1183,20 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
                     } else if (!world.worker->RequestStaticModel({ticket, gameDir, pending->Name, pending->Texture,
                         pending->Vehicle})) {
                         std::printf("play-fail script model request admission\n");
+                        return 1;
+                    }
+                } else if (const auto& pending = scriptHost.PendingTexture()) {
+                    const auto ticket = pending->Id.Instruction;
+                    auto completion = world.worker->TakeScriptTexture(ticket);
+                    if (completion) {
+                        if (!completion->Error.empty() || !scriptHost.FulfillPendingTexture(
+                            pending->Id, std::move(completion->Packet), gameplayError)) {
+                            if (gameplayError.empty()) gameplayError = completion->Error;
+                            std::printf("play-fail script texture: %s\n", gameplayError.c_str());
+                            return 1;
+                        }
+                    } else if (!world.worker->RequestScriptTexture({ticket, gameDir, pending->Name})) {
+                        std::printf("play-fail script texture request admission\n");
                         return 1;
                     }
                 } else if (scriptHost.WorldTransaction().Phase != NativeScriptServiceTransactionPhase::Idle) {

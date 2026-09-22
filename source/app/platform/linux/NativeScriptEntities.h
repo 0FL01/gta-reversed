@@ -168,6 +168,14 @@ struct NativeScriptStaticModelOptions {
 };
 bool NativeScriptEntities_LoadStaticModel(const char* gameDir, const std::string& model,
     const std::string& txd, WorldShotScene& scene, std::string& error, const NativeScriptStaticModelOptions& options = {});
+struct NativeScriptTextureDictionaryPacket {
+    std::string Name;
+    std::vector<WorldShotImage> Images;
+};
+// Sole-parser-worker TXD handoff for script LOAD_TEXTURE_DICTIONARY. The packet
+// contains only decoded owned texels/sampler metadata; no RW pointers escape.
+bool NativeScriptEntities_LoadTextureDictionary(const char* gameDir, const std::string& name,
+    NativeScriptTextureDictionaryPacket& packet, std::string& error);
 
 class NativeScriptEntities {
 public:

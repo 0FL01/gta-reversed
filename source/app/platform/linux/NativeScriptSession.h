@@ -393,6 +393,15 @@ struct NativeScriptMissionTextRequest {
     NativeScriptRequestId Id;
     std::array<char, 8> Name{};
 };
+struct NativeScriptTextureDictionaryRequest {
+    NativeScriptRequestId Id;
+    std::array<char, 16> Name{};
+};
+struct NativeScriptSpriteRequest {
+    NativeScriptRequestId Id;
+    std::int32_t Slot = -1;
+    std::array<char, 16> Name{};
+};
 struct NativeScriptTextCommandsRequest {
     NativeScriptRequestId Id;
     bool Enabled = false;
@@ -732,6 +741,8 @@ public:
     virtual NativeScriptServiceResult ShutAllCharsUp(const NativeScriptBooleanRequest&) { return {}; }
     virtual NativeScriptPositionResult GetPedCoordinates(const NativeScriptPedQueryRequest&) { return {}; }
     virtual NativeScriptServiceResult RemoveTextureDictionary(const NativeScriptRequestId&) { return {}; }
+    virtual NativeScriptServiceResult LoadTextureDictionary(const NativeScriptTextureDictionaryRequest&) { return {}; }
+    virtual NativeScriptServiceResult LoadSprite(const NativeScriptSpriteRequest&) { return {}; }
     virtual NativeScriptServiceResult LoadMissionText(const NativeScriptMissionTextRequest&) { return {}; }
     virtual NativeScriptServiceResult ClearText(const NativeScriptMissionTextRequest&) { return {}; }
     virtual NativeScriptServiceResult UseTextCommands(const NativeScriptTextCommandsRequest&) { return {}; }

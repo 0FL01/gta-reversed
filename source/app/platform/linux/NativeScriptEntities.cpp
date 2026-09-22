@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <limits>
@@ -332,6 +333,37 @@ bool NativeScriptEntities_LoadStaticModel(const char* gameDir, const std::string
         auto prepared = ReadStaticModel(model, txd, options); Bounds(prepared);
         scene = std::move(prepared); error.clear(); return true;
     } catch (const std::exception& e) { error = e.what(); return false; }
+}
+bool NativeScriptEntities_LoadTextureDictionary(const char* gameDir, const std::string& name,
+    NativeScriptTextureDictionaryPacket& packet, std::string& error) {
+    try {
+        Require(!name.empty() && name.size() <= 15 && std::all_of(name.begin(), name.end(), [](unsigned char c) {
+            return std::isalnum(c) || c == '_';
+        }), "invalid script texture dictionary name");
+        RwScope scope;
+        OS_SetFilePathOffset(gameDir);
+        auto bytes = ReadFile(("models/txd/" + name + ".txd").c_str());
+        Dictionary dictionary(bytes);
+        NativeScriptTextureDictionaryPacket candidate;
+        candidate.Name = name;
+        FORLIST(link, dictionary.Value->textures) {
+            const auto* texture = rw::Texture::fromDict(link);
+            WorldShotImage image{};
+            Require(texture && TexSample_Decode(texture, image) && !image.rgba.empty(),
+                "script texture decode");
+            Require(std::none_of(candidate.Images.begin(), candidate.Images.end(), [&](const auto& old) {
+                return !std::strcmp(old.name, image.name);
+            }), "duplicate script texture name");
+            candidate.Images.push_back(std::move(image));
+        }
+        Require(!candidate.Images.empty(), "empty script texture dictionary");
+        packet = std::move(candidate);
+        error.clear();
+        return true;
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    }
 }
 bool NativeScriptEntities_LoadRadar(const char* gameDir, WorldShotImage& image, std::string& error, int sprite) {
     try {

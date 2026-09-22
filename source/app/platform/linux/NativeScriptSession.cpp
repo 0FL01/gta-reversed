@@ -1528,13 +1528,21 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         default: return invalid("invalid service result");
         }
     }
-    if (d.Opcode == 0x041D || d.Opcode == 0x0391) {
+    if (d.Opcode == 0x041D || d.Opcode == 0x0391 || d.Opcode == 0x0390 || d.Opcode == 0x038F) {
         const NativeScriptRequestId id{m_SessionId, m_CommandSequence + 1, state.IP};
         NativeScriptServiceResult result;
         struct Guard { bool& Flag; Guard(bool& flag): Flag(flag) { Flag = true; } ~Guard() { Flag = false; } } guard{m_InService};
         try {
             if (d.Opcode == 0x0391) {
                 result = services.RemoveTextureDictionary(id);
+            } else if (d.Opcode == 0x0390) {
+                NativeScriptTextureDictionaryRequest request{id};
+                request.Name = d.Strings[0];
+                result = services.LoadTextureDictionary(request);
+            } else if (d.Opcode == 0x038F) {
+                NativeScriptSpriteRequest request{id, a};
+                request.Name = d.Strings[1];
+                result = services.LoadSprite(request);
             } else {
                 NativeScriptCameraCommandRequest request{id, d.Opcode};
                 request.Floats[0] = d.Float(0);

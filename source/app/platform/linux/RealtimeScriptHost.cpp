@@ -29,6 +29,14 @@ NativeScriptServiceResult Pending(std::string message = {}) { return {NativeScri
 NativeScriptServiceResult Error(std::string message) { return {NativeScriptServiceStatus::Error, std::move(message)}; }
 NativeScriptServiceResult Unsupported(std::string message) { return {NativeScriptServiceStatus::Unsupported, std::move(message)}; }
 bool Finite(NativeScriptPosition p) { return std::isfinite(p.X) && std::isfinite(p.Y) && std::isfinite(p.Z); }
+template<std::size_t N> std::string FixedName(const std::array<char, N>& value) {
+    return {value.data(), strnlen(value.data(), value.size())};
+}
+bool EqualNoCase(std::string_view a, std::string_view b) {
+    return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](unsigned char x, unsigned char y) {
+        return std::tolower(x) == std::tolower(y);
+    });
+}
 NativeScriptServiceIdentity WorldIdentity(const NativeScriptSceneRequest& request, bool requireGround) {
     NativeScriptServiceIdentity identity;
     identity.Id = request.Id;
@@ -41,7 +49,9 @@ NativeScriptServiceIdentity WorldIdentity(const NativeScriptSceneRequest& reques
 }
 }
 
-RealtimeScriptHost::RealtimeScriptHost(RealtimeGameplay& gameplay): m_Gameplay(gameplay) {}
+RealtimeScriptHost::RealtimeScriptHost(RealtimeGameplay& gameplay): m_Gameplay(gameplay) {
+    m_ScriptSpriteImages.fill(-1);
+}
 RealtimeScriptHost::~RealtimeScriptHost() {
     if (!m_PendingLoad || !m_Cancel) return;
     NativeScriptServiceTicket ticket;
@@ -1637,7 +1647,77 @@ NativeScriptServiceResult RealtimeScriptHost::RemoveTextureDictionary(const Nati
     if (auto old = Replay(event)) return *old;
     if (m_ScriptTextureRevision == std::numeric_limits<std::uint64_t>::max())
         return Error("script texture revision exhausted");
+    m_ScriptTextureDictionary.reset();
+    m_ScriptSpriteImages.fill(-1);
     ++m_ScriptTextureRevision;
+    Commit(event);
+    return Ready();
+}
+NativeScriptServiceResult RealtimeScriptHost::LoadTextureDictionary(
+    const NativeScriptTextureDictionaryRequest& request) {
+    const auto name = FixedName(request.Name);
+    if (!m_Initialized || name.empty() || name.size() > 15 || !std::all_of(name.begin(), name.end(), [](unsigned char c) {
+        return std::isalnum(c) || c == '_';
+    })) return Error("invalid script texture dictionary name");
+    RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=0x0390};
+    std::copy(name.begin(), name.end(), event.ModelName.begin());
+    if (auto old = Replay(event)) return *old;
+    if (m_ScriptTextureDictionary) {
+        if (!EqualNoCase(m_ScriptTextureDictionary->Name, name))
+            return Error("another script texture dictionary is resident");
+        Commit(event);
+        return Ready();
+    }
+    if (m_PendingTexture) {
+        if (m_PendingTexture->Id != request.Id || !EqualNoCase(m_PendingTexture->Name, name))
+            return Error("another script texture dictionary request is pending");
+        return Pending("script texture parser request pending");
+    }
+    m_PendingTexture = PendingScriptTexture{request.Id, name};
+    return Pending("script texture parser request pending");
+}
+bool RealtimeScriptHost::FulfillPendingTexture(const NativeScriptRequestId& id,
+    std::shared_ptr<const NativeScriptTextureDictionaryPacket> packet, std::string& error) {
+    if (!m_PendingTexture || m_PendingTexture->Id != id || !packet || packet->Images.empty() ||
+        !EqualNoCase(m_PendingTexture->Name, packet->Name)) {
+        error = "script texture completion does not match pending request";
+        return false;
+    }
+    for (std::size_t i = 0; i < packet->Images.size(); ++i) {
+        const auto& image = packet->Images[i];
+        if (!image.w || !image.h || image.rgba.empty() || !strnlen(image.name, sizeof(image.name))) {
+            error = "script texture completion contains invalid image";
+            return false;
+        }
+        for (std::size_t j = 0; j < i; ++j) if (EqualNoCase(image.name, packet->Images[j].name)) {
+            error = "script texture completion contains duplicate image";
+            return false;
+        }
+    }
+    if (m_ScriptTextureRevision == std::numeric_limits<std::uint64_t>::max()) {
+        error = "script texture revision exhausted";
+        return false;
+    }
+    m_ScriptTextureDictionary = std::move(packet);
+    m_PendingTexture.reset();
+    ++m_ScriptTextureRevision;
+    error.clear();
+    return true;
+}
+NativeScriptServiceResult RealtimeScriptHost::LoadSprite(const NativeScriptSpriteRequest& request) {
+    const auto name = FixedName(request.Name);
+    if (!m_Initialized || request.Slot < 0 || std::size_t(request.Slot) >= m_ScriptSpriteImages.size() ||
+        name.empty() || !m_ScriptTextureDictionary) return Error("invalid script sprite request");
+    RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=0x038F, .Index=request.Slot};
+    std::copy(name.begin(), name.end(), event.ModelName.begin());
+    if (auto old = Replay(event)) return *old;
+    const auto found = std::find_if(m_ScriptTextureDictionary->Images.begin(),
+        m_ScriptTextureDictionary->Images.end(), [&](const auto& image) {
+            return EqualNoCase(name, std::string_view(image.name, strnlen(image.name, sizeof(image.name))));
+        });
+    if (found == m_ScriptTextureDictionary->Images.end()) return Error("script sprite is absent from resident dictionary");
+    m_ScriptSpriteImages[std::size_t(request.Slot)] =
+        static_cast<std::int32_t>(found - m_ScriptTextureDictionary->Images.begin());
     Commit(event);
     return Ready();
 }

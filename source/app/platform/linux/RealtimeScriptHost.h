@@ -338,6 +338,15 @@ public:
     NativeScriptServiceResult ShutAllCharsUp(const NativeScriptBooleanRequest&) override;
     NativeScriptPositionResult GetPedCoordinates(const NativeScriptPedQueryRequest&) override;
     NativeScriptServiceResult RemoveTextureDictionary(const NativeScriptRequestId&) override;
+    NativeScriptServiceResult LoadTextureDictionary(const NativeScriptTextureDictionaryRequest&) override;
+    NativeScriptServiceResult LoadSprite(const NativeScriptSpriteRequest&) override;
+    struct PendingScriptTexture {
+        NativeScriptRequestId Id;
+        std::string Name;
+    };
+    const std::optional<PendingScriptTexture>& PendingTexture() const { return m_PendingTexture; }
+    bool FulfillPendingTexture(const NativeScriptRequestId&,
+        std::shared_ptr<const NativeScriptTextureDictionaryPacket>, std::string& error);
     NativeScriptServiceResult LoadMissionText(const NativeScriptMissionTextRequest&) override;
     NativeScriptServiceResult ClearText(const NativeScriptMissionTextRequest&) override;
     NativeScriptServiceResult UseTextCommands(const NativeScriptTextCommandsRequest&) override;
@@ -447,6 +456,9 @@ private:
     bool m_PlayerNeverTired = false;
     bool m_AllCharsShutUp = false;
     std::uint64_t m_ScriptTextureRevision = 0;
+    std::optional<PendingScriptTexture> m_PendingTexture;
+    std::shared_ptr<const NativeScriptTextureDictionaryPacket> m_ScriptTextureDictionary;
+    std::array<std::int32_t, 64> m_ScriptSpriteImages{};
     bool m_UpdateStatsVisible = true;
     std::optional<std::int32_t> m_CutsceneSkipTarget;
     std::optional<NativeScriptPrintRequest> m_LastPrint;

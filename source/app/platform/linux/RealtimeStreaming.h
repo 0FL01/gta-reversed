@@ -4,6 +4,7 @@
 #include "app/platform/linux/StreamPager.h"
 #include "app/platform/linux/RealtimeGameplay.h"
 #include "app/platform/linux/NativeVehicleAssetQueue.h"
+#include "app/platform/linux/NativeScriptEntities.h"
 
 #include <cassert>
 #include <chrono>
@@ -38,6 +39,17 @@ struct StaticModelCompletion {
 };
 using StaticModelLoader = std::function<bool(const StaticModelRequest&, WorldShotScene&,
     std::shared_ptr<const NativeCollisionModel>&, std::string&)>;
+struct ScriptTextureRequest {
+    std::uint64_t Ticket = 0;
+    std::string GameDir, Name;
+};
+struct ScriptTextureCompletion {
+    std::uint64_t Ticket = 0;
+    std::shared_ptr<const NativeScriptTextureDictionaryPacket> Packet;
+    std::string Error;
+};
+using ScriptTextureLoader = std::function<bool(const ScriptTextureRequest&,
+    NativeScriptTextureDictionaryPacket&, std::string&)>;
 
 struct CpuWorld {
     Center Position;
@@ -102,10 +114,12 @@ class Worker {
 public:
     explicit Worker(bool collision, std::shared_ptr<const NativeCollisionContext> context = {},
                      std::shared_ptr<const NativePlacementOverrides> overrides = {}, uint64_t initialGeneration = 1,
-                     std::shared_ptr<const NativeVehicleAssetSource> vehicleSource = {}, StaticModelLoader modelLoader = {})
+                     std::shared_ptr<const NativeVehicleAssetSource> vehicleSource = {},
+                     StaticModelLoader modelLoader = {}, ScriptTextureLoader textureLoader = {})
         : m_Collision(collision), m_Context(std::move(context)), m_Overrides(std::move(overrides)),
           m_Generation(initialGeneration), m_VehicleSource(std::move(vehicleSource)),
-          m_StaticModelLoader(std::move(modelLoader)), m_Thread([this] { Run(); }) {}
+           m_StaticModelLoader(std::move(modelLoader)), m_ScriptTextureLoader(std::move(textureLoader)),
+           m_Thread([this] { Run(); }) {}
     ~Worker() { Stop({}, {}); }
     Worker(const Worker&) = delete;
     Worker& operator=(const Worker&) = delete;
@@ -161,6 +175,22 @@ public:
         if (!m_StaticModelReady || m_StaticModelReady->Ticket != ticket) return std::nullopt;
         auto result = std::move(m_StaticModelReady);
         m_StaticModelReady.reset();
+        return result;
+    }
+    bool RequestScriptTexture(const ScriptTextureRequest& request) {
+        std::lock_guard lock(m_Mutex);
+        if (m_Stop || !request.Ticket || request.GameDir.empty() || request.Name.empty()) return false;
+        if ((m_ScriptTextureWaiting && m_ScriptTextureWaiting->Ticket != request.Ticket) ||
+            (m_ScriptTextureReady && m_ScriptTextureReady->Ticket != request.Ticket)) return false;
+        if (!m_ScriptTextureWaiting && !m_ScriptTextureReady) m_ScriptTextureWaiting = request;
+        m_Wake.notify_one();
+        return true;
+    }
+    std::optional<ScriptTextureCompletion> TakeScriptTexture(std::uint64_t ticket) {
+        std::lock_guard lock(m_Mutex);
+        if (!m_ScriptTextureReady || m_ScriptTextureReady->Ticket != ticket) return std::nullopt;
+        auto result = std::move(m_ScriptTextureReady);
+        m_ScriptTextureReady.reset();
         return result;
     }
 
@@ -219,7 +249,7 @@ private:
         std::unique_lock lock(m_Mutex);
         for (;;) {
             m_Wake.wait(lock, [&] { return m_Stop || m_Retired || m_Vehicles.Retiring() ||
-                m_Vehicles.Waiting() || m_StaticModelWaiting || (!m_Busy && m_Wanted); });
+                m_Vehicles.Waiting() || m_StaticModelWaiting || m_ScriptTextureWaiting || (!m_Busy && m_Wanted); });
             if (m_Stop) {
                 auto ready = std::move(m_Ready);
                 auto retired = std::move(m_Retired);
@@ -254,6 +284,20 @@ private:
                 else completion.Error = request.Model + ": " + completion.Error;
                 lock.lock();
                 m_StaticModelReady = std::move(completion);
+                continue;
+            }
+            if (m_ScriptTextureWaiting) {
+                auto request = std::move(*m_ScriptTextureWaiting);
+                m_ScriptTextureWaiting.reset();
+                lock.unlock();
+                ScriptTextureCompletion completion{.Ticket=request.Ticket,.Packet={},.Error={}};
+                auto packet = std::make_shared<NativeScriptTextureDictionaryPacket>();
+                if (m_ScriptTextureLoader && m_ScriptTextureLoader(request,*packet,completion.Error))
+                    completion.Packet = std::move(packet);
+                else if (!m_ScriptTextureLoader) completion.Error = "script texture loader is unavailable";
+                else completion.Error = request.Name + ": " + completion.Error;
+                lock.lock();
+                m_ScriptTextureReady = std::move(completion);
                 continue;
             }
             // Alternate eligible parser jobs, without waiting for world GPU
@@ -321,9 +365,12 @@ private:
     uint64_t m_Generation = 1;
     const std::shared_ptr<const NativeVehicleAssetSource> m_VehicleSource;
     StaticModelLoader m_StaticModelLoader;
+    ScriptTextureLoader m_ScriptTextureLoader;
     NativeVehicleAssetQueue m_Vehicles;
     std::optional<StaticModelRequest> m_StaticModelWaiting;
     std::optional<StaticModelCompletion> m_StaticModelReady;
+    std::optional<ScriptTextureRequest> m_ScriptTextureWaiting;
+    std::optional<ScriptTextureCompletion> m_ScriptTextureReady;
     bool m_LastWasVehicle = false;
     std::unique_ptr<CpuWorld> m_Ready, m_Retired, m_StopActive, m_StopPending;
     // Last: every field above is initialized before Run can observe it.
