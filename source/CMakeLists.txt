@@ -86,6 +86,7 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
         app/platform/linux/TexSample.cpp
         app/platform/linux/SfxDecode.cpp
         app/platform/linux/GxtText.cpp
+        app/platform/linux/NativeTextFamilies.cpp
         app/platform/linux/MenuShot.cpp
         app/platform/linux/MenuNav.cpp
         app/platform/linux/ColLoad.cpp
