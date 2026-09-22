@@ -7,6 +7,7 @@ namespace realtime_streaming { struct CpuWorld; }
 struct NativeGaragesRuntimeInput {
     std::uint64_t Frame = 0; // unpaused source frame counter, once per update
     bool Replay = false, Coop = false;
+    std::optional<NativeVehicleRef> ScriptPlayerVehicle;
 };
 enum class NativeGaragesRuntimeBarrier { None, GarageUpdate, GarageCamera };
 enum class NativeGarageTidyMode : std::uint8_t { Far, Near };
@@ -62,7 +63,8 @@ public:
     // Pure adapter exposed for input fixtures; production Tick calls this with
     // its bound live gameplay owner. Vehicle render bounds are never substituted.
     static NativeScriptServiceResult MakeView(const RealtimeGameplayState&, const RealtimeGameplayCamera&,
-        const NativeGarages&, NativeGaragesRuntimeInput, NativeGarageView& out);
+        const NativeGarages&, NativeGaragesRuntimeInput, NativeGarageView& out,
+        const NativeVehicleRecord* scriptVehicle = nullptr);
     // Pure immutable source-slot reader. Far mode never reads collision or any
     // world/render owner and never mutates/releases a candidate.
     static NativeGarageTidyPlan PlanTidy(const NativeGarageEntry&, NativeGarageRef, std::uint64_t frame,

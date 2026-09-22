@@ -119,11 +119,23 @@ public:
     bool Initialize(const char* gameDir, std::string& error);
     bool Initialize(const char* gameDir, std::string& error, const NativePlayerClothes* player);
     bool Initialize(const char* gameDir, std::string& error, RealtimeGameplayModel model);
+    // Parse the exact initial MODEL_PLAYER outfit before the sole parser worker
+    // starts. The prebuilt pose is hidden until the source 070D build commits.
+    bool InitializeScriptPlayerAppearance(const char* gameDir, const NativePlayerClothes& clothes,
+        std::string& error);
+    bool RevealScriptPlayerAppearance(std::string& error);
+    bool ScriptAppearancePrepared() const;
+    bool ScriptAppearanceVisible() const;
     const IfpAnimStats& PlayerModelStats() const;
     // 0053 preserves authored Z; no ground snapping and no preview vehicle.
     // Source entity root = authored base + 1 (ped1 COL bounding box).
     bool SpawnScriptPlayer(const RealtimeGameplayWorld& world, RealtimeVec3 authoredBase, std::string& error);
     bool SetScriptHeading(float radians, std::string& error);
+    // SCM vehicle occupancy is authoritative. Keep the rendered source-outfit
+    // ped at its script-owned location; hide it while seated, never simulate a
+    // second car or turn the diagnostic controller into vehicle authority.
+    bool AdoptScriptPlayerPlacement(const RealtimeGameplayWorld& world, RealtimeVec3 entityRoot,
+        float forwardHeading, bool seated, std::string& error);
     bool SetScriptCameraBehind(const RealtimeGameplayWorld& world, std::string& error);
     // rayTop is the ceiling for nearest ground, not a requested flat height.
     // Fails explicitly when ground/body clearance/nearby car placement is absent.

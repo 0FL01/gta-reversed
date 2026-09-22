@@ -312,13 +312,21 @@ NativeGarageRequirement NativeGarages::Transition(const NativeGarageEntry& g,con
     const auto p=view.Vehicle ? view.Vehicle->Matrix.Position : view.Player.Matrix.Position;
     // Independent retail assertions cover each of these actual return paths.
     // No catch-all distance suppression or assumption that every type is idle.
-    if (g.Type==1 && g.DoorState==0 && !view.Vehicle)
-        return NativeGarageRequirement::None; // 44F0A6: either target differs from null, or the following non-null test fails
-    if ((g.Type==2 || g.Type==3 || g.Type==4) && g.DoorState==1 && !view.Vehicle)
-        return NativeGarageRequirement::None; // 44EACA -> 44DBF5: IsStaticPlayerCarEntirelyInside false
+    if (g.Type==1 && g.DoorState==0 && g.TargetVehicleRef<0)
+        return NativeGarageRequirement::None; // retail 44F0A6: player car differs from null target, or both null and 44F0BF exits
+    if ((g.Type==2 || g.Type==3 || g.Type==4) && g.DoorState==1 &&
+        (!view.Vehicle || !EntirelyInside(g,*view.Vehicle,0)))
+        return NativeGarageRequirement::None; // retail 44EACA -> 44DBE0: car must be completely inside before the bomb-shop body
     if (g.Type==5) {
         if (p[2]>=950) return NativeGarageRequirement::None;
         if (g.DoorState==1 && policy.NoResprays) return NativeGarageRequirement::None;
+        // Retail 44E355 compares the 2D garage-bound rectangle distance with
+        // 64.0 before entering the vehicle respray body. Source's preceding
+        // last-garage wanted policy is not yet owned; keep it strict if set.
+        if (g.DoorState==1 && view.Vehicle &&
+            policy.LastGaragePlayerWasIn!=static_cast<std::int32_t>(index) &&
+            DistanceSquared(g,view.Vehicle->Matrix.Position)>=64.0f)
+            return NativeGarageRequirement::None;
         if (g.DoorState==1 && !view.Vehicle) {
             // 44E2B9 still evaluates the player's actual source spheres and
             // may change wanted policy on FOOT. No vehicle alone isn't a no-op.

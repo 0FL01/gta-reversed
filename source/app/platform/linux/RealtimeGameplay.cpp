@@ -554,6 +554,8 @@ struct RealtimeGameplay::Impl {
     size_t PedMeshes=0;
     bool Initialized=false;
     bool BasePlayer=false;
+    bool ScriptAppearancePending=false;
+    bool ScriptPassengerHidden=false;
     IfpAnimStats PlayerStats{};
     RealtimeGameplayState State;
     NativePlayerActivitySnapshot Activity;
@@ -928,10 +930,10 @@ struct RealtimeGameplay::Impl {
         }
         for (size_t i=0;i<PedMeshes;++i) {
             auto& out=Actors.meshes[i]; const auto& ma=Clips[0].Frames[0].meshes[i];
-            out.tris=State.InVehicle ? 0 : ma.tris;
+            out.tris=State.InVehicle || ScriptAppearancePending || ScriptPassengerHidden ? 0 : ma.tris;
             // Keep arrays consistent with tris even for renderers that iterate
             // the soup instead of tris. Capacity survives entry/exit.
-            out.pos.resize(State.InVehicle ? 0 : ma.pos.size()); out.nrm.resize(out.pos.size());
+            out.pos.resize(State.InVehicle || ScriptAppearancePending || ScriptPassengerHidden ? 0 : ma.pos.size()); out.nrm.resize(out.pos.size());
             for (size_t v=0;v<out.pos.size();v+=3) {
                 V p{},n{};
                 for (size_t k=0;k<Clips.size();++k) {
@@ -1007,9 +1009,32 @@ bool RealtimeGameplay::Initialize(const char* gameDir,std::string& error,const N
 bool RealtimeGameplay::Initialize(const char* gameDir,std::string& error,RealtimeGameplayModel model) {
     return InitializeModel(gameDir,error,nullptr,model);
 }
+bool RealtimeGameplay::InitializeScriptPlayerAppearance(const char* gameDir,
+    const NativePlayerClothes& clothes, std::string& error) {
+    return InitializeModel(gameDir, error, &clothes, RealtimeGameplayModel::BasePlayer);
+}
+bool RealtimeGameplay::RevealScriptPlayerAppearance(std::string& error) {
+    auto& player = *m_Impl;
+    if (!player.Initialized || !player.BasePlayer || !player.ScriptAppearancePending || !player.State.Ready) {
+        error = "source outfit is not prepared for a live script player";
+        return false;
+    }
+    player.ScriptAppearancePending = false;
+    player.Pose(0);
+    error.clear();
+    return true;
+}
+bool RealtimeGameplay::ScriptAppearancePrepared() const {
+    return m_Impl->Initialized && m_Impl->BasePlayer && m_Impl->ScriptAppearancePending;
+}
+bool RealtimeGameplay::ScriptAppearanceVisible() const {
+    return m_Impl->Initialized && m_Impl->BasePlayer && !m_Impl->ScriptAppearancePending &&
+        m_Impl->State.Ready && m_Impl->PedMeshes > 0 && m_Impl->Actors.meshes[0].tris > 2;
+}
 bool RealtimeGameplay::InitializeModel(const char* gameDir,std::string& error,const NativePlayerClothes* player,RealtimeGameplayModel model) {
     auto next=std::make_unique<Impl>();
     next->BasePlayer=model==RealtimeGameplayModel::BasePlayer;
+    next->ScriptAppearancePending = next->BasePlayer && player;
     char err[512]={};
     // The parse helpers keep their own TXDs but borrow the global engine. Their
     // shutdown functions destroy only their dictionaries; restore current before
@@ -1058,7 +1083,7 @@ bool RealtimeGameplay::InitializeModel(const char* gameDir,std::string& error,co
                 if (frame.stats.bones!=32 || frame.stats.mapped!=tracks) { error="CJ clip has unexpected bone coverage"; return false; }
             }
         } else if (!IfpAnim_Seq(gameDir,next->BasePlayer ? "player":"andre",clip.Name,33,seq,err,sizeof(err))) { error=err; return false; }
-        if (next->BasePlayer) {
+        if (next->BasePlayer && !player) {
             for (const auto& frame:seq) {
                 const auto& s=frame.stats;
                 const bool partial=std::string(clip.Name)=="JUMP_glide" || std::string(clip.Name)=="JUMP_land" ||
@@ -1079,7 +1104,7 @@ bool RealtimeGameplay::InitializeModel(const char* gameDir,std::string& error,co
         for (auto& frame:seq) {
             // Base MODEL_PLAYER retains source model-space Z at the entity
             // origin; the six-vertex placeholder is not a feet-height measure.
-            const V offset{frame.stats.rootWorld[0],frame.stats.rootWorld[1],next->BasePlayer ? -1.0f:first.animMin[2]};
+            const V offset{frame.stats.rootWorld[0],frame.stats.rootWorld[1],next->BasePlayer && !player ? -1.0f:first.animMin[2]};
             for (auto& mesh:frame.scene.meshes) {
                 for (size_t v=0;v<mesh.pos.size();v+=3) Store(mesh.pos,v,Sub(Load(mesh.pos,v),offset));
             }
@@ -1171,7 +1196,7 @@ bool RealtimeGameplay::SpawnScriptPlayer(const RealtimeGameplayWorld& world,V au
         error="no resident real triangle ground at script player"; return false;
     }
     if (p.PedBlocked(world,authoredBase,false)) { error="script player body intersects resident world"; return false; }
-    p.State={}; p.State.Ped=authoredBase; p.State.CarPresent=false;
+    p.State={}; p.State.Ped=authoredBase; p.State.CarPresent=false; p.ScriptPassengerHidden=false;
     p.State.PedHeading=p.OrbitYaw=Pi*0.5f; // SetupPlayerPed orientation(0,0,0): forward +Y
     p.State.Ready=p.State.MissionCreated=p.State.PlayerOnFootTask=true;
     p.State.Grounded=std::abs(authoredBase.Z-ground)<0.05f;
@@ -1190,6 +1215,31 @@ bool RealtimeGameplay::SetScriptHeading(float radians,std::string& error) {
         p.State.PedCurrentRotation=radians;
     }
     error.clear(); return true;
+}
+bool RealtimeGameplay::AdoptScriptPlayerPlacement(const RealtimeGameplayWorld& world,
+    V entityRoot, float forwardHeading, bool seated, std::string& error) {
+    auto& p = *m_Impl;
+    if (!p.State.Ready || !p.BasePlayer || p.State.CarPresent || p.State.InVehicle ||
+        !std::isfinite(entityRoot.X) || !std::isfinite(entityRoot.Y) ||
+        !std::isfinite(entityRoot.Z) || !std::isfinite(forwardHeading) ||
+        !std::isfinite(entityRoot.Z - 1.0f)) {
+        error = "script player placement requires a live source ped and finite car transform";
+        return false;
+    }
+    p.State.Ped = {entityRoot.X, entityRoot.Y, entityRoot.Z - 1.0f};
+    p.State.PedHeading = forwardHeading;
+    p.State.PlayerOnFootTask = !seated;
+    p.State.VerticalSpeed = 0;
+    p.PedSpeed = 0;
+    p.ScriptPassengerHidden = seated;
+    float ground = 0;
+    p.State.Grounded = !seated && world.Ground(entityRoot.X, entityRoot.Y,
+        entityRoot.Z + 1.0f, entityRoot.Z - 3.0f, ground) &&
+        std::abs(p.State.Ped.Z - ground) < 0.05f;
+    p.Pose(0);
+    p.UpdateCamera(0, world);
+    error.clear();
+    return true;
 }
 bool RealtimeGameplay::SetScriptCameraBehind(const RealtimeGameplayWorld& world,std::string& error) {
     auto& p=*m_Impl;

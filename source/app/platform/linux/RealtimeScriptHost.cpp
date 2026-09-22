@@ -1,4 +1,5 @@
 #include "app/platform/linux/RealtimeScriptHost.h"
+#include "app/platform/linux/NativePlayerAssets.h"
 #include <algorithm>
 #include <cassert>
 #include <bit>
@@ -77,7 +78,7 @@ bool RealtimeScriptHost::SeedSourceRngAfterRwInit(std::string& error) {
     error.clear(); return true;
 }
 bool RealtimeScriptHost::InitializeBeforeWorker(const char* gameDir, std::string& error,
-    std::shared_ptr<const NativeCollisionContext> collision) {
+    std::shared_ptr<const NativeCollisionContext> collision, bool prepareInitialAppearance) {
     if (!gameDir || !*gameDir) { error = "script host needs game directory"; return false; }
     if (m_Initialized || m_Sealed) { error = "script host initialization must precede worker startup, once"; return false; }
     if (!SeedSourceRngAfterRwInit(error)) return false;
@@ -88,7 +89,13 @@ bool RealtimeScriptHost::InitializeBeforeWorker(const char* gameDir, std::string
     const auto absoluteGameDir = std::filesystem::absolute(gameDir, pathError).string();
     if (pathError) { error = "script host game path: " + pathError.message(); return false; }
     if (!m_Session.LoadMain(absoluteGameDir.c_str(), error)) return false;
-    if (!m_Gameplay.Initialize(gameDir, error, RealtimeGameplayModel::BasePlayer)) return false;
+    if (prepareInitialAppearance) {
+        const auto initialOutfit = NativePlayerClothes_Startup();
+        if (!m_Gameplay.InitializeScriptPlayerAppearance(gameDir, initialOutfit, error)) return false;
+        m_SourcePlayerAppearance = true;
+    } else if (!m_Gameplay.Initialize(gameDir, error, RealtimeGameplayModel::BasePlayer)) {
+        return false;
+    }
     if (!m_Entities.LoadBeforeWorker(gameDir, error)) return false;
     if (!m_EntryExits.LoadBeforeWorker(gameDir, error)) return false;
     if (!m_ZonePopulation.LoadBeforeWorker(gameDir, error)) return false;
@@ -259,6 +266,56 @@ void RealtimeScriptHost::SealStartup() {
 NativeScriptResult RealtimeScriptHost::RunPass(std::size_t quota) {
     if (!m_Initialized) return {NativeScriptStatus::Error, 0, 0, 0, "script host not initialized"};
     return m_Session.RunPass(*this, quota);
+}
+std::vector<std::int32_t> RealtimeScriptHost::ResidentVehicleModelIds() const {
+    std::vector<std::int32_t> models;
+    for (const auto& [id, scene] : m_ScriptModels) {
+        if (scene && m_CarGenerators.FindModel(id)) models.push_back(id);
+    }
+    for (std::size_t i = 0; i < NativeVehiclePool::Capacity; ++i) {
+        const auto* record = m_Vehicles.AtSlot(i);
+        if (!record || !record->State.InWorld ||
+            std::ranges::find(models, record->State.ModelId) != models.end()) continue;
+        models.push_back(record->State.ModelId);
+    }
+    return models;
+}
+std::optional<NativeScriptPosition> RealtimeScriptHost::ScriptPlayerPosition() const {
+    if (m_PlayerScriptVehicle) {
+        const auto* vehicle = m_Vehicles.Resolve({m_PlayerScriptVehicle->Value});
+        if (!vehicle) return std::nullopt;
+        const auto& position = vehicle->State.Matrix.Position;
+        return NativeScriptPosition{position[0], position[1], position[2]};
+    }
+    if (!m_ScriptPlayerPosition) return std::nullopt;
+    const auto& position = m_Gameplay.State().PedRoot;
+    return NativeScriptPosition{position.X, position.Y, position.Z};
+}
+bool RealtimeScriptHost::SynchronizeScriptPlayerPresentation(std::string& error) {
+    if (!m_World || !m_Gameplay.State().Ready) {
+        error = "script player presentation requires a resident world and live ped";
+        return false;
+    }
+    if (m_PlayerScriptVehicle) {
+        const auto* vehicle = m_Vehicles.Resolve({m_PlayerScriptVehicle->Value});
+        if (!vehicle) {
+            error = "script player vehicle became stale before presentation";
+            return false;
+        }
+        const auto& matrix = vehicle->State.Matrix;
+        const auto& position = matrix.Position;
+        const auto& forward = matrix.Basis[1];
+        return m_Gameplay.AdoptScriptPlayerPlacement(*m_World,
+            {position[0], position[1], position[2]},
+            std::atan2(forward[1], forward[0]), true, error);
+    }
+    if (!m_ScriptPlayerPosition) {
+        error = "no script vehicle or authored player relocation";
+        return false;
+    }
+    const auto& position = *m_ScriptPlayerPosition;
+    return m_Gameplay.AdoptScriptPlayerPlacement(*m_World,
+        {position.X, position.Y, position.Z}, m_Gameplay.State().PedHeading, false, error);
 }
 bool RealtimeScriptHost::AdvanceTime(std::uint32_t nowMs, std::string& error) {
     if (nowMs < m_Session.State().TimeMs) return m_Session.AdvanceTime(nowMs, error);
@@ -1171,6 +1228,7 @@ NativeScriptServiceResult RealtimeScriptHost::WarpPedIntoVehiclePassenger(
     m_PlayerScriptVehicle = request.Vehicle;
     m_PlayerScriptSeat = request.Seat;
     m_ScriptPlayerPosition = {p[0], p[1], p[2]};
+    if (!SynchronizeScriptPlayerPresentation(error)) return Error(error);
     Commit(event);
     return Ready();
 }
@@ -1192,6 +1250,7 @@ NativeScriptServiceResult RealtimeScriptHost::TaskLeaveVehicleImmediately(
         m_ScriptPlayerPosition = {p[0], p[1], p[2]};
         m_PlayerScriptVehicle.reset();
         m_PlayerScriptSeat = -1;
+        if (!SynchronizeScriptPlayerPresentation(error)) return Error(error);
     } else if (m_ScriptPeds.LeaveVehicle(request.Ped, request.Vehicle, error) != NativeScriptPedStatus::Ok) {
         return Error(error);
     }
@@ -1496,6 +1555,9 @@ NativeScriptServiceResult RealtimeScriptHost::GivePlayerClothes(const NativeScri
     event.ModelName = {};
     std::copy(request.Model.begin(), request.Model.end(), event.ModelName.begin());
     if (auto old = Replay(event)) return *old;
+    if (m_SourcePlayerAppearance && m_Clothes.State().BuildRevision) {
+        return Unsupported("source outfit changes after initial build require a new parser-worker appearance packet");
+    }
     auto result = m_Clothes.Give(request);
     event.Status = result.Status;
     Commit(event);
@@ -1507,7 +1569,38 @@ NativeScriptServiceResult RealtimeScriptHost::BuildPlayerModel(const NativeScrip
     }
     RealtimeScriptHostEvent event{.Id=request.Id,.Opcode=0x070D,.Index=request.PlayerIndex};
     if (auto old = Replay(event)) return *old;
+    if (m_SourcePlayerAppearance) {
+        // Initial SCM four 087B commands, audited at 59838/59857/59883/59915.
+        // Only this exact pre-parsed descriptor can commit without parsing on
+        // the main thread while the sole world parser worker is running.
+        constexpr std::array<std::pair<std::string_view, std::string_view>, 4> expected{{
+            {"VEST", "VEST"}, {"PLAYER_FACE", "HEADER_FACE"},
+            {"JEANSDENIM", "JEANSDENIM"}, {"SNEAKERBINCBLK", "SNEAKERBINCBLK"}}};
+        const auto& parts = m_Clothes.State().Parts;
+        bool matches = m_Gameplay.ScriptAppearancePrepared();
+        for (std::size_t i = 0; i < parts.size(); ++i) {
+            if (i < expected.size()) {
+                matches &= EqualNoCase(FixedName(parts[i].Texture), expected[i].first) &&
+                    EqualNoCase(FixedName(parts[i].Model), expected[i].second);
+            } else {
+                matches &= parts[i].Texture[0] == 0 && parts[i].Model[0] == 0;
+            }
+        }
+        if (!matches) {
+            std::string detail = "SCM outfit differs from exclusively prepared source CJ appearance: prepared=" +
+                std::to_string(m_Gameplay.ScriptAppearancePrepared());
+            for (std::size_t i = 0; i < expected.size(); ++i) {
+                detail += " part" + std::to_string(i) + "=" + FixedName(parts[i].Texture) +
+                    "/" + FixedName(parts[i].Model);
+            }
+            return Unsupported(detail);
+        }
+    }
     auto result = m_Clothes.Build(request.PlayerIndex);
+    if (result.Status == NativeScriptServiceStatus::Ready && m_SourcePlayerAppearance) {
+        std::string error;
+        if (!m_Gameplay.RevealScriptPlayerAppearance(error)) return Error(error);
+    }
     event.Status = result.Status;
     Commit(event);
     return result;
@@ -1619,7 +1712,7 @@ NativeScriptPositionResult RealtimeScriptHost::GetPedCoordinates(const NativeScr
         return result;
     }
     if (request.Ped.Value == PedRef().Value && ResolvePed(request.Ped)) {
-        result.Value = m_ScriptPlayerPosition.value_or(NativeScriptPosition{
+        result.Value = ScriptPlayerPosition().value_or(NativeScriptPosition{
             m_Gameplay.State().PedRoot.X, m_Gameplay.State().PedRoot.Y, m_Gameplay.State().PedRoot.Z});
     } else if (const auto* ped = m_ScriptPeds.Resolve(request.Ped)) {
         result.Value = ped->Position;
@@ -2074,7 +2167,7 @@ NativeScriptBooleanResult RealtimeScriptHost::LocateChar(const NativeScriptLocat
         return result;
     }
     const auto& player = m_Gameplay.State();
-    NativeScriptPosition point = m_ScriptPlayerPosition.value_or(
+    NativeScriptPosition point = ScriptPlayerPosition().value_or(
         NativeScriptPosition{player.PedRoot.X, player.PedRoot.Y, player.PedRoot.Z});
     bool inVehicle = player.InVehicle;
     if (!request.OnFoot && m_PlayerScriptVehicle) {

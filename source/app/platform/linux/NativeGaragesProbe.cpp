@@ -128,6 +128,19 @@ int NativeGaragesProbe(const char* dir,std::uint64_t& commands,std::uint16_t& op
     outside.Player.Matrix.Position[2]=950;
     check(NativeGarages::Transition(initial,outside)==NativeGarageRequirement::None,"source interior-height950 exclusion");
     auto driving=view; driving.Vehicle=NativeGarageEntityBounds{.Matrix=view.Player.Matrix,.Collision=carCol,.ModelId=411,.VehicleSubType=0};
+    auto targetGarage=garages.Entries()[0];
+    check(targetGarage.Type==1 && targetGarage.DoorState==0 && targetGarage.TargetVehicleRef<0 &&
+        NativeGarages::Transition(targetGarage,driving,garages.Policy(),0)==NativeGarageRequirement::None,
+        "retail 44F0A6 closed target-only garage exits when source target reference is null, even with a player car");
+    targetGarage.TargetVehicleRef=42;
+    check(NativeGarages::Transition(targetGarage,driving,garages.Policy(),0)==
+        NativeGarageRequirement::SourceTypeUpdate,
+        "target-only garage with a registered target still rejects the unported source body");
+    const auto bombShop = garages.Entries()[3];
+    check(bombShop.Type==2 && bombShop.DoorState==1 &&
+        NativeGarages::DistanceSquared(bombShop,driving.Vehicle->Matrix.Position)>3600 &&
+        NativeGarages::Transition(bombShop,driving,garages.Policy(),3)==NativeGarageRequirement::None,
+        "retail 44DBE0 skips the open bomb shop when the actual vehicle COL is not entirely inside");
     driving.Vehicle->Matrix.Position[1]=initial.Rect[2]-9;
     check(NativeGarages::Transition(initial,driving)==NativeGarageRequirement::VehicleCapacity,"real model411 embedded COL input reaches source vehicle-capacity dependency inside10m");
     driving.Vehicle->Matrix.Position[1]=initial.Rect[2]-10;

@@ -70,8 +70,18 @@ NativeGarageTidyPlan NativeGaragesRuntime::PlanTidy(const NativeGarageEntry& gar
 }
 
 NativeScriptServiceResult NativeGaragesRuntime::MakeView(const RealtimeGameplayState& player,const RealtimeGameplayCamera& camera,
-    const NativeGarages& garages,NativeGaragesRuntimeInput input,NativeGarageView& out) {
-    if (!player.Ready || !player.MissionCreated || !player.PlayerOnFootTask || !garages.Ped1Collision()) return Error("garage driver requires the live new-game player owner");
+    const NativeGarages& garages,NativeGaragesRuntimeInput input,NativeGarageView& out,
+    const NativeVehicleRecord* scriptVehicle) {
+    if (!player.Ready || !player.MissionCreated ||
+        (!player.PlayerOnFootTask && !input.ScriptPlayerVehicle) || !garages.Ped1Collision())
+        return Error("garage driver requires the live new-game player owner");
+    if (input.ScriptPlayerVehicle && (!scriptVehicle ||
+        scriptVehicle->Reference != *input.ScriptPlayerVehicle ||
+        scriptVehicle->Producer != NativeVehicleProducer::NativeScm ||
+        !scriptVehicle->State.InWorld || !scriptVehicle->State.Collision ||
+        !scriptVehicle->State.ModelCollision ||
+        scriptVehicle->State.ModelId != scriptVehicle->State.ModelCollision->ModelId))
+        return Error("garage driver requires the exact script vehicle COL and pool identity");
     if (player.InVehicle && !input.Replay && !input.Coop) return Unsupported("garage driver requires actual vehicle COL, matrix, model and subtype; render bounds are insufficient");
     for (float v:{player.PedHeading,player.PedRoot.X,player.PedRoot.Y,player.PedRoot.Z,camera.Position.X,camera.Position.Y,camera.Position.Z})
         if (!std::isfinite(v)) return Error("nonfinite source player pose or camera position");
@@ -85,6 +95,11 @@ NativeScriptServiceResult NativeGaragesRuntime::MakeView(const RealtimeGameplayS
     const float angle=player.PedHeading-3.14159265358979323846f*.5f;
     const float c=std::cos(angle),s=std::sin(angle);
     next.Player.Matrix.Basis={NativeCollisionVector{c,s,0},{-s,c,0},{0,0,1}};
+    if (scriptVehicle) {
+        next.Vehicle = NativeGarageEntityBounds{scriptVehicle->State.Matrix,
+            scriptVehicle->State.Collision, scriptVehicle->State.ModelId,
+            scriptVehicle->State.SubType};
+    }
     next.Camera={camera.Position.X,camera.Position.Y,camera.Position.Z};
     out=std::move(next); return {NativeScriptServiceStatus::Ready,{}};
 }
@@ -106,7 +121,12 @@ NativeScriptServiceResult NativeGaragesRuntime::Tick(const realtime_streaming::C
         return Error("garage driver cannot accept an unbound vehicle snapshot");
     }
     NativeGaragesRuntimeFrame next;
-    const auto view=MakeView(m_Gameplay.State(),m_Gameplay.Camera(),m_Garages,input,next.View);
+    const NativeVehicleRecord* scriptVehicle = nullptr;
+    if (input.ScriptPlayerVehicle) {
+        if (!m_Vehicles || !vehicles) return Error("script garage vehicle needs the bound pool");
+        scriptVehicle = m_Vehicles->Resolve(*input.ScriptPlayerVehicle);
+    }
+    const auto view=MakeView(m_Gameplay.State(),m_Gameplay.Camera(),m_Garages,input,next.View,scriptVehicle);
     if (view.Status!=NativeScriptServiceStatus::Ready) return view;
     if (!published.Error.empty() || published.Scene.meshes.empty() || !published.SourceCollision || !published.Overrides ||
         published.SourceCollision->Overrides!=published.Overrides) return Error("garage driver needs one committed source scene/COL override publication");
@@ -163,6 +183,15 @@ NativeScriptServiceResult NativeGaragesRuntime::Tick(const realtime_streaming::C
                     update.Garage.Index,next.TidyPlan->Candidates.size());
             } else {
                 std::snprintf(message.data(),message.size(),"garage %zu requires %s",update.Garage.Index,Required(update.Requirement));
+            }
+            if (update.Requirement == NativeGarageRequirement::SourceTypeUpdate) {
+                if (const auto* garage = m_Garages.Resolve(update.Garage)) {
+                    const auto& p = next.View.Vehicle ? next.View.Vehicle->Matrix.Position : next.View.Player.Matrix.Position;
+                    std::snprintf(message.data(), message.size(),
+                        "garage %zu requires source type/state body (type=%u door=%u distance-squared=%.2f player-vehicle=%d)",
+                        update.Garage.Index, garage->Type, garage->DoorState,
+                        NativeGarages::DistanceSquared(*garage, p), int(next.View.Vehicle.has_value()));
+                }
             }
             result.Status=NativeScriptServiceStatus::Unsupported; result.Message=message.data();
         }

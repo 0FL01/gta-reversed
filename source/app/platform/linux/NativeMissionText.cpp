@@ -192,8 +192,10 @@ NativeScriptServiceResult NativeMissionText::SetStyle(std::uint16_t opcode,
         if (floats[0] < 0 || floats[1] < 0) return {NativeScriptServiceStatus::Error, "negative text scale"};
         m_Style.ScaleX = floats[0]; m_Style.ScaleY = floats[1]; break;
     case 0x0340:
-        if (!bytesValid(0, 4)) return {NativeScriptServiceStatus::Error, "text colour outside bytes"};
-        for (unsigned i = 0; i < 4; ++i) m_Style.Colour[i] = std::uint8_t(integers[i]);
+        // CommandParser::Read<CRGBA> reads each SCM operand as uint8. An int32
+        // local/global colour channel contributes its low byte, not a checked
+        // 0..255 int32 (the fourth operand at mission2:210627 is local 179).
+        for (unsigned i = 0; i < 4; ++i) m_Style.Colour[i] = static_cast<std::uint8_t>(integers[i]);
         break;
     case 0x0341:
         if (!boolean) return {NativeScriptServiceStatus::Error, "text justify outside boolean"};

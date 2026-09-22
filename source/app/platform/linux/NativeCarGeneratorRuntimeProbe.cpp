@@ -7,11 +7,13 @@
 #include <cmath>
 #include <cstdio>
 #include <fstream>
+#include <source_location>
 #include <stdexcept>
 
 namespace {
-void Require(bool ok, const std::string& error) {
-    if (!ok) throw std::runtime_error(error);
+void Require(bool ok, const std::string& error,
+    const std::source_location& where = std::source_location::current()) {
+    if (!ok) throw std::runtime_error("line " + std::to_string(where.line()) + ": " + error);
 }
 
 NativeCarGeneratorCreateRequest FirstConstructor(const char* gameDir) {
@@ -111,7 +113,7 @@ int main(int argc, char** argv) try {
         const auto root = gameplay.State().PedRoot;
         world.Position = {root.X,root.Y,root.Z}; world.Generation = 1;
         world.Build(true, context, host.InitialPlacementOverrides());
-        Require(world.Error.empty() && world.SourceCollision && world.Collision.TriangleCount(), world.Error);
+        Require(world.Error.empty() && world.SourceCollision && world.QueryWorld().TriangleCount(), world.Error);
         NativeCarGeneratorRuntime runtime(registry, gameplay, pool, host.State());
         NativeCarGeneratorRuntimeInput input;
         input.Camera = CameraFixture(gameplay.Camera());
@@ -145,7 +147,7 @@ int main(int argc, char** argv) try {
         const auto local = NativeCarGeneratorRuntime::Observe(world, ref, {root.X,root.Y,root.Z}, camera, input.Camera);
         RealtimeVec3 independent;
         NativeCollisionHit provenance;
-        Require(world.Collision.Raycast({root.X,root.Y,root.Z+1}, {root.X,root.Y,-1000}, independent, &provenance) &&
+        Require(world.QueryWorld().Raycast({root.X,root.Y,root.Z+1}, {root.X,root.Y,-1000}, independent, &provenance) &&
             local.VerticalRayHit && local.VerticalHit.Z == independent.Z && local.VerticalSource.Model == provenance.Model &&
             !provenance.Library.empty() && !provenance.Ipl.empty() &&
             local.Observation.Ground == NativeCarGeneratorGround::Unknown &&
@@ -158,7 +160,7 @@ int main(int argc, char** argv) try {
         NativeCarGenerators motionRegistry;
         NativeCarGeneratorRuntime motion(motionRegistry, gameplay, pool, host.State());
         const auto beforeMotion = gameplay.State();
-        gameplay.Tick(1.0/60, {.Forward = .5f}, world.Collision);
+        gameplay.Tick(1.0/60, {.Forward = .5f}, world.QueryWorld());
         Require(host.AdvanceTime(16, error), error);
         input.Frame = 4; input.Camera = CameraFixture(gameplay.Camera());
         auto motionVehicles = pool.Publish(input.Frame, error); Require(bool(motionVehicles), error);
@@ -191,7 +193,7 @@ int main(int argc, char** argv) try {
         airfield.Position = {325,2537,17.5f}; airfield.Generation = 2;
         airfield.Build(true, context, host.InitialPlacementOverrides());
         Require(airfield.Error.empty(), airfield.Error);
-        Require(gameplay.SpawnScriptPlayer(airfield.Collision, {350,2537,17.5f}, error), error);
+        Require(gameplay.SpawnScriptPlayer(airfield.QueryWorld(), {350,2537,17.5f}, error), error);
         Require(host.AdvanceTime(20, error), error);
         Require(registry.Switch({{7002,1,207050},ref,101}, 0).Status == NativeScriptServiceStatus::Ready, "LABELLED enable fixture");
         NativeCarGeneratorRuntime pending(registry, gameplay, pool, host.State());

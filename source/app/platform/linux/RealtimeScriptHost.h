@@ -86,7 +86,8 @@ public:
     // Loads main.scm and base player pose caches, never an outfit. Call exactly
     // once BEFORE launching the RW streaming worker. Pager lifecycle stays parent-owned.
     bool InitializeBeforeWorker(const char* gameDir, std::string& error,
-        std::shared_ptr<const NativeCollisionContext> collision = {});
+        std::shared_ptr<const NativeCollisionContext> collision = {},
+        bool prepareInitialAppearance = false);
     // Call immediately after native RW initialization, before source consumers.
     // InitializeBeforeWorker also calls this if the parent has not yet done so.
     // Captures OS_TimeMS exactly once; repeated calls never reseed.
@@ -153,6 +154,7 @@ public:
     const NativeWorldObjectOverrides& WorldObjectOverrides() const { return m_WorldObjectOverrides; }
     const NativeScriptWeather& Weather() const { return m_Weather; }
     const NativeScriptClothes& Clothes() const { return m_Clothes; }
+    bool SourcePlayerAppearanceVisible() const { return m_SourcePlayerAppearance && m_Gameplay.ScriptAppearanceVisible(); }
     const NativeMissionText& MissionText() const { return m_MissionText; }
     const NativeCutscene& Cutscene() const { return m_Cutscene; }
     const NativeCarRecordings& CarRecordings() const { return m_CarRecordings; }
@@ -165,7 +167,11 @@ public:
     bool ZoneNamesVisible() const { return m_ZoneNamesVisible; }
     const std::array<std::uint8_t, 3>& FadeColour() const { return m_FadeColour; }
     bool PlayerControlEnabled() const { return m_PlayerControlEnabled; }
-    std::optional<NativeScriptPosition> ScriptPlayerPosition() const { return m_ScriptPlayerPosition; }
+    std::optional<NativeScriptPosition> ScriptPlayerPosition() const;
+    bool PlayerInScriptVehicle() const noexcept { return m_PlayerScriptVehicle.has_value(); }
+    std::optional<NativeScriptVehicleRef> ScriptPlayerVehicle() const noexcept { return m_PlayerScriptVehicle; }
+    std::vector<std::int32_t> ResidentVehicleModelIds() const;
+    bool SynchronizeScriptPlayerPresentation(std::string& error);
     bool UpdateStatsVisible() const { return m_UpdateStatsVisible; }
     const NativeScriptObjects& Objects() const { return m_Objects; }
     // Explicit query inputs carry source area/ENEX authority; city unlock is
@@ -420,6 +426,7 @@ private:
     NativeWorldObjectOverrides m_WorldObjectOverrides;
     NativeScriptWeather m_Weather;
     NativeScriptClothes m_Clothes;
+    bool m_SourcePlayerAppearance = false;
     NativeMissionText m_MissionText;
     NativeCutscene m_Cutscene;
     NativeCarRecordings m_CarRecordings;

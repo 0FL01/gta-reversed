@@ -14,6 +14,9 @@ struct NativeCarGeneratorRuntimeInput {
     std::uint64_t Frame = 0; // actual unpaused host update, not a retry counter
     std::uint8_t Area = 0; // current native extent is exclusively exterior 0
     float GenerationDistanceMultiplier = 1.0f; // source camera owner value
+    // Exact player vehicle position from the current NativeScm pool owner,
+    // never from the diagnostic controller's unused car transform.
+    std::optional<NativeScriptPosition> ScriptVehiclePosition;
     // CapturePriceView after installing the world camera, before actor transforms.
     // Missing matrices leave visibility Unknown; never assume visible/unoccluded.
     std::optional<RealtimeHudPriceView> Camera;
@@ -55,6 +58,7 @@ struct NativeCarGeneratorRuntimeFrame {
     std::uint32_t GameMs = 0, ParkedCars = 0;
     std::size_t FreeVehicleSlots = 0;
     std::uint8_t ClockHour = 0, Area = 0;
+    bool ScriptVehicleActive = false;
     NativeScriptPosition PlayerCenter, Camera;
     // Actual root displacement / controller simulated interval, converted to
     // source units (m/s / 50). This is native interval motion, not a claim that

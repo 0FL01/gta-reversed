@@ -36,13 +36,24 @@ int main(int argc, char** argv) {
     Check(text.SetFont(1).Status == NativeScriptServiceStatus::Ready && text.Font() == 1 && text.Revision() == 4);
     Check(text.SetStyle(0x033F,{0.5f,1.25f},{}).Status == NativeScriptServiceStatus::Ready &&
         text.Style().ScaleX == 0.5f && text.Style().ScaleY == 1.25f && text.Revision() == 5);
+    // 0340 reads CRGBA's uint8 components. The shipped mission2 instruction
+    // uses three literal 255 channels and a variable alpha in local 179.
+    Check(text.SetStyle(0x0340, {}, {255, 255, 255, 511, 0}).Status ==
+        NativeScriptServiceStatus::Ready && text.Style().Colour ==
+        (std::array<std::uint8_t, 4>{255, 255, 255, 255}) && text.Revision() == 6);
+    Check(text.SetStyle(0x0340, {}, {-1, 256, 257, -254, 0}).Status ==
+        NativeScriptServiceStatus::Ready && text.Style().Colour ==
+        (std::array<std::uint8_t, 4>{255, 0, 1, 2}) && text.Revision() == 7);
+    const auto style = text.Style();
+    Check(text.SetStyle(0x060D, {}, {0, 256, 0, 0, 0}).Status ==
+        NativeScriptServiceStatus::Error && text.Style() == style && text.Revision() == 7);
     auto sourceDual = Name("DUAL");
     sourceDual[5] = '|';
     Check(text.Select(sourceDual).Status == NativeScriptServiceStatus::Ready &&
-        text.Active() == Name("DUAL") && text.Revision() == 6);
+        text.Active() == Name("DUAL") && text.Revision() == 8);
     const auto active = text.Active();
     Check(text.Select(Name("MISSING")).Status == NativeScriptServiceStatus::Error &&
-        text.Active() == active && text.Revision() == 6);
+        text.Active() == active && text.Revision() == 8);
     std::cout << "native-mission-text-ok checks=" << s_Checks
               << " tables=127 active=INTRO1 presentation=0\n";
 }

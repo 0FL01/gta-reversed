@@ -43,8 +43,16 @@ def build():
             log.flush()
             subprocess.run(command, cwd=directory, stdout=log, stderr=subprocess.STDOUT, check=True)
             objects.append(str(obj))
-        link = [flags[0], '-Wl,--gc-sections', *objects, 'vendor/librw/src/librw.a', '-lpthread', '-lm',
-                '-o', str(OUTPUT / NAME)]
+        # The host acquires additional source owners over time. Recompile only
+        # the units under test and borrow the complete current native link
+        # closure rather than silently omitting newly linked host services.
+        line = next(c for c in commands if ' -o mad-sa-linux ' in c)
+        link = shlex.split(next(p for p in line.split('&&') if ' -o mad-sa-linux ' in p))
+        excluded = [*units, 'MainLinux', 'Realtime', 'oswrapper_linux']
+        link = [arg for arg in link if not any(arg.endswith('/' + unit + '.cpp.o') for unit in excluded)]
+        link[1:1] = objects
+        link.insert(1, '-Wl,--gc-sections')
+        link[link.index('-o') + 1] = str(OUTPUT / NAME)
         log.write(shlex.join(link) + '\n')
         log.flush()
         subprocess.run(link, cwd=directory, stdout=log, stderr=subprocess.STDOUT, check=True)

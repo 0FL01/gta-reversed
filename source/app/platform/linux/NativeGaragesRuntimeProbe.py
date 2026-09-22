@@ -39,14 +39,17 @@ def build():
             log.write(shlex.join(command)+'\n'); log.flush()
             subprocess.run(command, cwd=directory, stdout=log, stderr=subprocess.STDOUT, check=True)
             objects.append(str(obj))
-        oswrapper = OUTPUT / 'garage-runtime-oswrapper_linux.o'
-        command = flags + ['-UNDEBUG', '-Wall', '-Wextra', '-ffunction-sections', '-fdata-sections',
-                           '-c', str(SOURCE.parents[2] / 'oswrapper/oswrapper_linux.cpp'), '-o', str(oswrapper)]
-        log.write(shlex.join(command)+'\n'); log.flush()
-        subprocess.run(command, cwd=directory, stdout=log, stderr=subprocess.STDOUT, check=True)
-        objects.append(str(oswrapper))
-        link = [flags[0], '-Wl,--gc-sections', *objects, 'vendor/librw/src/librw.a',
-                '-lpthread', '-lm', '-o', str(OUTPUT / NAME)]
+        # Use the current native target's complete dependency closure: the
+        # script host acquired new owner TUs since this isolated probe began.
+        # Replace only the explicitly recompiled probe/owner objects, and omit
+        # both executable entrypoints. Do not silently omit new host services.
+        line = next(c for c in commands if ' -o mad-sa-linux ' in c)
+        link = shlex.split(next(p for p in line.split('&&') if ' -o mad-sa-linux ' in p))
+        excluded = [*units, 'MainLinux', 'Realtime']
+        link = [arg for arg in link if not any(arg.endswith('/'+unit+'.cpp.o') for unit in excluded)]
+        link.insert(1, '-Wl,--gc-sections')
+        link[1:1] = objects
+        link[link.index('-o') + 1] = str(OUTPUT / NAME)
         log.write(shlex.join(link)+'\n'); log.flush()
         subprocess.run(link, cwd=directory, stdout=log, stderr=subprocess.STDOUT, check=True)
 

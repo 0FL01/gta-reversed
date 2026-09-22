@@ -1369,6 +1369,41 @@ void SchemaAndCorpus() {
         "mixed session corpus rejects atomically");
     Check(before.Sites().empty() && before.Threads().empty(), "manifest snapshots are independent values");
 }
+void SourceMissionTextColour() {
+    struct ColourService final : NativeScriptServices {
+        NativeScriptTextStyleRequest Request;
+        unsigned Calls = 0;
+        NativeScriptServiceResult RequestCollision(const NativeScriptCollisionRequest&) override { return {}; }
+        NativeScriptServiceResult LoadScene(const NativeScriptSceneRequest&) override { return {}; }
+        NativeScriptServiceResult CreatePlayer(const NativeScriptPlayerRequest&) override { return {}; }
+        NativeScriptServiceResult SetTextStyle(const NativeScriptTextStyleRequest& request) override {
+            Request = request;
+            ++Calls;
+            return {NativeScriptServiceStatus::Ready, {}};
+        }
+    } services;
+    // Actual mission2 instruction 0340@210627 has tag5 literals 255,255,255
+    // followed by local-number tag3 index179. Feed an out-of-byte-range value
+    // into that exact source operand form; the source CRGBA reader owns the
+    // uint8 conversion, not the VM operand decoder.
+    Bytes main, mission;
+    Op(main, 0x0417); I8(main, 0); Op(main, 0x004E);
+    Op(mission, 0x0006); Var(mission, 179, false); I16(mission, 511);
+    const auto colourIP = 200000u + std::uint32_t(mission.size());
+    Op(mission, 0x0340);
+    I16(mission, 255); I16(mission, 255); I16(mission, 255); Var(mission, 179, false);
+    Op(mission, 0x004E);
+    NativeScriptSession session;
+    const auto bytes = Fixture(main, {mission});
+    std::string error;
+    Check(session.LoadMainBytes(bytes, bytes.size(), error), "load actual mission colour operand fixture");
+    Check(session.RunPass(services, 100).Status == Status::Waiting, "mission colour launch runs before next pass");
+    const auto result = session.RunPass(services, 100);
+    Check(result.Status == Status::Waiting && result.Executed == 3 && services.Calls == 1 &&
+        services.Request.Opcode == 0x0340 && services.Request.Integers ==
+        (std::array<std::int32_t, 5>{255, 255, 255, 511, 0}) &&
+        services.Request.Id.IP == colourIP, "0340 source operand types and local alpha survive VM unchanged");
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1387,5 +1422,6 @@ int main(int argc, char** argv) {
     PickupBarriers();
     PickupOperationsAndFloatCopy();
     SchemaAndCorpus();
+    SourceMissionTextColour();
     std::printf("native-script-probe PASS checks=%zu services=TEST-ONLY no-worldboot-claim\n", s_Checks);
 }

@@ -42,6 +42,15 @@ void BranchFixtures(const NativeGarages& garages,NativeGarageView view) {
     Require(NativeGarages::Transition(g,view)==NativeGarageRequirement::WantedPolicy,"on-foot respray still needs wanted policy inside");
     view.Player.Matrix.Position={g.Rect[1]+5,g.Rect[3]+5,g.Origin[2]+1};
     Require(NativeGarages::Transition(g,view)==NativeGarageRequirement::None,"respray outside, actual initial last-garage -1");
+    view.Vehicle = NativeGarageEntityBounds{.Matrix=view.Player.Matrix,
+        .Collision=view.Player.Collision,.ModelId=400,.VehicleSubType=0};
+    view.Vehicle->Matrix.Position={g.Rect[1]+8,(g.Rect[2]+g.Rect[3])*.5f,g.Origin[2]+1};
+    Require(NativeGarages::Transition(g,view)==NativeGarageRequirement::None,
+        "retail respray distance-squared64 excludes the source vehicle body when last-garage is unset");
+    view.Vehicle->Matrix.Position[0]=std::nextafter(view.Vehicle->Matrix.Position[0],g.Rect[1]);
+    Require(NativeGarages::Transition(g,view)==NativeGarageRequirement::SourceTypeUpdate,
+        "vehicle inside source64 radius still requires unported respray body");
+    view.Vehicle.reset();
     NativeGaragePolicy policy; policy.LastGaragePlayerWasIn=7;
     Require(NativeGarages::Transition(g,view,policy,7)==NativeGarageRequirement::WantedPolicy,"last respray requires clearing wanted policy outside");
     policy.NoResprays=true;
@@ -226,22 +235,37 @@ int main(int argc,char** argv) {
         const auto stopped=runtime.Frame().Revision;
         Require(runtime.Tick(*active,{13},vehicleFrame(13)).Status==NativeScriptServiceStatus::Ready && runtime.Frame().Revision==stopped+1 && !runtime.Frame().TidyPlan,
             "completed empty maintenance does not latch and frame13 advances");
-        // Separate real native player fixture, prepared before SealStartup.
-        // A source-world validated spawn tests camera requirements; this is NOT
-        // a completed garage/interior transition or another SCM instruction.
+        // Separate source garage/camera fixture prepared before SealStartup.
+        // The active source-COL snapshot does not cover the authored Ganton
+        // garage floor (even over the full vertical range). Prove that absence
+        // instead of fabricating a real-world ground hit; use an explicitly
+        // synthetic floor for the camera-state-only branch below.
         const auto& ganton=*std::ranges::find_if(host.Garages().Entries(),[](const auto& g) { return g.Type==16; });
-        const float x=(ganton.Rect[0]+ganton.Rect[1])*.5f,y=(ganton.Rect[2]+ganton.Rect[3])*.5f; float ground;
-        Require(active->Collision.Ground(x,y,ganton.Origin[2]+.5f,ganton.Origin[2]-3,ground),"actual garage floor for camera fixture (below roof)");
-        std::printf("TEST-POSITION camera x=%.9f y=%.9f sourceBaseZ=%.9f topZ=%.9f actualGround=%.9f\n",x,y,ganton.Origin[2],ganton.Top,ground);
-        Require(cameraFixture.SpawnScriptPlayer(active->Collision,{x,y,ground},error),error);
+        const float x=(ganton.Rect[0]+ganton.Rect[1])*.5f,y=(ganton.Rect[2]+ganton.Rect[3])*.5f;
+        float absentGround = 0.0f;
+        Require(!active->Collision.Ground(x,y,ganton.Origin[2]+50.0f,
+            ganton.Origin[2]-50.0f,absentGround),"actual garage floor remains unsupported by current source COL");
+        WorldShotScene floorScene;
+        WorldShotMesh floor;
+        floor.tris=2;
+        const float x0=ganton.Rect[0]-100.0f,x1=ganton.Rect[1]+100.0f;
+        const float y0=ganton.Rect[2]-100.0f,y1=ganton.Rect[3]+100.0f;
+        const float z=ganton.Origin[2]-0.5f;
+        floor.pos={x0,y0,z,x1,y0,z,x1,y1,z,x0,y0,z,x1,y1,z,x0,y1,z};
+        floorScene.meshes.push_back(std::move(floor));
+        RealtimeGameplayWorld syntheticFloor;
+        Require(syntheticFloor.Rebuild(floorScene,error),error);
+        Require(cameraFixture.SpawnScriptPlayer(syntheticFloor,{x,y,ganton.Origin[2]},error),error);
+        std::printf("TEST-POSITION camera x=%.9f y=%.9f sourceBaseZ=%.9f floor=synthetic realFloor=unsupported\n",
+            x,y,ganton.Origin[2]);
         NativeGaragesRuntime inside(host.Garages(),cameraFixture,vehicles);
         result=inside.Tick(*active,{14},vehicleFrame(14));
         Require(result.Status==NativeScriptServiceStatus::Unsupported && inside.Frame().Barrier==NativeGaragesRuntimeBarrier::GarageCamera && inside.Frame().Camera.Outside,"actual native ped/COL requires original garage camera, not a fake fixed pose");
-        Require(cameraFixture.SpawnScriptPlayer(active->Collision,player.Ped,error),error);
+        Require(cameraFixture.SpawnScriptPlayer(syntheticFloor,player.Ped,error),error);
         NativeGaragesRuntime outside(host.Garages(),cameraFixture,vehicles);
         result=outside.Tick(*active,{15},vehicleFrame(15));
         Require(result.Status==NativeScriptServiceStatus::Unsupported && outside.Frame().Barrier==NativeGaragesRuntimeBarrier::GarageCamera && !outside.Frame().Camera.Outside && outside.Frame().Camera.Previous,"garage exit camera transition also explicit");
-        std::printf("TEST-POSITION native camera entry/exit requirements PASS; no completed door/interior/camera transition\n");
+        std::printf("TEST-POSITION native camera entry/exit requirements PASS; floor=synthetic realFloor=unsupported no completed transition\n");
         worker.Stop(std::move(active),{});
         std::printf("NativeGaragesRuntimeProbe PASS main53 mission539 strict0570@205876 counter12/index1 nativePoolEmptyReady frame13Advanced noSourceTrafficParityClaim\n");
     }

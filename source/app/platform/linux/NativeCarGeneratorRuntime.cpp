@@ -90,12 +90,16 @@ NativeScriptServiceResult NativeCarGeneratorRuntime::Tick(const realtime_streami
     const auto& player = m_Gameplay.State();
     const auto& activity = m_Gameplay.Activity();
     const auto& camera = m_Gameplay.Camera();
-    if (!player.Ready || !player.MissionCreated || !player.PlayerOnFootTask ||
+    if (!player.Ready || !player.MissionCreated ||
+        (!player.PlayerOnFootTask && !input.ScriptVehiclePosition) ||
         activity.Authority != NativePlayerActivityAuthority::SourceBacked || !activity.Revision)
         return Unsupported("car-generator runtime requires the actual source-backed new-game player activity");
     if (input.Area != 0 || player.InVehicle || player.CarPresent || activity.CoopGame || !activity.GamePlaying)
         return Unsupported("car-generator runtime needs the unported area/player-vehicle/coop/game-state consumer outside exterior on-foot new-game extent");
     if (!Finite(player.PedRoot) || !Finite(camera.Position) || !Finite(camera.Target) ||
+        (input.ScriptVehiclePosition && (!std::isfinite(input.ScriptVehiclePosition->X) ||
+            !std::isfinite(input.ScriptVehiclePosition->Y) ||
+            !std::isfinite(input.ScriptVehiclePosition->Z))) ||
         !std::isfinite(player.SimulatedSeconds) || !std::isfinite(input.GenerationDistanceMultiplier) ||
         input.GenerationDistanceMultiplier <= 0 || m_Script.Clock.Hours >= 24)
         return Error("invalid owned car-generator player/camera/clock input");
@@ -119,10 +123,20 @@ NativeScriptServiceResult NativeCarGeneratorRuntime::Tick(const realtime_streami
         return Error("car-generator player/time owner reset requires a new runtime");
 
     NativeCarGeneratorRuntimeFrame next;
-    next.MotionIntervalSeconds = player.SimulatedSeconds - m_Previous.SimulatedSeconds;
-    const std::array<float, 3> displacement{player.PedRoot.X - m_Previous.PedRoot.X,
-        player.PedRoot.Y - m_Previous.PedRoot.Y, player.PedRoot.Z - m_Previous.PedRoot.Z};
-    if (next.MotionIntervalSeconds > 0) {
+    next.ScriptVehicleActive = input.ScriptVehiclePosition.has_value();
+    const auto center = input.ScriptVehiclePosition.value_or(NativeScriptPosition{
+        player.PedRoot.X, player.PedRoot.Y, player.PedRoot.Z});
+    next.MotionIntervalSeconds = next.ScriptVehicleActive
+        ? double(m_Script.TimeMs - m_Frame.GameMs) / 1000.0
+        : player.SimulatedSeconds - m_Previous.SimulatedSeconds;
+    const NativeScriptPosition previousCenter = m_Frame.Revision ? m_Frame.PlayerCenter :
+        NativeScriptPosition{m_Previous.PedRoot.X, m_Previous.PedRoot.Y, m_Previous.PedRoot.Z};
+    const std::array<float, 3> displacement{center.X - previousCenter.X,
+        center.Y - previousCenter.Y, center.Z - previousCenter.Z};
+    if (m_Frame.Revision && next.ScriptVehicleActive != m_Frame.ScriptVehicleActive) {
+        // Script entry/exit warps a ped. It is not physical velocity.
+        next.MeasuredPlayerSpeed = {};
+    } else if (next.MotionIntervalSeconds > 0) {
         for (std::size_t i = 0; i < displacement.size(); ++i)
             next.MeasuredPlayerSpeed[i] = float(displacement[i] / next.MotionIntervalSeconds / 50.0);
     } else if (std::ranges::any_of(displacement, [](float v) { return v != 0; })) {
@@ -136,7 +150,7 @@ NativeScriptServiceResult NativeCarGeneratorRuntime::Tick(const realtime_streami
     next.VehicleOwner = vehicles->Owner(); next.VehicleGeneration = vehicles->Generation();
     next.VehicleRevision = vehicles->Revision(); next.FreeVehicleSlots = NativeVehiclePool::Capacity - vehicles->Census().Alive;
     next.GameMs = m_Script.TimeMs; next.ClockHour = m_Script.Clock.Hours; next.Area = input.Area;
-    next.PlayerCenter = {player.PedRoot.X, player.PedRoot.Y, player.PedRoot.Z};
+    next.PlayerCenter = center;
     next.Camera = {camera.Position.X, camera.Position.Y, camera.Position.Z};
     for (std::size_t slot = 0; slot < NativeVehiclePool::Capacity; ++slot) {
         const auto* vehicle = vehicles->AtSlot(slot);

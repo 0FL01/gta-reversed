@@ -22,6 +22,10 @@ struct NativeGarageEntry {
     float Width = 0, Height = 0, Top = 0;
     std::array<float, 4> Rect{}; // minX, maxX, minY, maxY; all four corners
     std::uint8_t Type = 0, OriginalType = 0, Flags = 0, DoorState = 0;
+    // CGarage::m_pTargetCar starts null. There is no mission target-car
+    // registration service in this bounded owner; do not infer one from a
+    // nearby player car. Nonnegative references require the missing consumer.
+    std::int32_t TargetVehicleRef = -1;
     float DoorPosition = 0;
     std::uint32_t TimeToOpen = 0;
 };

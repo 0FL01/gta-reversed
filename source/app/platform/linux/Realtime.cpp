@@ -5,6 +5,7 @@
 #include "app/platform/linux/RealtimeEnvironment.h"
 #include "app/platform/linux/RealtimeClouds.h"
 #include "app/platform/linux/RealtimeGameplay.h"
+#include "app/platform/linux/IfpAnim.h"
 #include "app/platform/linux/RealtimeHud.h"
 #include "app/platform/linux/RealtimeStreaming.h"
 #include "app/platform/linux/NativePlayerAssets.h"
@@ -699,6 +700,8 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
     bool freecam = false;
     bool playerCj = false;
     bool newGame = false, bootGate = false, firstMissionGate = false, explicitCamera = false, explicitHour = false;
+    bool probeSourceCjPixels = false;
+    bool profileFrameStages = false;
     bool freezeTime = false;
     float hour = 12.0f;
     const char* weather = "EXTRASUNNY_LA";
@@ -729,6 +732,10 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             bootGate = true;
         } else if (std::strcmp(argv[i], "--first-mission-gate") == 0) {
             firstMissionGate = bootGate = true;
+        } else if (std::strcmp(argv[i], "--probe-source-cj-pixels") == 0) {
+            probeSourceCjPixels = true;
+        } else if (std::strcmp(argv[i], "--profile-frame-stages") == 0) {
+            profileFrameStages = true;
         } else if (std::strcmp(argv[i], "--freeze-time") == 0) {
             freezeTime = true;
         } else if (std::strcmp(argv[i], "--hour") == 0) {
@@ -762,6 +769,10 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
     }
     if (bootGate && !newGame) {
         std::printf("play-fail --boot-gate/--first-mission-gate requires --new-game\n");
+        return 1;
+    }
+    if (probeSourceCjPixels && !newGame) {
+        std::printf("play-fail --probe-source-cj-pixels requires --new-game\n");
         return 1;
     }
     if (newGame && (demo || demoCurb || playerCj || freecam || explicitCamera || explicitHour || freezeTime)) {
@@ -846,7 +857,7 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
     NativeGaragesRuntime garageRuntime(scriptHost.Garages(), gameplay, scriptHost.Vehicles());
     constexpr std::size_t scriptQuota = 256; // one bounded scheduler pass per presented frame
     if (newGame) {
-        if (!scriptHost.InitializeBeforeWorker(gameDir, gameplayError, collisionContext)) {
+        if (!scriptHost.InitializeBeforeWorker(gameDir, gameplayError, collisionContext, true)) {
             std::printf("play-fail script init: %s\n", gameplayError.c_str());
             return 1;
         }
@@ -1053,7 +1064,10 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
     uint64_t scriptExecuted = 0;
     NativeScriptStatus lastScriptStatus = NativeScriptStatus::Waiting;
     bool bootGateSawMission2 = false, bootGateSingleStep = false;
+    bool sourceAppearanceReported = false;
+    bool sourcePixelsReported = false;
     double reportMaxFrameMs = 0, reportMaxStreamMs = 0;
+    std::array<double, 4> stageSums{}, stageMaxima{};
     bool running = true;
     bool demoJumped = false;
     double demoNextEntryAttempt = 2.0;
@@ -1222,6 +1236,15 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             if (ScriptFault(scriptHost, scriptResult)) {
                 return 1; // no physics, presentation, retry, or main-thread resumption after fault
             }
+            if (!sourceAppearanceReported && scriptHost.SourcePlayerAppearanceVisible()) {
+                const auto& stats = gameplay.PlayerModelStats();
+                const auto& state = gameplay.State();
+                std::printf("play-script-cj-ready source=087B/070D meshes=%zu triangles=%d verts=%d mapped=%d ped=%.3f,%.3f,%.3f heading=%.5f feedback=0\n",
+                    gameplay.Actors().meshes.size(), gameplay.Actors().stats.triangles,
+                    stats.verts, stats.mapped, state.PedRoot.X, state.PedRoot.Y,
+                    state.PedRoot.Z, state.PedHeading);
+                sourceAppearanceReported = true;
+            }
             if (bootGate && bootGateSawMission2) {
                 const bool mission2Active = std::ranges::any_of(scriptHost.Session().Threads(), [](const auto& thread) {
                     return thread.Active && thread.MissionIndex == 2;
@@ -1234,7 +1257,8 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
                         if (const auto* audio = scriptHost.MissionAudio().Slot(slot);
                             audio && audio->Loaded && !audio->Finished) missionAudioComplete = false;
                     }
-                    const bool ownerCleanup = scriptHost.ScriptCameraCommandCount() > 0 &&
+                    const bool ownerCleanup = sourceAppearanceReported &&
+                        scriptHost.ScriptCameraCommandCount() > 0 &&
                         scriptHost.MissionText().Revision() > 0 && scriptHost.Cutscene().Revision() > 0 &&
                         !scriptHost.Cutscene().Loaded() && missionAudioComplete &&
                         !scriptHost.BeatTrack().State().PlaybackRequested && scriptHost.ScriptTrains().Alive() == 0;
@@ -1255,6 +1279,7 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             }
         }
         paused = false;
+        const Uint64 afterScriptNs = profileFrameStages ? SDL_GetTicksNS() : 0;
         reportPad(padFeedback.Update(false));
         const bool* keys = SDL_GetKeyboardState(nullptr);
         NativeInputLifecycleSnapshot lifecycleInput;
@@ -1339,7 +1364,17 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
                 input = {};
             }
             if (!scriptHost.PlayerControlEnabled()) input = {};
-            gameplay.Tick(dt, input, world.active->Collision());
+            if (newGame && scriptHost.PlayerInScriptVehicle()) {
+                // A mission vehicle is driven by the sole script/pool/recording
+                // owner. The old diagnostic controller must not also move a
+                // standing ped or a second car while the player is seated.
+                if (!scriptHost.SynchronizeScriptPlayerPresentation(gameplayError)) {
+                    std::printf("play-fail script player placement: %s\n", gameplayError.c_str());
+                    return 1;
+                }
+            } else {
+                gameplay.Tick(dt, input, world.active->Collision());
+            }
             if (!freecam) {
                 const auto& view = gameplay.Camera();
                 camera.x = view.Position.X;
@@ -1359,14 +1394,37 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             NativeCarGeneratorRuntimeInput generatorInput;
             generatorInput.Frame = frames;
             generatorInput.Camera = RealtimeHud::CapturePriceView(.1f, std::max(1600.0f, environment.GetParams().farClip), 60);
+            if (scriptHost.PlayerInScriptVehicle()) {
+                generatorInput.ScriptVehiclePosition = scriptHost.ScriptPlayerPosition();
+                if (!generatorInput.ScriptVehiclePosition) {
+                    std::printf("play-fail source player vehicle lost its current pool reference\n");
+                    return 1;
+                }
+            }
             const auto generatorResult = carGenerators->Tick(*world.active->cpu, generatorInput, vehicleSnapshot);
             if (generatorResult.Status != NativeScriptServiceStatus::Ready) {
                 std::printf("play-cargen-terminal status=%s frame=%llu demands=%zu spawned=0 message=%s\n",
                     generatorResult.Status == NativeScriptServiceStatus::Error ? "Error" : "Unsupported",
                     static_cast<unsigned long long>(frames), carGenerators->Frame().Demands.size(), generatorResult.Message.c_str());
+                for (const auto model : scriptHost.ResidentVehicleModelIds()) {
+                    const auto* definition = scriptHost.CarGenerators().FindModel(model);
+                    std::printf("play-cargen-resident model=%d class=%s frequency=%u\n", model,
+                        definition ? definition->ClassName.c_str() : "unknown",
+                        definition ? definition->Frequency : 0u);
+                }
                 return 1; // retained demand has no fulfillment owner yet; never fake a spawn
             }
-            const auto garageResult = garageRuntime.Tick(*world.active->cpu, {frames}, vehicleSnapshot);
+            NativeGaragesRuntimeInput garageInput;
+            garageInput.Frame = frames;
+            if (scriptHost.PlayerInScriptVehicle()) {
+                const auto scriptVehicle = scriptHost.ScriptPlayerVehicle();
+                if (!scriptVehicle) {
+                    std::printf("play-fail source player vehicle lost its script reference\n");
+                    return 1;
+                }
+                garageInput.ScriptPlayerVehicle = NativeVehicleRef{scriptVehicle->Value};
+            }
+            const auto garageResult = garageRuntime.Tick(*world.active->cpu, garageInput, vehicleSnapshot);
             if (garageResult.Status != NativeScriptServiceStatus::Ready) {
                 std::printf("play-garage-terminal status=%s frame=%llu message=%s\n",
                     garageResult.Status == NativeScriptServiceStatus::Unsupported ? "Unsupported" : "Error",
@@ -1472,6 +1530,7 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
                 return 1;
             }
         }
+        const Uint64 afterSimulationNs = profileFrameStages ? SDL_GetTicksNS() : 0;
         environment.DrawSky(camera.x, camera.y, camera.z);
         RealtimeLowCloudParams lowCloudParams;
         if (!environment.GetFixedWeatherLowCloudParams(camera.z, lowCloudParams)) {
@@ -1508,7 +1567,27 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
         environment.EndWorld();
         if (gameplayEnabled) {
             environment.BeginObjects();
+            std::vector<std::uint8_t> beforeActor;
+            if (probeSourceCjPixels && sourceAppearanceReported && !sourcePixelsReported) {
+                beforeActor.resize(static_cast<std::size_t>(width) * height * 4);
+                glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, beforeActor.data());
+            }
             actorGpu.DrawActors(gameplay.Actors(), GpuScene::ActorPass::Opaque);
+            if (!beforeActor.empty()) {
+                std::vector<std::uint8_t> afterActor(beforeActor.size());
+                glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, afterActor.data());
+                std::size_t changed = 0;
+                for (std::size_t pixel = 0; pixel < beforeActor.size(); pixel += 4) {
+                    const int delta = std::abs(int(beforeActor[pixel]) - int(afterActor[pixel])) +
+                        std::abs(int(beforeActor[pixel + 1]) - int(afterActor[pixel + 1])) +
+                        std::abs(int(beforeActor[pixel + 2]) - int(afterActor[pixel + 2]));
+                    changed += delta > 32;
+                }
+                const auto& ped = gameplay.State().PedRoot;
+                std::printf("play-source-cj-pixels changed=%zu threshold=200 source=MODEL_PLAYER:087B/070D ped=%.3f,%.3f,%.3f\n",
+                    changed, ped.X, ped.Y, ped.Z);
+                sourcePixelsReported = changed >= 200;
+            }
             if (newGame) {
                 scriptGpu.DrawActors(scriptHost.Entities().Actors(), GpuScene::ActorPass::Opaque);
             }
@@ -1558,10 +1637,23 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
         if (newGame) {
             DrawScriptFade(scriptHost.State().Fade, scriptHost.FadeColour());
         }
+        const Uint64 afterRenderNs = profileFrameStages ? SDL_GetTicksNS() : 0;
         const auto glError = glGetError();
         if (glError != GL_NO_ERROR || !SDL_GL_SwapWindow(window.window)) {
             std::printf("play-fail present GL=0x%x SDL=%s\n", glError, SDL_GetError());
             return 1;
+        }
+        if (profileFrameStages) {
+            const Uint64 afterSwapNs = SDL_GetTicksNS();
+            const std::array<double, 4> intervals{
+                double(afterScriptNs - now) / 1e6,
+                double(afterSimulationNs - afterScriptNs) / 1e6,
+                double(afterRenderNs - afterSimulationNs) / 1e6,
+                double(afterSwapNs - afterRenderNs) / 1e6};
+            for (std::size_t i = 0; i < intervals.size(); ++i) {
+                stageSums[i] += intervals[i];
+                stageMaxima[i] = std::max(stageMaxima[i], intervals[i]);
+            }
         }
         ++frames;
         // Always pace: swap interval may be ignored/overridden by the driver
@@ -1578,6 +1670,14 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
                 static_cast<double>(frames - reportFrames) * 1e9 / (now - report),
                 width, height, camera.x, camera.y, camera.z, reportMaxFrameMs, reportMaxStreamMs);
             std::fflush(stdout);
+            if (profileFrameStages) {
+                const double sampled = static_cast<double>(frames - reportFrames);
+                std::printf("play-stage-ms cpu-input-script=%.2f/%.2f cpu-simulation=%.2f/%.2f gl-submit=%.2f/%.2f swap-wait=%.2f/%.2f samples=%.0f gpu-attribution=unknown\n",
+                    stageSums[0] / sampled, stageMaxima[0], stageSums[1] / sampled, stageMaxima[1],
+                    stageSums[2] / sampled, stageMaxima[2], stageSums[3] / sampled, stageMaxima[3], sampled);
+                stageSums.fill(0);
+                stageMaxima.fill(0);
+            }
             if (gameplayEnabled) {
                 const auto& state = gameplay.State();
                 std::printf("play-state ticks=%llu mode=%s grounded=%d ped=%.2f,%.2f,%.2f car=%.2f,%.2f,%.2f "
@@ -1596,6 +1696,10 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             reportFrames = frames;
             reportMaxFrameMs = reportMaxStreamMs = 0;
         }
+    }
+    if (probeSourceCjPixels && !sourcePixelsReported) {
+        std::printf("play-fail source SCM CJ did not change 200 visible framebuffer pixels\n");
+        return 1;
     }
     if (newGame) {
         const auto& session = scriptHost.Session();
