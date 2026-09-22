@@ -70,6 +70,7 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
         app/platform/linux/NativeCombatRuntime.cpp
         app/platform/linux/NativeWantedRuntime.cpp
         app/platform/linux/NativeRestartLifecycle.cpp
+        app/platform/linux/NativeInteractionRuntime.cpp
         app/platform/linux/NativeScriptTrains.cpp
         app/platform/linux/NativeScriptObjects.cpp
         app/platform/linux/NativeScriptEntities.cpp
