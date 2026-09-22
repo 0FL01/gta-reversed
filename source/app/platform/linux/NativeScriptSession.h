@@ -407,6 +407,12 @@ struct NativeScriptAudioEventRequest {
     NativeScriptPosition Position;
     std::int32_t Event = -1;
 };
+struct NativeScriptRectangleRequest {
+    NativeScriptRequestId Id;
+    std::int32_t TextureSlot = -1;
+    float X = 0.0f, Y = 0.0f, Width = 0.0f, Height = 0.0f;
+    std::array<std::int32_t, 4> Colour{};
+};
 struct NativeScriptTextCommandsRequest {
     NativeScriptRequestId Id;
     bool Enabled = false;
@@ -749,6 +755,7 @@ public:
     virtual NativeScriptServiceResult LoadTextureDictionary(const NativeScriptTextureDictionaryRequest&) { return {}; }
     virtual NativeScriptServiceResult LoadSprite(const NativeScriptSpriteRequest&) { return {}; }
     virtual NativeScriptServiceResult ReportAudioEventAtPosition(const NativeScriptAudioEventRequest&) { return {}; }
+    virtual NativeScriptServiceResult DrawScriptRectangle(const NativeScriptRectangleRequest&) { return {}; }
     virtual NativeScriptServiceResult LoadMissionText(const NativeScriptMissionTextRequest&) { return {}; }
     virtual NativeScriptServiceResult ClearText(const NativeScriptMissionTextRequest&) { return {}; }
     virtual NativeScriptServiceResult UseTextCommands(const NativeScriptTextCommandsRequest&) { return {}; }

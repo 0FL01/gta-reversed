@@ -122,7 +122,10 @@ bool NativeMissionAudio::LoadBeforeWorker(const char* gameDir, std::string& erro
 }
 
 NativeScriptServiceResult NativeMissionAudio::Request(std::int32_t slot, std::int32_t event) {
-    const auto index = std::int64_t(event) - FirstMissionAudioId;
+    // Script payloads use both CAE script-event IDs (42000 + TrackLkup row)
+    // and direct source TrackLkup sample IDs (for example DUAL uses 1829).
+    const auto index = event >= FirstMissionAudioId ?
+        std::int64_t(event) - FirstMissionAudioId : std::int64_t(event);
     if (!m_Ready || slot < 1 || std::size_t(slot) > m_Slots.size() || index < 0 ||
         std::size_t(index) >= m_Lookups.size())
         return {NativeScriptServiceStatus::Error, "mission-audio request is invalid slot=" +
@@ -151,7 +154,10 @@ NativeScriptServiceResult NativeMissionAudio::Request(std::int32_t slot, std::in
     const bool audioOk = OS_FileRead(file, ogg.data(), int32(ogg.size())) == 0;
     OS_FileClose(file);
     std::uint32_t durationMs = 0;
-    if (!ok || !audioOk || !OggDuration(ogg, lookup.Offset + TrackInfoSize, durationMs))
+    if (!ok || !audioOk)
+        return {NativeScriptServiceStatus::Error, "mission-audio stream decode metadata is invalid"};
+    const bool decodedDuration = OggDuration(ogg, lookup.Offset + TrackInfoSize, durationMs);
+    if (!decodedDuration && event >= FirstMissionAudioId)
         return {NativeScriptServiceStatus::Error, "mission-audio stream decode metadata is invalid"};
     m_Slots[std::size_t(slot - 1)] = {event, lookup.Pack, lookup.Offset, lookup.Size,
         durationMs, 0, Hash(info.data(), info.size()),
@@ -170,6 +176,8 @@ NativeScriptServiceResult NativeMissionAudio::Clear(std::int32_t slot) {
 NativeScriptServiceResult NativeMissionAudio::Play(std::int32_t slot, std::uint32_t nowMs) {
     if (!Loaded(slot)) return {NativeScriptServiceStatus::Error, "mission-audio slot is not loaded"};
     auto& state = m_Slots[std::size_t(slot - 1)];
+    if (!state.DurationMs) return {NativeScriptServiceStatus::Unsupported,
+        "direct stream sample playback clock is not owned"};
     state.StartedMs = nowMs;
     state.PlaybackRequested = true;
     state.Finished = false;

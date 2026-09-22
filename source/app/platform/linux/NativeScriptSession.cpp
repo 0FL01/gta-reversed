@@ -1528,7 +1528,8 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         default: return invalid("invalid service result");
         }
     }
-    if (d.Opcode == 0x041D || d.Opcode == 0x0391 || d.Opcode == 0x0390 || d.Opcode == 0x038F || d.Opcode == 0x097A) {
+    if (d.Opcode == 0x041D || d.Opcode == 0x0391 || d.Opcode == 0x0390 || d.Opcode == 0x038F ||
+        d.Opcode == 0x097A || d.Opcode == 0x038D || d.Opcode == 0x038E) {
         const NativeScriptRequestId id{m_SessionId, m_CommandSequence + 1, state.IP};
         NativeScriptServiceResult result;
         struct Guard { bool& Flag; Guard(bool& flag): Flag(flag) { Flag = true; } ~Guard() { Flag = false; } } guard{m_InService};
@@ -1546,6 +1547,12 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
             } else if (d.Opcode == 0x097A) {
                 result = services.ReportAudioEventAtPosition(
                     {id, {d.Float(0), d.Float(1), d.Float(2)}, d.Int(3)});
+            } else if (d.Opcode == 0x038D) {
+                result = services.DrawScriptRectangle({id, a, d.Float(1), d.Float(2), d.Float(3), d.Float(4),
+                    {d.Int(5), d.Int(6), d.Int(7), d.Int(8)}});
+            } else if (d.Opcode == 0x038E) {
+                result = services.DrawScriptRectangle({id, -1, d.Float(0), d.Float(1), d.Float(2), d.Float(3),
+                    {d.Int(4), d.Int(5), d.Int(6), d.Int(7)}});
             } else {
                 NativeScriptCameraCommandRequest request{id, d.Opcode};
                 request.Floats[0] = d.Float(0);

@@ -263,6 +263,7 @@ NativeScriptResult RealtimeScriptHost::RunPass(std::size_t quota) {
 bool RealtimeScriptHost::AdvanceTime(std::uint32_t nowMs, std::string& error) {
     if (nowMs < m_Session.State().TimeMs) return m_Session.AdvanceTime(nowMs, error);
     m_MissionText.BeginFrame();
+    m_ScriptRectangles.clear();
     m_Cutscene.AdvanceTime(nowMs);
     m_MissionAudio.Advance(nowMs);
     std::vector<NativeCarRecordingUpdate> recordingUpdates;
@@ -1706,7 +1707,7 @@ bool RealtimeScriptHost::FulfillPendingTexture(const NativeScriptRequestId& id,
 }
 NativeScriptServiceResult RealtimeScriptHost::LoadSprite(const NativeScriptSpriteRequest& request) {
     const auto name = FixedName(request.Name);
-    if (!m_Initialized || request.Slot < 0 || std::size_t(request.Slot) >= m_ScriptSpriteImages.size() ||
+    if (!m_Initialized || request.Slot <= 0 || std::size_t(request.Slot) > m_ScriptSpriteImages.size() ||
         name.empty() || !m_ScriptTextureDictionary) return Error("invalid script sprite request");
     RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=0x038F, .Index=request.Slot};
     std::copy(name.begin(), name.end(), event.ModelName.begin());
@@ -1716,7 +1717,7 @@ NativeScriptServiceResult RealtimeScriptHost::LoadSprite(const NativeScriptSprit
             return EqualNoCase(name, std::string_view(image.name, strnlen(image.name, sizeof(image.name))));
         });
     if (found == m_ScriptTextureDictionary->Images.end()) return Error("script sprite is absent from resident dictionary");
-    m_ScriptSpriteImages[std::size_t(request.Slot)] =
+    m_ScriptSpriteImages[std::size_t(request.Slot - 1)] =
         static_cast<std::int32_t>(found - m_ScriptTextureDictionary->Images.begin());
     Commit(event);
     return Ready();
@@ -1728,6 +1729,26 @@ NativeScriptServiceResult RealtimeScriptHost::ReportAudioEventAtPosition(
     RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=0x097A,
         .Arguments={request.Position.X, request.Position.Y, request.Position.Z}, .Index=request.Event};
     if (auto old = Replay(event)) return *old;
+    Commit(event);
+    return Ready();
+}
+NativeScriptServiceResult RealtimeScriptHost::DrawScriptRectangle(
+    const NativeScriptRectangleRequest& request) {
+    if (!m_Initialized || !std::isfinite(request.X) || !std::isfinite(request.Y) ||
+        !std::isfinite(request.Width) || !std::isfinite(request.Height) || request.Width < 0.0f ||
+        request.Height < 0.0f || std::ranges::any_of(request.Colour, [](auto value) { return value < 0 || value > 255; }) ||
+        (request.TextureSlot >= 0 && (request.TextureSlot == 0 ||
+            std::size_t(request.TextureSlot) > m_ScriptSpriteImages.size() ||
+            m_ScriptSpriteImages[std::size_t(request.TextureSlot - 1)] < 0)))
+        return Error("invalid script rectangle request");
+    RealtimeScriptHostEvent event{.Id=request.Id,
+        .Opcode=std::uint16_t(request.TextureSlot < 0 ? 0x038E : 0x038D),
+        .Arguments={request.X, request.Y, request.Width, request.Height},
+        .Index=request.TextureSlot};
+    std::copy(request.Colour.begin(), request.Colour.end(), event.GeneratorArguments.begin());
+    if (auto old = Replay(event)) return *old;
+    if (m_ScriptRectangles.size() >= 128) return Error("script rectangle capacity exceeded");
+    m_ScriptRectangles.push_back(request);
     Commit(event);
     return Ready();
 }

@@ -341,6 +341,7 @@ public:
     NativeScriptServiceResult LoadTextureDictionary(const NativeScriptTextureDictionaryRequest&) override;
     NativeScriptServiceResult LoadSprite(const NativeScriptSpriteRequest&) override;
     NativeScriptServiceResult ReportAudioEventAtPosition(const NativeScriptAudioEventRequest&) override;
+    NativeScriptServiceResult DrawScriptRectangle(const NativeScriptRectangleRequest&) override;
     struct PendingScriptTexture {
         NativeScriptRequestId Id;
         std::string Name;
@@ -460,6 +461,7 @@ private:
     std::optional<PendingScriptTexture> m_PendingTexture;
     std::shared_ptr<const NativeScriptTextureDictionaryPacket> m_ScriptTextureDictionary;
     std::array<std::int32_t, 64> m_ScriptSpriteImages{};
+    std::vector<NativeScriptRectangleRequest> m_ScriptRectangles;
     bool m_UpdateStatsVisible = true;
     std::optional<std::int32_t> m_CutsceneSkipTarget;
     std::optional<NativeScriptPrintRequest> m_LastPrint;
