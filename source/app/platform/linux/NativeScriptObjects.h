@@ -12,6 +12,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <vector>
 
 struct NativeScriptObjectSource {
     std::int32_t ModelId = -1;
@@ -34,7 +35,19 @@ struct NativeScriptObject {
     bool Static = true, Mission = true, InWorld = true;
     std::int32_t Area = 0;
     NativeScriptObjectRef LodParent;
+    float Health = 1000.0f;
+    std::uint64_t DamageRevision = 0;
+    bool UsesCollision = true;
+    bool Visible = true;
+    bool RenderDamaged = false;
+    bool Broken = false;
     bool operator==(const NativeScriptObject&) const = default;
+};
+
+struct NativeScriptObjectSnapshot {
+    std::uint64_t Epoch = 0;
+    std::uint64_t Revision = 0;
+    std::vector<NativeScriptObject> Objects;
 };
 
 enum class NativeScriptObjectStatus : std::uint8_t { Ok, InvalidInput, Unsupported, Full, Overflow };
@@ -57,7 +70,11 @@ public:
     NativeScriptObjectStatus GetOffsetInWorld(NativeScriptObjectRef, NativeScriptPosition offset,
         NativeScriptPosition& output, std::string& error) const;
     NativeScriptObjectStatus Remove(NativeScriptObjectRef, std::string& error);
+    NativeScriptObjectStatus ApplyDamage(NativeScriptObjectRef, float damage,
+        float collisionDamageMultiplier, std::string& error);
+    NativeScriptObjectStatus Reload(std::uint64_t nextEpoch, std::string& error);
     const NativeScriptObject* Resolve(NativeScriptObjectRef) const noexcept;
+    std::shared_ptr<const NativeScriptObjectSnapshot> Publish() const;
     std::size_t LiveCount() const noexcept { return m_Live; }
     std::uint64_t Revision() const noexcept { return m_Revision; }
 
@@ -68,5 +85,6 @@ private:
     };
     std::array<Slot, Capacity> m_Slots{};
     std::size_t m_Live = 0;
+    std::uint64_t m_Epoch = 1;
     std::uint64_t m_Revision = 0;
 };

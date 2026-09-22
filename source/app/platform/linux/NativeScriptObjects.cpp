@@ -89,6 +89,93 @@ NativeScriptObjectStatus NativeScriptObjects::Remove(NativeScriptObjectRef refer
     return NativeScriptObjectStatus::Ok;
 }
 
+NativeScriptObjectStatus NativeScriptObjects::ApplyDamage(NativeScriptObjectRef reference,
+    float damage, float collisionDamageMultiplier, std::string& error) {
+    const auto value = std::uint32_t(reference.Value);
+    const auto index = reference.Value < 0 ? Capacity : std::size_t(value & 0xffffu);
+    const auto generation = std::uint8_t(value >> 16);
+    if (index >= m_Slots.size() || !m_Slots[index].Object || m_Slots[index].Generation != generation) {
+        error = "stale source object reference";
+        return NativeScriptObjectStatus::InvalidInput;
+    }
+    if (!std::isfinite(damage) || damage < 0.0f || !std::isfinite(collisionDamageMultiplier) ||
+        collisionDamageMultiplier < 0.0f) {
+        error = "source object damage is invalid";
+        return NativeScriptObjectStatus::InvalidInput;
+    }
+    auto candidate = *m_Slots[index].Object;
+    if (!candidate.UsesCollision) {
+        error.clear();
+        return NativeScriptObjectStatus::Ok;
+    }
+    const float resolved = damage * collisionDamageMultiplier;
+    if (!std::isfinite(resolved)) {
+        error = "source object damage overflow";
+        return NativeScriptObjectStatus::Overflow;
+    }
+    candidate.Health = std::max(0.0f, candidate.Health - resolved);
+    ++candidate.DamageRevision;
+    if (resolved > 150.0f || candidate.Health == 0.0f) {
+        switch (candidate.CollisionDamageEffect) {
+        case 1: // COL_DAMAGE_EFFECT_CHANGE_MODEL
+            candidate.RenderDamaged = true;
+            break;
+        case 20: // COL_DAMAGE_EFFECT_SMASH_COMPLETELY
+            candidate.UsesCollision = false;
+            candidate.Visible = false;
+            candidate.Static = true;
+            candidate.Health = 0.0f;
+            break;
+        case 21: // COL_DAMAGE_EFFECT_CHANGE_THEN_SMASH
+            if (candidate.RenderDamaged) {
+                candidate.UsesCollision = false;
+                candidate.Visible = false;
+                candidate.Static = true;
+                candidate.Health = 0.0f;
+            } else {
+                candidate.RenderDamaged = true;
+            }
+            break;
+        case 200: // COL_DAMAGE_EFFECT_BREAKABLE
+        case 202: // COL_DAMAGE_EFFECT_BREAKABLE_REMOVED
+            candidate.UsesCollision = false;
+            candidate.Visible = false;
+            candidate.Static = true;
+            candidate.Broken = true;
+            candidate.Health = 0.0f;
+            break;
+        default:
+            break;
+        }
+    }
+    m_Slots[index].Object = std::move(candidate);
+    ++m_Revision;
+    error.clear();
+    return NativeScriptObjectStatus::Ok;
+}
+
+NativeScriptObjectStatus NativeScriptObjects::Reload(std::uint64_t nextEpoch, std::string& error) {
+    if (nextEpoch <= m_Epoch) {
+        error = "source object reload epoch is stale";
+        return NativeScriptObjectStatus::InvalidInput;
+    }
+    for (auto& slot : m_Slots) slot.Object.reset();
+    m_Live = 0;
+    m_Epoch = nextEpoch;
+    ++m_Revision;
+    error.clear();
+    return NativeScriptObjectStatus::Ok;
+}
+
+std::shared_ptr<const NativeScriptObjectSnapshot> NativeScriptObjects::Publish() const {
+    auto snapshot = std::make_shared<NativeScriptObjectSnapshot>();
+    snapshot->Epoch = m_Epoch;
+    snapshot->Revision = m_Revision;
+    snapshot->Objects.reserve(m_Live);
+    for (const auto& slot : m_Slots) if (slot.Object) snapshot->Objects.push_back(*slot.Object);
+    return snapshot;
+}
+
 NativeScriptObjectStatus NativeScriptObjects::SetHeading(NativeScriptObjectRef reference, float degrees, std::string& error) {
     if (!std::isfinite(degrees)) {
         error = "nonfinite source object heading";
