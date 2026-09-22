@@ -48,6 +48,7 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
         app/platform/linux/NativeProgressionRuntime.cpp
         app/platform/linux/NativeSpecialStateManifest.cpp
         app/platform/linux/NativePcSaveCodec.cpp
+        app/platform/linux/NativePcSaveSemantics.cpp
         app/platform/linux/NativeEnvironmentLifecycle.cpp
         app/platform/linux/NativeEffectFamilies.cpp
         app/platform/linux/NativeScriptSession.cpp
