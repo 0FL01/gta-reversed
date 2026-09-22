@@ -282,56 +282,45 @@ bool TexSample_Decode(const rw::Texture* tex, TexImage& out) {
     if (!nat || !nat->texture) {
         return false;
     }
-    uint8_t* locked = ras->lock(0, rw::Raster::LOCKREAD);
-    if (!locked) {
-        return false;
-    }
-    int w = ras->width;
-    int h = ras->height;
-    int stride = ras->stride;
-    bool ok = false;
-    if (w > 0 && h > 0 && w <= 4096 && h <= 4096) {
-        if (nat->customFormat) {
-            uint32_t fmt = nat->format;
-            if (fmt == rw::d3d::D3DFMT_DXT1) {
-                ok = DecodeDxt1(locked, w, h, out.rgba);
-            } else if (fmt == rw::d3d::D3DFMT_DXT3) {
-                ok = DecodeDxt3(locked, w, h, out.rgba);
-            } else {
-                ok = false; // DXT2/4/5 or unknown: refuse, count fallback
-            }
-        } else {
-            uint32_t fmt = nat->format;
-            // Raw 32-bit LE texels: bytes are B,G,R,A (A8R8G8B8) or B,G,R,X.
-            if ((fmt == rw::d3d::D3DFMT_A8R8G8B8 || fmt == rw::d3d::D3DFMT_X8R8G8B8) &&
-                stride >= w * 4) {
-                out.rgba.resize(static_cast<size_t>(w) * static_cast<size_t>(h) * 4);
-                for (int y = 0; y < h; ++y) {
-                    const uint8_t* src = locked + static_cast<size_t>(y) * stride;
-                    uint8_t* dst = out.rgba.data() + static_cast<size_t>(y) * w * 4;
-                    for (int x = 0; x < w; ++x) {
-                        dst[x * 4 + 0] = src[x * 4 + 2];
-                        dst[x * 4 + 1] = src[x * 4 + 1];
-                        dst[x * 4 + 2] = src[x * 4 + 0];
-                        dst[x * 4 + 3] =
-                            (fmt == rw::d3d::D3DFMT_A8R8G8B8) ? src[x * 4 + 3] : 255;
-                    }
-                }
-                ok = true;
-            } else {
-                ok = false; // 16-bit/paletted raw: not in the SA corpus as
-                            // uncompressed (survey: only 32-bit raw); refuse
-            }
-        }
-    }
-    ras->unlock(0);
-    if (!ok) {
+    const int baseW = ras->width, baseH = ras->height;
+    const int levels = ras->getNumLevels();
+    if (baseW <= 0 || baseH <= 0 || baseW > 4096 || baseH > 4096 || levels <= 0 || levels > 13) {
         out = TexImage{};
         return false;
     }
+    out.rgba.clear();
+    for (int level = 0; level < levels; ++level) {
+        uint8_t* locked = ras->lock(level, rw::Raster::LOCKREAD);
+        if (!locked) { out = TexImage{}; return false; }
+        const int w = ras->width, h = ras->height, stride = ras->stride;
+        std::vector<uint8_t> decoded;
+        bool ok = false;
+        if (nat->customFormat) {
+            if (nat->format == rw::d3d::D3DFMT_DXT1) ok = DecodeDxt1(locked, w, h, decoded);
+            else if (nat->format == rw::d3d::D3DFMT_DXT3) ok = DecodeDxt3(locked, w, h, decoded);
+        } else if ((nat->format == rw::d3d::D3DFMT_A8R8G8B8 ||
+            nat->format == rw::d3d::D3DFMT_X8R8G8B8) && stride >= w * 4) {
+            decoded.resize(static_cast<size_t>(w) * static_cast<size_t>(h) * 4);
+            for (int y = 0; y < h; ++y) {
+                const uint8_t* src = locked + static_cast<size_t>(y) * stride;
+                uint8_t* dst = decoded.data() + static_cast<size_t>(y) * w * 4;
+                for (int x = 0; x < w; ++x) {
+                    dst[x * 4 + 0] = src[x * 4 + 2];
+                    dst[x * 4 + 1] = src[x * 4 + 1];
+                    dst[x * 4 + 2] = src[x * 4 + 0];
+                    dst[x * 4 + 3] = nat->format == rw::d3d::D3DFMT_A8R8G8B8 ? src[x * 4 + 3] : 255;
+                }
+            }
+            ok = true;
+        }
+        ras->unlock(level);
+        if (!ok) { out = TexImage{}; return false; }
+        out.rgba.insert(out.rgba.end(), decoded.begin(), decoded.end());
+    }
     (void)std::snprintf(out.name, sizeof(out.name), "%s", tex->name);
-    out.w = w;
-    out.h = h;
+    out.w = baseW;
+    out.h = baseH;
+    out.mipmaps = levels;
     return true;
 }
 

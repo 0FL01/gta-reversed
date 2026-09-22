@@ -1119,6 +1119,8 @@ bool RealtimeGameplay::InitializeModel(const char* gameDir,std::string& error,co
     for (const auto& mesh:next->CarBind.meshes) {
         next->Actors.meshes.push_back(mesh);
         for (auto& image:next->Actors.meshes.back().triImg) if (image>=0) image+=imageBase;
+        for (auto& surface:next->Actors.meshes.back().surfaces)
+            if (surface.envMapImage>=0) surface.envMapImage+=imageBase;
     }
     next->Actors.stats.textures=static_cast<int>(next->Actors.images.size());
     next->Actors.stats.atomics=static_cast<int>(next->Actors.meshes.size());

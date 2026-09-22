@@ -21,6 +21,10 @@ struct WorldShotSurface {
     float diffuse = 1.0f;
     int vehicleColorIndex = -1; // carcols index when a paint marker was resolved
     bool vehicleAlpha = false; // realtime car: authored material/vertex/texture alpha
+    std::uint8_t matFxType = 0; // rw::MatFX source enum; zero means no effect
+    float envMapCoefficient = 0.0f;
+    bool envMapFramebufferAlpha = false;
+    int envMapImage = -1; // decoded secondary texture, -1 nil, -2 unresolved
     int sourceMaterial{-1}; // Model-local geometry/material-slot identity; optional for older producers.
     int sourceGeometry{-1};
     int sourceTriangle{-1};
@@ -68,6 +72,7 @@ struct WorldShotImage {
     char name[32];
     int w;
     int h;
+    int mipmaps = 1; // complete source chain, concatenated largest-to-smallest in rgba
     uint32_t filter; // DFF material filterAddressing (wrap modes)
     std::vector<uint8_t> rgba; // w*h*4, top row first (librw lock order)
     NativeAssetIdentity::Texture sourceIdentity;

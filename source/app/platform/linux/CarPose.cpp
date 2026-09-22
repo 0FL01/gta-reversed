@@ -1019,6 +1019,30 @@ bool CarPose_Init(const char* gameDir, const char* model, double steerDeg, doubl
     const bool hasPaint = LoadPaint(wantLower, paint, paintIndices);
     std::map<const rw::Texture*, int> imgCache;
     std::vector<bool> imageAlpha;
+    auto resolveImage = [&](const rw::Texture* texture) {
+        if (!texture) return -1;
+        const auto resolved = lc.resolved.find(texture);
+        const rw::Texture* real = texture;
+        std::uint32_t filter = texture->filterAddressing;
+        if (resolved != lc.resolved.end()) {
+            real = resolved->second.real;
+            filter = resolved->second.filter;
+        }
+        if (!real || !real->raster) real = TexSample_FindVehicleTexture(texture->name, primary, shared.get());
+        if (!real) return -2;
+        if (const auto cached = imgCache.find(real); cached != imgCache.end()) return cached->second;
+        TexImage decoded;
+        if (!TexSample_Decode(real, decoded)) return -2;
+        decoded.filter = filter;
+        bool alpha = false;
+        const auto baseBytes = static_cast<std::size_t>(decoded.w) * static_cast<std::size_t>(decoded.h) * 4;
+        for (std::size_t p = 3; p < baseBytes; p += 4) alpha |= decoded.rgba[p] != 255;
+        imageAlpha.push_back(alpha);
+        const int index = static_cast<int>(scene.images.size());
+        scene.images.push_back(std::move(decoded));
+        imgCache[real] = index;
+        return index;
+    };
     auto emitTris = [&](rw::Geometry* geo, rw::Atomic* atomic, const rw::Matrix& m, int& meshTris, bool& ok) {
         ok = true;
         const int numVerts = geo->numVertices;
@@ -1061,33 +1085,7 @@ bool CarPose_Init(const char* gameDir, const char* model, double steerDeg, doubl
                 matCol[0] = mat->color.red / 255.0f;
                 matCol[1] = mat->color.green / 255.0f;
                 matCol[2] = mat->color.blue / 255.0f;
-                if (mat->texture) {
-                    auto rit = lc.resolved.find(mat->texture);
-                    if (rit != lc.resolved.end() && rit->second.real) {
-                        const rw::Texture* real = rit->second.real;
-                        auto cit = imgCache.find(real);
-                        if (cit != imgCache.end()) {
-                            imgIdx = cit->second;
-                        } else {
-                            TexImage decoded;
-                            if (TexSample_Decode(real, decoded)) {
-                                decoded.filter = rit->second.filter;
-                                bool alpha = false;
-                                for (size_t p = 3; p < decoded.rgba.size(); p += 4) {
-                                    alpha |= decoded.rgba[p] != 255;
-                                }
-                                imageAlpha.push_back(alpha);
-                                imgIdx = static_cast<int>(scene.images.size());
-                                scene.images.push_back(std::move(decoded));
-                                imgCache[real] = imgIdx;
-                            } else {
-                                imgIdx = -2;
-                            }
-                        }
-                    } else {
-                        imgIdx = -2;
-                    }
-                }
+                imgIdx = resolveImage(mat->texture);
             }
             const rw::V3d* pp[3] = { &wv[tri.v[0]], &wv[tri.v[1]], &wv[tri.v[2]] };
             WorldShotSurface surface;
@@ -1111,6 +1109,13 @@ bool CarPose_Init(const char* gameDir, const char* model, double steerDeg, doubl
                 }
                 surface.color = {color.red / 255.0f, color.green / 255.0f,
                                  color.blue / 255.0f, color.alpha / 255.0f};
+                surface.matFxType = static_cast<std::uint8_t>(rw::MatFX::getEffects(mat));
+                if (auto* effect = rw::MatFX::get(mat); effect &&
+                    (surface.matFxType == rw::MatFX::ENVMAP || surface.matFxType == rw::MatFX::BUMPENVMAP)) {
+                    surface.envMapCoefficient = effect->getEnvCoefficient();
+                    surface.envMapFramebufferAlpha = effect->getEnvFBAlpha();
+                    surface.envMapImage = resolveImage(effect->getEnvTexture());
+                }
             }
             mesh.surfaces.push_back(surface);
             float face[3];
