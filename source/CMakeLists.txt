@@ -44,6 +44,7 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
         app/platform/linux/NativeScriptCorpus.cpp
         app/platform/linux/NativeScriptContentLedger.cpp
         app/platform/linux/NativeStoryLifecycle.cpp
+        app/platform/linux/NativeActivityLifecycle.cpp
         app/platform/linux/NativeScriptSession.cpp
         app/platform/linux/NativeScriptServiceTransaction.cpp
         app/platform/linux/NativeScriptPortableSave.cpp
