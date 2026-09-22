@@ -63,6 +63,7 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
         app/platform/linux/NativeScriptPeds.cpp
         app/platform/linux/NativeVehicleFamilies.cpp
         app/platform/linux/NativeVehicleFamilyControl.cpp
+        app/platform/linux/NativeVehicleFamilyLifecycle.cpp
         app/platform/linux/NativeScriptTrains.cpp
         app/platform/linux/NativeScriptObjects.cpp
         app/platform/linux/NativeScriptEntities.cpp
