@@ -154,7 +154,8 @@ NativeScriptServiceResult NativeMissionAudio::Request(std::int32_t slot, std::in
     if (!ok || !audioOk || !OggDuration(ogg, lookup.Offset + TrackInfoSize, durationMs))
         return {NativeScriptServiceStatus::Error, "mission-audio stream decode metadata is invalid"};
     m_Slots[std::size_t(slot - 1)] = {event, lookup.Pack, lookup.Offset, lookup.Size,
-        durationMs, 0, Hash(info.data(), info.size()), true, false, false};
+        durationMs, 0, Hash(info.data(), info.size()),
+        std::make_shared<const std::vector<std::uint8_t>>(std::move(ogg)), true, false, false};
     return {NativeScriptServiceStatus::Ready, {}};
 }
 

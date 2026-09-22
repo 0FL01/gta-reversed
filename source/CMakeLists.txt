@@ -60,6 +60,7 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
         app/platform/linux/NativeCarRecordings.cpp
         app/platform/linux/NativeBeatTrack.cpp
         app/platform/linux/NativeMissionAudio.cpp
+        app/platform/linux/NativeAudioFamilies.cpp
         app/platform/linux/NativeScriptPeds.cpp
         app/platform/linux/NativeVehicleFamilies.cpp
         app/platform/linux/NativeVehicleFamilyControl.cpp

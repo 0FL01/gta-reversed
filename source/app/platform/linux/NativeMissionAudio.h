@@ -4,7 +4,9 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <string>
+#include <vector>
 
 struct NativeMissionAudioSlot {
     std::int32_t AudioId = -1;
@@ -14,6 +16,7 @@ struct NativeMissionAudioSlot {
     std::uint32_t DurationMs = 0;
     std::uint32_t StartedMs = 0;
     std::uint64_t MetadataHash = 0;
+    std::shared_ptr<const std::vector<std::uint8_t>> Payload;
     bool Loaded = false;
     bool PlaybackRequested = false;
     bool Finished = false;
