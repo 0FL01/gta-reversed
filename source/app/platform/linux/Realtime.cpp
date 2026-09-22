@@ -12,6 +12,7 @@
 #include "app/platform/linux/RealtimeScriptHost.h"
 #include "app/platform/linux/NativeGaragesRuntime.h"
 #include "app/platform/linux/NativeCarGeneratorRuntime.h"
+#include "app/platform/linux/NativeCarGeneratorPopulation.h"
 #include "app/platform/linux/NativePadFeedback.h"
 #include "app/platform/linux/NativeInputLifecycle.h"
 
@@ -891,15 +892,24 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
     }
     GpuScene actorGpu, scriptGpu, entryGpu;
     std::unique_ptr<NativeCarGeneratorRuntime> carGenerators;
+    NativeCarGeneratorPopulation carPopulation;
     if (newGame) {
+        // Read both source population registries before the sole parser worker
+        // starts. This is data authority, not permission to select or spawn a
+        // model without the exact ordered streaming roster and world effects.
+        if (!carPopulation.LoadBeforeWorker(gameDir, scriptHost.CarGenerators().ModelDefinitions(), gameplayError)) {
+            std::printf("play-fail car population source: %s\n", gameplayError.c_str());
+            return 1;
+        }
         carGenerators = std::make_unique<NativeCarGeneratorRuntime>(scriptHost.CarGenerators(), gameplay,
             scriptHost.Vehicles(), scriptHost.State());
         const auto rng = scriptHost.InspectSourceRng();
         assert(rng.Value);
-        std::printf("play-cargens sources=%zu definitions=%zu generation=%llu seed=%u draws=%llu spawned=0\n",
+        std::printf("play-cargens sources=%zu definitions=%zu generation=%llu seed=%u draws=%llu groups=%zu popcycle=%zu spawned=0\n",
             scriptHost.CarGeneratorResidency().Active().size(), scriptHost.CarGenerators().Census().Registered,
             static_cast<unsigned long long>(scriptHost.CarGeneratorResidency().Generation()), rng.Value->Seed,
-            static_cast<unsigned long long>(rng.Value->DrawCount));
+            static_cast<unsigned long long>(rng.Value->DrawCount),
+            carPopulation.CarGroups(), carPopulation.CycleRows());
         WorldShotScene scriptImages;
         scriptImages.images = scriptHost.Entities().PreparedImages();
         if (!scriptGpu.UploadTextures(scriptImages) || !entryGpu.UploadTextures(scriptHost.EntryExits().PreparedModel())) {
