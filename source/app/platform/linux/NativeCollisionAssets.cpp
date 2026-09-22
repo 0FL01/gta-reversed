@@ -386,3 +386,60 @@ bool NativeCollisionAssets::Snapshot(const NativeCollisionPopulation& population
     Require(!next.Instances.empty(),"no source COL in collision window");
     out=std::move(next); error.clear(); return true;
 } catch (const std::exception& e) { error=e.what(); return false; }
+
+bool NativeCollisionAssets::SnapshotSelected(const NativeCollisionPopulation& population,
+    std::span<const NativePlacementIdentity> identities, NativeCollisionSnapshot& out,
+    std::string& error) const try {
+    Require(!m_Models.empty(), "collision assets not loaded");
+    Require(population.IncludesStreamed, "collision population lacks binary IPL");
+    Require(!identities.empty(), "selected collision residency is empty");
+    NativeCollisionSnapshot next;
+    for (const auto& identity : identities) {
+        const NativeCollisionPlacement* placement = nullptr;
+        std::size_t matches = 0;
+        for (const auto& candidate : population.Instances) {
+            if (identity.Matches(candidate)) {
+                placement = &candidate;
+                ++matches;
+            }
+        }
+        Require(matches == 1 && placement, "selected collision identity is absent or ambiguous");
+        const auto key = Lower(placement->Model);
+        const auto modelIdentity = population.Models.find(placement->ModelId);
+        Require(modelIdentity != population.Models.end() && Lower(modelIdentity->second.Name) == key,
+            "selected IPL/IDE collision identity mismatch: " + key);
+        const auto [found, shared] = ResolveModel(key);
+        if (found == m_Models.end()) {
+            ++next.MissingModels;
+            ++next.KnownAbsence[key];
+            continue;
+        }
+        const auto& model = *found->second;
+        Require(model.Unsupported.empty(), "selected unsupported COL: " + key + " " + model.Unsupported);
+        if (model.Empty) {
+            ++next.EmptyModels;
+            continue;
+        }
+        NativeCollisionInstance instance;
+        instance.Placement = *placement;
+        instance.Model = found->second;
+        instance.TimeShared = shared;
+        instance.Basis = Basis(placement->Quaternion);
+        for (const auto value : placement->Position) Require(std::isfinite(value), "nonfinite selected IPL position");
+        instance.Min = instance.Max = placement->Position;
+        for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) {
+            const float rotation = instance.Basis[j][i];
+            instance.Min[i] += rotation * (rotation >= 0 ? model.Min[j] : model.Max[j]);
+            instance.Max[i] += rotation * (rotation >= 0 ? model.Max[j] : model.Min[j]);
+        }
+        next.TimeShared += shared;
+        next.Instances.push_back(std::move(instance));
+    }
+    Require(!next.Instances.empty(), "selected residency has no source COL");
+    out = std::move(next);
+    error.clear();
+    return true;
+} catch (const std::exception& exception) {
+    error = exception.what();
+    return false;
+}

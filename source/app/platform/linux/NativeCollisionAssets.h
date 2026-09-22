@@ -143,8 +143,14 @@ public:
     // Explicit absolute OS_File paths; immutable assets can be shared by workers.
     bool Load(const char* gameDir, const NativeCollisionPopulation& population, std::string& error);
     bool Snapshot(const NativeCollisionPopulation& population, float x, float y, float radius,
-                  NativeCollisionSnapshot& out, std::string& error, int interior = 0,
-                  std::shared_ptr<const NativePlacementOverrides> overrides = {}) const;
+                   NativeCollisionSnapshot& out, std::string& error, int interior = 0,
+                   std::shared_ptr<const NativePlacementOverrides> overrides = {}) const;
+    // Exact catalog-selection binding. Every identity must match one population
+    // row; collision-capable rows are emitted in the supplied source order.
+    // Missing/empty COL remains counted rather than gaining invented geometry.
+    bool SnapshotSelected(const NativeCollisionPopulation& population,
+                          std::span<const NativePlacementIdentity> identities,
+                          NativeCollisionSnapshot& out, std::string& error) const;
     const NativeCollisionAssetStats& Stats() const { return m_Stats; }
     // Pure, bounded parser for source-format verification. Atomic on failure.
     static bool Parse(std::span<const uint8_t> chunk, const std::string& library,
