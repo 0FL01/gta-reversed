@@ -340,6 +340,7 @@ public:
     NativeScriptServiceResult RemoveTextureDictionary(const NativeScriptRequestId&) override;
     NativeScriptServiceResult LoadTextureDictionary(const NativeScriptTextureDictionaryRequest&) override;
     NativeScriptServiceResult LoadSprite(const NativeScriptSpriteRequest&) override;
+    NativeScriptServiceResult ReportAudioEventAtPosition(const NativeScriptAudioEventRequest&) override;
     struct PendingScriptTexture {
         NativeScriptRequestId Id;
         std::string Name;

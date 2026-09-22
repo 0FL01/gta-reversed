@@ -1721,6 +1721,16 @@ NativeScriptServiceResult RealtimeScriptHost::LoadSprite(const NativeScriptSprit
     Commit(event);
     return Ready();
 }
+NativeScriptServiceResult RealtimeScriptHost::ReportAudioEventAtPosition(
+    const NativeScriptAudioEventRequest& request) {
+    if (!m_Initialized || !Finite(request.Position) || request.Event < 0 || request.Event > 65535)
+        return Error("invalid positional audio event");
+    RealtimeScriptHostEvent event{.Id=request.Id, .Opcode=0x097A,
+        .Arguments={request.Position.X, request.Position.Y, request.Position.Z}, .Index=request.Event};
+    if (auto old = Replay(event)) return *old;
+    Commit(event);
+    return Ready();
+}
 NativeScriptServiceResult RealtimeScriptHost::LoadMissionText(const NativeScriptMissionTextRequest& request) {
     if (!m_Initialized) return Error("mission text service requires initialized host");
     RealtimeScriptHostEvent event{.Id=request.Id,.Opcode=0x054C,.Name=request.Name};

@@ -1528,7 +1528,7 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
         default: return invalid("invalid service result");
         }
     }
-    if (d.Opcode == 0x041D || d.Opcode == 0x0391 || d.Opcode == 0x0390 || d.Opcode == 0x038F) {
+    if (d.Opcode == 0x041D || d.Opcode == 0x0391 || d.Opcode == 0x0390 || d.Opcode == 0x038F || d.Opcode == 0x097A) {
         const NativeScriptRequestId id{m_SessionId, m_CommandSequence + 1, state.IP};
         NativeScriptServiceResult result;
         struct Guard { bool& Flag; Guard(bool& flag): Flag(flag) { Flag = true; } ~Guard() { Flag = false; } } guard{m_InService};
@@ -1543,6 +1543,9 @@ NativeScriptResult NativeScriptSession::StepThread(NativeScriptServices& service
                 NativeScriptSpriteRequest request{id, a};
                 request.Name = d.Strings[1];
                 result = services.LoadSprite(request);
+            } else if (d.Opcode == 0x097A) {
+                result = services.ReportAudioEventAtPosition(
+                    {id, {d.Float(0), d.Float(1), d.Float(2)}, d.Int(3)});
             } else {
                 NativeScriptCameraCommandRequest request{id, d.Opcode};
                 request.Floats[0] = d.Float(0);

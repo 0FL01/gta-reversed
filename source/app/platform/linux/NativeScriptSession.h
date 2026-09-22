@@ -402,6 +402,11 @@ struct NativeScriptSpriteRequest {
     std::int32_t Slot = -1;
     std::array<char, 16> Name{};
 };
+struct NativeScriptAudioEventRequest {
+    NativeScriptRequestId Id;
+    NativeScriptPosition Position;
+    std::int32_t Event = -1;
+};
 struct NativeScriptTextCommandsRequest {
     NativeScriptRequestId Id;
     bool Enabled = false;
@@ -743,6 +748,7 @@ public:
     virtual NativeScriptServiceResult RemoveTextureDictionary(const NativeScriptRequestId&) { return {}; }
     virtual NativeScriptServiceResult LoadTextureDictionary(const NativeScriptTextureDictionaryRequest&) { return {}; }
     virtual NativeScriptServiceResult LoadSprite(const NativeScriptSpriteRequest&) { return {}; }
+    virtual NativeScriptServiceResult ReportAudioEventAtPosition(const NativeScriptAudioEventRequest&) { return {}; }
     virtual NativeScriptServiceResult LoadMissionText(const NativeScriptMissionTextRequest&) { return {}; }
     virtual NativeScriptServiceResult ClearText(const NativeScriptMissionTextRequest&) { return {}; }
     virtual NativeScriptServiceResult UseTextCommands(const NativeScriptTextCommandsRequest&) { return {}; }
