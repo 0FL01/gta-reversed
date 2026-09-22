@@ -61,8 +61,17 @@ int main(int argc, char** argv) {
     }), "owned image payloads");
     const auto imageCount = images.size();
     completion.reset();
+    Check(worker.RequestScriptTexture({2, argv[1], "loadsc0"}), "splash request admission");
+    for (unsigned i = 0; i < 1000 && !completion; ++i) {
+        completion = worker.TakeScriptTexture(2);
+        if (!completion) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    Check(completion.has_value() && completion->Error.empty() && completion->Packet &&
+        completion->Packet->Name == "loadsc0" && !completion->Packet->Images.empty(),
+        "source splash completion");
+    const auto splashCount = completion->Packet->Images.size();
     worker.Stop({}, {});
     StreamPager_Shutdown();
-    std::printf("native-script-texture-ok checks=%d dictionary=LD_NONE images=%zu required=24 worker=sole feedback=0\n",
-        g_Checks, imageCount);
+    std::printf("native-script-texture-ok checks=%d dictionary=LD_NONE images=%zu required=24 "
+        "splash=loadsc0:%zu worker=sole feedback=0\n", g_Checks, imageCount, splashCount);
 }

@@ -26,6 +26,7 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
     add_executable(mad-sa-linux
         oswrapper/oswrapper_linux.cpp
         app/platform/linux/MainLinux.cpp
+        app/platform/linux/NativeMovieRuntime.cpp
         app/platform/linux/Realtime.cpp
         app/platform/linux/RealtimeEnvironment.cpp
         app/platform/linux/RealtimeClouds.cpp
@@ -142,7 +143,9 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
     find_package(SDL3 REQUIRED)
     find_package(OpenAL REQUIRED)
     find_package(OpenGL REQUIRED)
-    target_link_libraries(mad-sa-linux PRIVATE Threads::Threads SDL3::SDL3 OpenAL::OpenAL OpenGL::GL OpenGL::EGL librw::librw ${VORBISFILE_LIBRARY} ${VORBIS_LIBRARY} ${OGG_LIBRARY})
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavformat libavcodec libavutil libswscale libswresample)
+    target_link_libraries(mad-sa-linux PRIVATE Threads::Threads SDL3::SDL3 OpenAL::OpenAL OpenGL::GL OpenGL::EGL librw::librw ${VORBISFILE_LIBRARY} ${VORBIS_LIBRARY} ${OGG_LIBRARY} PkgConfig::FFMPEG)
     target_include_directories(mad-sa-linux PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../vendor/librw ${VORBIS_INCLUDE_DIR})
     return()
 endif()

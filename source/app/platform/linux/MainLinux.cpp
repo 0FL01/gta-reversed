@@ -61,6 +61,7 @@ using uint64 = uint64_t;
 #include "app/platform/linux/Handling.h"
 #include "app/platform/linux/WalkSim.h"
 #include "app/platform/linux/Realtime.h"
+#include "app/platform/linux/NativeMovieRuntime.h"
 
 #include <sys/resource.h>
 
@@ -77,7 +78,7 @@ void PrintUsage(const char* prog) {
                       "  F enter/exit, Tab free camera (Q/E descend/ascend), Esc quit.\n",
                       prog ? prog : "mad-sa-linux");
     (void)std::printf(
-        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --shot-cs-duo <out.tga> | --shot-water <out.tga> [--hour H] [--water-file water1.dat] | --shot-shore <out.tga> [--hour H] | --shot-hud <out.tga> [--health H] [--armor A] | --shot-radar <out.tga> [--x X] [--y Y] | --zone-at X,Y | --shot-game <out.tga> [--health H] [--armor A] [--show-zone] [--wanted N] [--money M] [--hour H] [--weather W] | --csanim-seq <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--frames 5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] [--hud] [--wanted N] [--money M] [--radar] [--show-zone] [--hour H] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] [--hud] [--show-zone] [--hour H] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
+        "usage: %s --smoke | --smoke-video | --smoke-audio | --smoke-audio-real [--bank NAME] [--samples K] | --smoke-radio [--station RE] [--seconds S] | --smoke-movies | --headless [--ticks N] | --shot <out.tga> [--frames N] | --shot-scene <out.tga> [--frames N] [--cam x,y,z] [--hour H] [--weather W] [--fog] | --shot-menu <out.tga> [--lang english] | --menu-nav <seq> [--out nav.tga] [--lang english] | --coll-probe [--count N] | --shot-ped <out.tga> [--model cj] | --shot-anim <out.tga> [--model andre] [--anim IDLE_stance] [--time 0.5] | --anim-seq <out.tga> [--model andre] [--anim WALK_civi] [--frames 6] | --anim-blend <out.tga> [--model andre] [--from IDLE_stance] [--to WALK_civi] [--frames 5] | --shot-car <out.tga> [--model landstal] [--steer DEG] [--spin DEG] | --shot-duo <out.tga> [--car landstal] [--ped andre] | --shot-crowd <out.tga> | --shot-cs <out.tga> [--model auto] | --shot-cs-anim <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--time 0.5] | --shot-cs-duo <out.tga> | --shot-water <out.tga> [--hour H] [--water-file water1.dat] | --shot-shore <out.tga> [--hour H] | --shot-hud <out.tga> [--health H] [--armor A] | --shot-radar <out.tga> [--x X] [--y Y] | --zone-at X,Y | --shot-game <out.tga> [--health H] [--armor A] [--show-zone] [--wanted N] [--money M] [--hour H] [--weather W] | --csanim-seq <out.tga> [--model cssmokevest] [--bank smoke1a] [--anim csplay] [--frames 5] | --drive [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model landstal] [--out prefix] [--use-handling] [--hud] [--wanted N] [--money M] [--radar] [--show-zone] [--hour H] | --walk [--path Ax,Ay:Bx,By:Cx,Cy] [--waypoints W] [--frames-per-leg F] [--model andre] [--anim WALK_civi] [--out prefix] [--hud] [--show-zone] [--hour H] | --list-anims | --list-cs-anims [--bank smoke1a] | --e2e [--path Ax,Ay,Az:Bx,By,Bz] [--waypoints W] [--frames-per-leg F] [--out prefix]\n",
         prog ? prog : "mad-sa-linux"
     );
 }
@@ -7858,6 +7859,23 @@ int RunCollProbe(int argc, char** argv) {
     return 0;
 }
 
+int RunSmokeMovies(int argc, char** argv) {
+    const auto gameDir = ResolveGameDir(argc, argv);
+    NativeMovieClip logo, titles;
+    std::string error;
+    if (!NativeMovieRuntime_Decode(gameDir.c_str(), "Logo.mpg", logo, error) ||
+        !NativeMovieRuntime_Decode(gameDir.c_str(), "GTAtitles.mpg", titles, error)) {
+        std::printf("movie-smoke-fail %s\n", error.c_str());
+        return 1;
+    }
+    std::printf("movie-smoke-ok clips=Logo,GTAtitles video=%s,%s audio=%s,%s "
+        "frames=%dx%d,%dx%d rates=%d,%d duration=%u,%u codec-license=FFmpeg-LGPL dynamic=1\n",
+        logo.VideoCodec.c_str(), titles.VideoCodec.c_str(), logo.AudioCodec.c_str(), titles.AudioCodec.c_str(),
+        logo.Width, logo.Height, titles.Width, titles.Height, logo.AudioRate, titles.AudioRate,
+        logo.DurationMs, titles.DurationMs);
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -7883,6 +7901,9 @@ int main(int argc, char** argv) {
     }
     if (HasArg(argc, argv, "--smoke-radio")) {
         return RunSmokeRadio(argc, argv);
+    }
+    if (HasArg(argc, argv, "--smoke-movies")) {
+        return RunSmokeMovies(argc, argv);
     }
     if (HasArg(argc, argv, "--smoke-audio")) {
         return RunSmokeAudio();
