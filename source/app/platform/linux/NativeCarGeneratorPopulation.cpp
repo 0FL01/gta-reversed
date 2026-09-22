@@ -243,3 +243,106 @@ bool NativeCarGeneratorPopulation::Select(NativeScriptPosition player, std::uint
     error.clear();
     return true;
 }
+
+bool NativeCarGeneratorPopulation::ChooseModelToStream(NativeScriptPosition player,
+    std::uint8_t hour, bool weekend, std::span<const NativeZonePopulationEntry> zoneStates,
+    std::span<const NativeCarLoadedModel> orderedLoadedModels, std::int32_t lastCab,
+    NativeSourceRngRef rng, NativeCarStreamChoice& out, std::string& error) const {
+    if (!m_Loaded || hour >= 24 || !std::isfinite(player.X) || !std::isfinite(player.Y) ||
+        !std::isfinite(player.Z) || zoneStates.size() != m_Zones.zones.size() ||
+        rng.Readiness() != NativeSourceRngStatus::Ready ||
+        (lastCab != 0 && lastCab != 420 && lastCab != 438)) {
+        error = "missing source streaming zone/roster/RNG authority";
+        return false;
+    }
+    for (std::size_t i = 0; i < zoneStates.size(); ++i) {
+        if (zoneStates[i].Label != m_Zones.zones[i].name) {
+            error = "streaming-zone identity changed";
+            return false;
+        }
+    }
+    for (std::size_t i = 0; i < orderedLoadedModels.size(); ++i) {
+        if (std::ranges::find(m_Models, orderedLoadedModels[i].ModelId, &Model::Id) == m_Models.end() ||
+            std::ranges::find(orderedLoadedModels.begin(), orderedLoadedModels.begin() + i,
+                orderedLoadedModels[i].ModelId, &NativeCarLoadedModel::ModelId) != orderedLoadedModels.begin() + i) {
+            error = "streaming loaded-car roster lacks unique vehicle identities";
+            return false;
+        }
+    }
+    int selected = -1;
+    float size = std::numeric_limits<float>::infinity();
+    for (std::size_t i = 0; i < m_Zones.zones.size(); ++i) {
+        const auto& z = m_Zones.zones[i];
+        if (player.X < z.x1 || player.X > z.x2 || player.Y < z.y1 || player.Y > z.y2 ||
+            player.Z < z.z1 || player.Z > z.z2) continue;
+        const float area = (z.x2 - z.x1) + (z.y2 - z.y1);
+        if (area < size) { size = area; selected = int(i); }
+    }
+    if (selected < 0) { error = "player has no verified source 3D streaming zone"; return false; }
+    const auto& zone = zoneStates[std::size_t(selected)];
+    if (zone.PopulationType >= 20) { error = "streaming population type outside source rows"; return false; }
+    const auto& row = m_Rows[(std::size_t(zone.PopulationType) * 2 + (weekend ? 1 : 0)) * 12 + hour / 2];
+    const auto loaded = [&](std::int32_t model) {
+        return std::ranges::find(orderedLoadedModels, model, &NativeCarLoadedModel::ModelId) !=
+            orderedLoadedModels.end();
+    };
+    const auto needed = [&](std::int32_t model) {
+        for (std::size_t group = 0; group < 18; ++group) {
+            if (row[6 + group] && std::ranges::find(m_Groups[group], model) != m_Groups[group].end())
+                return true;
+        }
+        for (std::size_t group = 0; group < 10; ++group) {
+            if (zone.GangStrength[group] &&
+                std::ranges::find(m_Groups[group], model) != m_Groups[group].end()) return true;
+        }
+        return false;
+    };
+    NativeCarStreamChoice result{zone.Label, -1, -1, lastCab, 0};
+    // Streaming.cpp:3232-3252 prefers one of the two taxi models when both
+    // are absent. A previously streamed TAXI only tries CABBIE in this branch.
+    if (!loaded(420) && !loaded(438)) {
+        if (lastCab == 420) {
+            if (!needed(438) && needed(420)) result.ModelId = 420;
+        } else if (needed(420)) {
+            result.ModelId = 420;
+        } else if (needed(438)) {
+            result.ModelId = 438;
+        }
+        if (result.ModelId >= 0) result.LastCab = result.ModelId;
+    }
+    if (result.ModelId < 0) {
+        // PopCycle.cpp:278-295 uses a fixed exclusive range [0,100), not a
+        // modulo or a normalized sum; the game's rescaled row is retained.
+        const auto draw = rng.NextRand15();
+        if (draw.Status != NativeSourceRngStatus::Ready || !draw.Value) {
+            error = "source popcycle group draw failed";
+            return false;
+        }
+        ++result.Draws;
+        std::int32_t random = std::int32_t(99.0f *
+            (float(*draw.Value) * (1.0f / 32767.0f)));
+        for (std::size_t group = 0; group < 18; ++group) {
+            if (row[6 + group] >= random) { result.Group = std::int32_t(group); break; }
+            random -= row[6 + group];
+        }
+        if (result.Group < 0) {
+            error = "source group distribution has no selected row";
+            return false;
+        }
+        const auto& group = m_Groups[std::size_t(result.Group)];
+        for (int tries = 0; tries < 16 && !group.empty(); ++tries) {
+            const auto pick = rng.NextRand15();
+            if (pick.Status != NativeSourceRngStatus::Ready || !pick.Value) {
+                error = "source car group draw failed";
+                return false;
+            }
+            ++result.Draws;
+            const auto index = std::size_t(float(group.size() - 1) *
+                (float(*pick.Value) * (1.0f / 32767.0f)));
+            if (!loaded(group[index])) { result.ModelId = group[index]; break; }
+        }
+    }
+    out = std::move(result);
+    error.clear();
+    return true;
+}

@@ -28,6 +28,14 @@ struct NativeCarLoadedModel {
     bool StreamingPhaseOut = false;
 };
 
+struct NativeCarStreamChoice {
+    std::string Zone;
+    std::int32_t ModelId = -1;
+    std::int32_t Group = -1; // -1 means the source taxi/cabbie preference branch.
+    std::int32_t LastCab = 0;
+    std::uint8_t Draws = 0;
+};
+
 // Read-only source membership/weight calculation. The caller supplies the
 // streaming owner's *ordered* loaded roster and its one shared RNG reference.
 // No independent model loader, source RNG seed, or fallback car is created.
@@ -39,6 +47,13 @@ public:
         std::span<const NativeZonePopulationEntry> zoneStates,
         std::span<const NativeCarLoadedModel> orderedLoadedModels, NativeSourceRngRef rng,
         NativeCarPopulationSelection& out, std::string& error) const;
+    // Streaming.cpp::StreamOneNewCar (no cheat/boat override) and
+    // CarCtrl.cpp::ChooseCarModelToLoad. This selects a REQUEST, not a loaded
+    // model; only a matching parser-worker completion can enter the roster.
+    bool ChooseModelToStream(NativeScriptPosition player, std::uint8_t hour, bool weekend,
+        std::span<const NativeZonePopulationEntry> zoneStates,
+        std::span<const NativeCarLoadedModel> orderedLoadedModels, std::int32_t lastCab,
+        NativeSourceRngRef rng, NativeCarStreamChoice& out, std::string& error) const;
 
     std::size_t CarGroups() const { return m_Groups.size(); }
     std::size_t CycleRows() const { return m_Rows.size(); }
