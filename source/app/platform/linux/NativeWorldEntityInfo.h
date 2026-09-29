@@ -12,6 +12,7 @@ enum class NativeWorldInitialClass { Unknown, Building, AnimatedBuilding, DummyO
 enum class NativeWorldModelKind { Unknown, Atomic, TimeAtomic, Clump };
 enum class NativeWorldObjectAssignment { Unknown, Unassigned, Assigned };
 enum class NativeWorldInfoStatus { Ready, NotLoaded, ModelUnrepresented, IdentityMismatch, PlacementUnrepresented };
+enum class NativeWorldNameStatus { Found, Missing, NotLoaded, Ambiguous, InvalidName };
 
 struct NativeWorldSourceRow {
     std::string Source;
@@ -67,6 +68,23 @@ struct NativeWorldEntityMetadata {
 };
 struct NativeWorldEntitySourceText {
     std::string Source, Text;
+    // Reuse the same case-qualified read-only asset reader and byte budget.
+    // Failure retains both output and the caller's total byte count.
+    static bool ReadBeforeWorker(const char* gameDir, const std::string& relative,
+        size_t& total, NativeWorldEntitySourceText& out, std::string& error);
+};
+
+// The complete source LoadPedObject row, retained by the same ordered IDE
+// namespace reader. A missing row is not a default ped model or a loaded model.
+// Stat/animation names still require their separate source namespace binding.
+struct NativeWorldPedModelInfo {
+    int ModelId = -1;
+    std::string Name, TxdName;
+    NativeWorldSourceRow Ide;
+    std::string PedTypeName, StatName, AnimationGroupName, AnimationFileName;
+    std::string AudioTypeName, VoiceMinName, VoiceMaxName;
+    uint16_t CarsCanDriveMask{}, PedFlags{};
+    int Radio1{}, Radio2{};
 };
 
 class NativeWorldEntityInfo {
@@ -87,11 +105,17 @@ public:
     // NEVER COL HeaderId or time-shared geometry's name. Overrides may change Position.
     NativeWorldEntityMetadata Query(const NativeCollisionPlacement& placement) const;
     const NativeWorldModelInfo* FindModel(int modelId, std::string_view name) const;
+    // Complete ordered IDE namespace, not only static/population models. An
+    // ambiguous source CRC is unavailable; only Found changes modelId.
+    NativeWorldNameStatus FindNamespaceModelId(std::string_view name, int& modelId) const;
     const std::map<int, NativeWorldModelInfo>& Models() const { return m_Models; }
+    const std::map<int, NativeWorldPedModelInfo>& PedModels() const { return m_PedModels; }
     size_t PlacementCount() const { return m_Placements.size(); }
 private:
     using PlacementKey = std::tuple<std::string, uint32_t, bool>;
     bool m_Loaded{};
     std::map<int, NativeWorldModelInfo> m_Models;
+    std::map<int, NativeWorldPedModelInfo> m_PedModels;
+    std::map<uint32_t, std::vector<int>> m_ModelIdsByKey;
     std::map<PlacementKey, NativeWorldPlacementInfo> m_Placements;
 };

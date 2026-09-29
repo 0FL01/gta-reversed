@@ -15,6 +15,7 @@
 #include "app/platform/linux/NativeLiveEntityBounds.h"
 #include "app/platform/linux/NativeWorldGround.h"
 #include "app/platform/linux/NativeCarGeneratorPopulation.h"
+#include "app/platform/linux/NativePedModelMetadata.h"
 #include "app/platform/linux/NativePadFeedback.h"
 #include "app/platform/linux/NativeInputLifecycle.h"
 
@@ -987,6 +988,7 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
     GpuScene actorGpu, scriptGpu, entryGpu;
     std::unique_ptr<NativeCarGeneratorRuntime> carGenerators;
     NativeCarGeneratorPopulation carPopulation;
+    NativePedModelMetadata pedMetadata;
     std::shared_ptr<const NativeWorldGround> generatorGround;
     struct PendingPopulationVehicle {
         std::uint64_t Ticket = 0;
@@ -1010,6 +1012,15 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
             std::printf("play-fail initial entity metadata: %s\n", gameplayError.c_str());
             return 1;
         }
+        if (!pedMetadata.LoadBeforeWorker(gameDir, entityMetadata, gameplayError)) {
+            std::printf("play-fail ped metadata source: %s\n", gameplayError.c_str());
+            return 1;
+        }
+        // Retain numeric ped/group identity for the source population helpers.
+        // This does not populate loaded-ped slots, bind speech/voice assets or
+        // authorize a complete ambient actor census or a constructor effect.
+        std::printf("play-ped-metadata models=%zu stats=%zu animations=%zu groups=%zu loaded-state=unowned census=incomplete audio=unowned\n",
+            pedMetadata.Models().size(), pedMetadata.Stats().size(), pedMetadata.AnimationGroups().size(), pedMetadata.Groups().size());
         const auto lodCatalog = NativeLodCatalog::LoadBeforeWorker(gameDir, collisionContext->Population, gameplayError);
         if (!lodCatalog) {
             std::printf("play-fail initial IPL graph: %s\n", gameplayError.c_str());

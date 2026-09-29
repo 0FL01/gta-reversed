@@ -1,4 +1,5 @@
 #include "app/platform/linux/NativeWorldEntityInfo.h"
+#include "app/platform/linux/NativeMetadataText.h"
 #include <algorithm>
 #include <cerrno>
 #include <cstdlib>
@@ -16,76 +17,32 @@ using uint64 = uint64_t;
 #include "oswrapper/oswrapper.h"
 
 namespace {
-constexpr size_t MaxFileBytes = 8 * 1024 * 1024, MaxTotalBytes = 32 * 1024 * 1024;
+using NativeMetadataText::Require;
+using NativeMetadataText::Lower;
+using NativeMetadataText::Key;
+using NativeMetadataText::Lines;
+using NativeMetadataText::Scan;
+using NativeMetadataText::MaxFileBytes;
+constexpr size_t MaxTotalBytes = 32 * 1024 * 1024;
 constexpr size_t MaxModels = 20000, MaxPlacements = 250000, MaxSources = 1024;
-static void Require(bool ok, const std::string& message) {
-    if (!ok) throw std::runtime_error(message);
+
+static std::optional<NativeWorldPedModelInfo> PedProperties(
+    const std::string& line, const NativeWorldSourceRow& row) {
+    Scan scan(line);
+    NativeWorldPedModelInfo ped;
+    uint32_t cars{}, flags{};
+    if (!(scan.Int(ped.ModelId) && scan.Word(ped.Name, 19) && scan.Word(ped.TxdName, 19) &&
+        scan.Word(ped.PedTypeName, 23) && scan.Word(ped.StatName, 19) &&
+        scan.Word(ped.AnimationGroupName, 19) && scan.Hex(cars) && scan.Hex(flags) &&
+        scan.Word(ped.AnimationFileName, 11) && scan.Int(ped.Radio1) && scan.Int(ped.Radio2) &&
+        scan.Word(ped.AudioTypeName, 15) && scan.Word(ped.VoiceMinName, 55) &&
+        scan.Word(ped.VoiceMaxName, 59))) return std::nullopt;
+    ped.Ide = row;
+    // Source stores the parsed 32-bit hexadecimal values in uint16 members.
+    ped.CarsCanDriveMask = static_cast<uint16_t>(cars);
+    ped.PedFlags = static_cast<uint16_t>(flags);
+    return ped;
 }
-static std::string Lower(std::string_view s) {
-    std::string out(s);
-    for (auto& c : out) if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
-    return out;
-}
-static uint32_t Key(std::string_view s) {
-    uint32_t key = 0xffffffff;
-    for (unsigned char c : s) {
-        Require(c >= 32 && c < 127, "non-ASCII model name");
-        if (c >= 'a' && c <= 'z') c -= 'a' - 'A';
-        key ^= c;
-        for (int b = 0; b < 8; ++b) key = (key >> 1) ^ ((key & 1) ? 0xedb88320u : 0u);
-    }
-    return key; // CKeyGen: no final xor.
-}
-// CFileLoader::LoadLine sanitizes controls/commas, then skips leading spaces.
-// Reject overlong physical lines instead of inventing split-line parser semantics.
-template<typename F> static void Lines(const NativeWorldEntitySourceText& source, F visit) {
-    Require(!source.Source.empty() && source.Source.size() <= 1024 && source.Text.size() <= MaxFileBytes,
-            "metadata source bounds");
-    Require(source.Text.find('\0') == std::string::npos, "NUL in metadata text");
-    uint32_t number = 0;
-    for (size_t pos = 0; pos < source.Text.size();) {
-        auto end = source.Text.find('\n', pos);
-        if (end == std::string::npos) end = source.Text.size();
-        auto line = source.Text.substr(pos, end - pos);
-        pos = end == source.Text.size() ? end : end + 1;
-        ++number;
-        Require(line.size() < 511, "metadata physical line exceeds source LoadLine bound");
-        for (auto& c : line) if (static_cast<unsigned char>(c) < 32 || c == ',') c = ' ';
-        auto first = line.find_first_not_of(' ');
-        if (first == std::string::npos) continue;
-        line.erase(0, first);
-        if (!visit(line, NativeWorldSourceRow{source.Source, number})) break;
-    }
-}
-// Sequential scanf-compatible decimal/float conversions with bounded names and
-// explicit range rejection (undefined/out-of-range source inputs are not guessed).
-struct Scan {
-    const char* At;
-    bool Ok = true;
-    explicit Scan(const std::string& line) : At(line.c_str()) {}
-    void Space() { while (*At == ' ') ++At; }
-    bool Word(std::string& out, size_t max = 255) {
-        if (!Ok) return false;
-        Space(); const auto* start = At;
-        while (*At && *At != ' ') ++At;
-        out.assign(start, At);
-        return Ok = !out.empty() && out.size() <= max;
-    }
-    bool Int(int& out) {
-        if (!Ok) return false;
-        Space(); char* end{}; errno = 0;
-        auto value = std::strtol(At, &end, 10);
-        if (end == At || errno == ERANGE || value < INT32_MIN || value > INT32_MAX) return Ok = false;
-        At = end; out = static_cast<int>(value); return true;
-    }
-    bool Float(float& out) {
-        if (!Ok) return false;
-        Space(); char* end{}; errno = 0;
-        auto value = std::strtof(At, &end);
-        if (end == At || errno == ERANGE || !std::isfinite(value)) return Ok = false;
-        At = end; out = value; return true;
-    }
-};
 static void IdeProperties(const std::string& line, const std::string& section, NativeWorldModelInfo& m) {
     Scan r(line); int id{}, flags{}, on{}, off{}; std::string name, txd, anim; float draw{};
     Require(r.Int(id) && r.Word(name, 23) && r.Word(txd, 23), "invalid IDE model identity");
@@ -155,6 +112,17 @@ static NativeWorldEntitySourceText Read(const char* gameDir, const std::string& 
 }
 }
 
+bool NativeWorldEntitySourceText::ReadBeforeWorker(const char* gameDir, const std::string& relative,
+    size_t& total, NativeWorldEntitySourceText& out, std::string& error) try {
+    Require(total <= MaxTotalBytes, "metadata total byte budget");
+    auto candidateTotal = total;
+    auto candidate = Read(gameDir, relative, candidateTotal);
+    out = std::move(candidate);
+    total = candidateTotal;
+    error.clear();
+    return true;
+} catch (const std::exception& e) { error = e.what(); return false; }
+
 bool NativeWorldEntityInfo::LoadBeforeWorker(const char* gameDir, const NativeCollisionPopulation& population,
                                            std::string& error) try {
     size_t total = 0;
@@ -185,6 +153,7 @@ bool NativeWorldEntityInfo::LoadSources(const NativeCollisionPopulation& populat
             population.Instances.size() <= MaxPlacements, "metadata population bounds");
     size_t total = objectSource.Text.size();
     std::map<int, NativeWorldModelInfo> sourceModels;
+    std::map<int, NativeWorldPedModelInfo> sourcePeds;
     for (const auto& source : ideSources) {
         Require(source.Text.size() <= MaxTotalBytes && total <= MaxTotalBytes - source.Text.size(), "metadata total byte budget");
         total += source.Text.size();
@@ -202,6 +171,12 @@ bool NativeWorldEntityInfo::LoadSources(const NativeCollisionPopulation& populat
                     identity.Word(model.Name, 23), "invalid IDE identity: " + row.Source);
             model.Ide = row;
             IdeProperties(line, section, model);
+            // Keep the old identity-only import boundary conservative. Only a
+            // complete valid LoadPedObject row can authorize ped metadata.
+            sourcePeds.erase(model.ModelId);
+            if (section == "peds") {
+                if (auto ped = PedProperties(line, row)) sourcePeds.emplace(model.ModelId, std::move(*ped));
+            }
             model.ObjectInfo = NativeWorldObjectAssignment::Unassigned;
             sourceModels[model.ModelId] = std::move(model); // Later IDE definitions replace earlier IDs before Object.dat.
             return true;
@@ -236,6 +211,8 @@ bool NativeWorldEntityInfo::LoadSources(const NativeCollisionPopulation& populat
         return true;
     });
     NativeWorldEntityInfo next;
+    next.m_PedModels = std::move(sourcePeds);
+    next.m_ModelIdsByKey = std::move(keys);
     for (const auto& [id, definition] : population.Models) {
         Require(id >= 0 && id < static_cast<int>(MaxModels) && !definition.Name.empty() && definition.Name.size() <= 23,
                 "invalid population model identity");
@@ -288,6 +265,16 @@ bool NativeWorldEntityInfo::LoadSources(const NativeCollisionPopulation& populat
 const NativeWorldModelInfo* NativeWorldEntityInfo::FindModel(int modelId, std::string_view name) const {
     const auto found = m_Models.find(modelId);
     return found != m_Models.end() && Lower(found->second.Name) == Lower(name) ? &found->second : nullptr;
+}
+NativeWorldNameStatus NativeWorldEntityInfo::FindNamespaceModelId(std::string_view name, int& modelId) const {
+    if (!m_Loaded) return NativeWorldNameStatus::NotLoaded;
+    if (name.empty() || name.size() > 255 || std::ranges::any_of(name,
+        [](unsigned char c) { return c < 32 || c >= 127; })) return NativeWorldNameStatus::InvalidName;
+    const auto found = m_ModelIdsByKey.find(Key(name));
+    if (found == m_ModelIdsByKey.end()) return NativeWorldNameStatus::Missing;
+    if (found->second.size() != 1) return NativeWorldNameStatus::Ambiguous;
+    modelId = found->second.front();
+    return NativeWorldNameStatus::Found;
 }
 NativeWorldEntityMetadata NativeWorldEntityInfo::Query(const NativeCollisionPlacement& p) const {
     if (!m_Loaded) return {};
