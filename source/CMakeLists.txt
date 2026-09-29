@@ -42,6 +42,7 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
         app/platform/linux/NativeCarGeneratorResidency.cpp
         app/platform/linux/NativeCarGeneratorRuntime.cpp
         app/platform/linux/NativeLiveEntityBounds.cpp
+        app/platform/linux/NativeDynamicSectorLists.cpp
         app/platform/linux/NativeCollisionAssets.cpp
         app/platform/linux/NativeWorldEntityInfo.cpp
         app/platform/linux/NativeLodCatalog.cpp
@@ -137,6 +138,7 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
             app/platform/linux/NativeWorldEntityInfo.cpp
             app/platform/linux/NativeLodCatalog.cpp
             app/platform/linux/NativeWorldGround.cpp
+            app/platform/linux/NativeDynamicSectorLists.cpp
             app/platform/linux/NativeSourceGround.cpp
             PROPERTIES COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-Wall;-Wextra;-Wpedantic"
         )

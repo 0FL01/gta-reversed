@@ -59,6 +59,7 @@ public:
     static NativeSourceGroundResult Query(const NativeWorldGroundPublication&,
         NativeCollisionVector stored, uint64_t generation, uint64_t revision);
     static bool SourceTransform(const NativeCollisionPlacement&, NativeSourceGroundTransform&);
+    static NativeCollisionVector SourcePoint(const NativeSourceGroundTransform&, NativeCollisionVector);
     // Source GetBoundRect's FOUR corners, intentionally not an eight-corner AABB.
     static std::array<float, 4> SourceRect(const NativeCollisionModel&, const NativeSourceGroundTransform&,
                                          const NativeCollisionPlacement* initialPlacement = nullptr);

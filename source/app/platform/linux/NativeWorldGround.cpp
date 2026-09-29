@@ -33,6 +33,11 @@ int NativeWorldGround::Sector(float coordinate) {
     return static_cast<int>(std::floor(coordinate / 50.0f + 60.0f));
 }
 
+NativeCollisionVector NativeWorldGround::SourcePoint(const NativeSourceGroundTransform& transform,
+    NativeCollisionVector point) {
+    return Point(transform, point);
+}
+
 bool NativeWorldGround::SourceTransform(const NativeCollisionPlacement& p, NativeSourceGroundTransform& t) {
     if (!Finite(p.Position) || !std::ranges::all_of(p.Quaternion, [](float f) { return std::isfinite(f); })) return false;
     // FileLoader.cpp:1036-1052; unlike NativeCollisionAssets::Basis, NO normalize.

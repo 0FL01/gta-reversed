@@ -36,6 +36,7 @@ struct NativeLiveBlockageResult {
     std::uint64_t Frame{}, WorldGeneration{}, VehicleRevision{}, PlayerRevision{};
     NativeCollisionVector StoredPosition{};
     std::int32_t CandidateModelId = -1; // production typed packet identity
+    bool operator==(const NativeLiveBlockageResult&) const = default;
 };
 
 // Arithmetic seam for independent fixtures. This does NOT produce an owner
