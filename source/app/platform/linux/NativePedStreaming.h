@@ -1,4 +1,4 @@
-// Original PickPedMIToStreamInForCurrentZone request selection. Not a loader.
+// Source ped streaming request kernels. Not a model loader or census owner.
 #pragma once
 
 #include "NativePedModelMetadata.h"
@@ -42,7 +42,8 @@ struct NativePedStreamChoice {
 enum class NativePedStreamStatus {
     Selected, NoSelection, UnknownZone, UnknownSlots, UnknownGroup,
     UnknownModel, UnknownRng, InvalidInput, InvalidDistribution, QualifiedGroups, PlannedSlots,
-    ZonePhaseComplete, UnknownCheat, UnknownReferences, QualifiedCycleInput
+    ZonePhaseComplete, UnknownCheat, UnknownReferences, QualifiedCycleInput,
+    GangPhaseComplete, UnknownRequestedGangs
 };
 
 struct NativePedRequestedSlots {
@@ -88,6 +89,8 @@ inline constexpr std::array<std::array<std::uint8_t, 3>, 33> NativePedGroupTrans
 // Memory-only actual metadata adapter; world zone must come from its owner.
 NativePedStreamStatus NativeQualifyPedStreamingGroups(const NativePedModelMetadata&,
     std::uint32_t worldZone, std::array<NativePedStreamGroup, 18>& out);
+NativePedStreamStatus NativeQualifyPedGangGroups(const NativePedModelMetadata&,
+    std::array<NativePedStreamGroup, 10>& out);
 
 // Bind the shared cycle reader's actual row and live race setting to actual
 // translated ped groups. Requested slots, references and world-region authority
@@ -145,3 +148,35 @@ struct NativePedZoneStreamEffects {
 // Early guard failures leave state unchanged. No asset, actor or census claims.
 NativePedStreamStatus NativeAdvancePedZoneRequests(const NativePedZoneStreamInput&,
     NativeSourceRngRef, NativePedZoneStreamState&, NativePedZoneStreamEffects& out);
+
+struct NativePedGangStreamInput {
+    bool ZoneKnown = false, HasZone = false;
+    bool CheatKnown = false, ZoneStreamingCheat = false;
+    // Source requested-gang bitfield, NOT parser-completed assets.
+    bool RequestedGangsKnown = false;
+    std::uint16_t RequestedGangs = 0;
+    std::array<NativePedStreamGroup, 10> Groups{};
+};
+
+struct NativePedGangStreamState {
+    std::int32_t TimeBeforeNextLoad = 0;
+    std::int32_t CurrentMember = 0;
+    bool operator==(const NativePedGangStreamState&) const = default;
+};
+
+enum class NativePedGangEffectKind { MakeModelAndTxdDeletable, RequestGameRequired };
+struct NativePedGangEffect {
+    NativePedGangEffectKind Kind{};
+    std::int32_t Model = -1;
+    bool operator==(const NativePedGangEffect&) const = default;
+};
+struct NativePedGangStreamEffects {
+    std::array<NativePedGangEffect, 40> Effects{};
+    std::uint8_t Count = 0;
+};
+
+// StreamZoneModels' independent gang timer/tail, after the civilian phase.
+// No RNG or loaded-state inference. Execute every emitted prefix in order; an
+// unavailable later gang retains advanced state/intents, not a replayable call.
+NativePedStreamStatus NativeAdvancePedGangRequests(const NativePedGangStreamInput&,
+    NativePedGangStreamState&, NativePedGangStreamEffects& out);

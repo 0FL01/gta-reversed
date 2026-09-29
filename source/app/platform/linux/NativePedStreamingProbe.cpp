@@ -253,6 +253,102 @@ void ZonePhases() {
     Check(NativeAdvancePedZoneRequests(input, {}, state, effects) == NativePedStreamStatus::InvalidInput &&
         state == invalid && !effects.Count, "inconsistent requested count cannot emit retirement or selection effects");
 }
+
+NativePedGangStreamInput GangFixture(std::uint16_t mask, std::uint16_t count) {
+    NativePedGangStreamInput input;
+    input.ZoneKnown = input.HasZone = input.CheatKnown = input.RequestedGangsKnown = true;
+    input.RequestedGangs = mask;
+    for (std::size_t gang = 0; gang < input.Groups.size(); ++gang) {
+        auto& group = input.Groups[gang];
+        group.Known = true;
+        group.Count = count;
+        for (std::size_t slot = 0; slot < count; ++slot)
+            group.Models[slot].Model = std::int32_t(10 + gang * 21 + slot);
+    }
+    return input;
+}
+
+void GangCase(std::uint16_t mask, std::uint16_t count, std::int32_t current,
+    std::int32_t timer, int mode) {
+    auto input = GangFixture(mask, count);
+    input.HasZone = mode != 1;
+    input.ZoneStreamingCheat = mode == 2;
+    NativePedGangStreamState state{timer, current};
+    NativePedGangStreamEffects effects;
+    Check(NativeAdvancePedGangRequests(input, state, effects) == NativePedStreamStatus::GangPhaseComplete,
+        "source gang phase with explicit observations completes its intents");
+    const bool active = mode == 0 && timer < 0;
+    Check(state.CurrentMember == (active ? (current + 1) % 21 : current) &&
+        state.TimeBeforeNextLoad == (mode != 0 ? timer : active ? 550 : timer - 1),
+        "independent source timer/member and skipped guards");
+    std::printf("GANG %d %u %u %d %d %d %d %u", mode, unsigned(mask), unsigned(count),
+        current, timer, state.CurrentMember, state.TimeBeforeNextLoad, unsigned(effects.Count));
+    for (std::size_t i = 0; i < effects.Count; ++i)
+        std::printf(" %d %d", int(effects.Effects[i].Kind), effects.Effects[i].Model);
+    std::printf("\n");
+}
+
+void GangPhases() {
+    for (std::uint16_t mask = 0; mask < 1024; ++mask)
+        for (const auto count : {1, 2, 8, 21}) GangCase(mask, std::uint16_t(count), mask % 21, -1, 0);
+    for (std::int32_t current = 0; current < 21; ++current) {
+        for (const auto count : {1, 2, 3, 4, 7, 8, 21})
+            GangCase(0x83ff, std::uint16_t(count), current, -32768, 0);
+        GangCase(1023, 8, current, 0, 0);
+        GangCase(1023, 8, current, 2147483647, 0);
+        GangCase(1023, 8, current, -1, 1);
+        GangCase(1023, 8, current, -1, 2);
+    }
+    GangCase(0x8000, 8, 20, -1, 0);
+
+    auto input = GangFixture(3, 8);
+    NativePedGangStreamState state{-1, 0};
+    const auto before = state;
+    NativePedGangStreamEffects effects;
+    effects.Count = 1;
+    input.ZoneKnown = false;
+    Check(NativeAdvancePedGangRequests(input, state, effects) == NativePedStreamStatus::UnknownZone &&
+        state == before && !effects.Count, "unknown source zone is not an absent zone");
+    input.ZoneKnown = true;
+    input.HasZone = false;
+    input.CheatKnown = false;
+    Check(NativeAdvancePedGangRequests(input, state, effects) == NativePedStreamStatus::GangPhaseComplete &&
+        state == before, "actual no-zone guard precedes cheat knowledge and gang timer");
+    input.HasZone = true;
+    Check(NativeAdvancePedGangRequests(input, state, effects) == NativePedStreamStatus::UnknownCheat &&
+        state == before, "unknown streaming cheat is not a negative observation");
+    input.CheatKnown = true;
+    input.RequestedGangsKnown = false;
+    Check(NativeAdvancePedGangRequests(input, state, effects) == NativePedStreamStatus::UnknownRequestedGangs &&
+        state == before && !effects.Count, "missing requested bitfield cannot mean no gangs");
+    state.TimeBeforeNextLoad = 0;
+    Check(NativeAdvancePedGangRequests(input, state, effects) == NativePedStreamStatus::GangPhaseComplete &&
+        state.TimeBeforeNextLoad == -1 && !effects.Count, "waiting timer needs no gang observations");
+    input.RequestedGangsKnown = true;
+    input.Groups[1].Known = false;
+    Check(NativeAdvancePedGangRequests(input, state, effects) == NativePedStreamStatus::UnknownGroup &&
+        state.CurrentMember == 1 && state.TimeBeforeNextLoad == 550 && effects.Count == 2 &&
+        effects.Effects[0] == NativePedGangEffect{NativePedGangEffectKind::MakeModelAndTxdDeletable, 10} &&
+        effects.Effects[1] == NativePedGangEffect{NativePedGangEffectKind::RequestGameRequired, 12},
+        "later unknown gang retains original state and ordered intent prefix");
+    state = before;
+    input.Groups[0].Models[2].Model = -1;
+    Check(NativeAdvancePedGangRequests(input, state, effects) == NativePedStreamStatus::UnknownModel &&
+        state.CurrentMember == 1 && effects.Count == 1 && effects.Effects[0].Model == 10,
+        "missing requested model retains deletion prefix but never authorizes a substitute");
+    state = before;
+    input.Groups[0].Count = 0;
+    Check(NativeAdvancePedGangRequests(input, state, effects) == NativePedStreamStatus::InvalidInput &&
+        state.TimeBeforeNextLoad == 550 && !effects.Count, "active empty group cannot perform source modulo zero");
+    state = before;
+    input.Groups[0].Count = 22;
+    Check(NativeAdvancePedGangRequests(input, state, effects) == NativePedStreamStatus::InvalidInput &&
+        !effects.Count, "fixed source gang group capacity cannot be exceeded");
+    state = {-1, 21};
+    const auto invalid = state;
+    Check(NativeAdvancePedGangRequests(input, state, effects) == NativePedStreamStatus::InvalidInput &&
+        state == invalid && !effects.Count, "invalid source member cursor cannot wrap into fabricated authority");
+}
 }
 
 int main() {
@@ -260,5 +356,6 @@ int main() {
     Cases();
     SlotPlans();
     ZonePhases();
-    std::printf("native-ped-streaming-ok checks=%zu cases=3072 slot-plans=256 zone-phases=2048 attempts=10 slots=requested-only gang-phase=unowned census=incomplete\n", s_Checks);
+    GangPhases();
+    std::printf("native-ped-streaming-ok checks=%zu cases=3072 slot-plans=256 zone-phases=2048 gang-phases=4328 attempts=10 slots=requested-only gang-state=requested-fixtures census=incomplete\n", s_Checks);
 }

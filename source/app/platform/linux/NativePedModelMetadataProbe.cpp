@@ -132,6 +132,17 @@ int main(int argc, char** argv) {
             metadata.Find(choice.Model) && choice.Draws == rng.Inspect().Value->DrawCount,
             "original picker consumes real model groups and explicit requested-slot observations");
     }
+    std::array<NativePedStreamGroup, 10> gangGroups;
+    Check(NativeQualifyPedGangGroups(metadata, gangGroups) == NativePedStreamStatus::QualifiedGroups,
+        "actual source gang groups use the original world-zero translation");
+    for (std::size_t gang = 0; gang < gangGroups.size(); ++gang) {
+        const auto& source = metadata.Groups()[NativePedGroupTranslation[18 + gang][0]];
+        Check(gangGroups[gang].Known && gangGroups[gang].Count == source.Count,
+            "actual gang count is metadata, not a requested or loaded bit");
+        for (std::size_t slot = 0; slot < source.Count; ++slot)
+            Check(gangGroups[gang].Models[slot].Model == source.Models[slot],
+                "actual source ordered gang model identities");
+    }
     NativePedMetadataPolicies policies(metadata, NativePedZonePolicy{true, false, 15});
     NativePedMetadataPolicies unknownZone(metadata, std::nullopt);
     bool accepted = true;

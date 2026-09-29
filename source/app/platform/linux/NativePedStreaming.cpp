@@ -38,13 +38,16 @@ NativePedStreamStatus NativePlanPedSlotRequests(const NativePedRequestedSlots& s
     return NativePedStreamStatus::PlannedSlots;
 }
 
-NativePedStreamStatus NativeQualifyPedStreamingGroups(const NativePedModelMetadata& metadata,
-    std::uint32_t worldZone, std::array<NativePedStreamGroup, 18>& out) {
+namespace {
+template<std::size_t N>
+NativePedStreamStatus QualifyGroups(const NativePedModelMetadata& metadata,
+    std::uint32_t first, std::uint32_t worldZone, std::array<NativePedStreamGroup, N>& out) {
+    assert(first + N <= NativePedGroupTranslation.size());
     if (worldZone >= 3) return NativePedStreamStatus::InvalidInput;
     if (metadata.Models().empty()) return NativePedStreamStatus::UnknownModel;
-    std::array<NativePedStreamGroup, 18> candidate{};
+    std::array<NativePedStreamGroup, N> candidate{};
     for (std::size_t i = 0; i < candidate.size(); ++i) {
-        const auto& source = metadata.Groups()[NativePedGroupTranslation[i][worldZone]];
+        const auto& source = metadata.Groups()[NativePedGroupTranslation[first + i][worldZone]];
         if (source.Count > 21) return NativePedStreamStatus::InvalidInput;
         auto& group = candidate[i];
         group.Known = true;
@@ -58,6 +61,17 @@ NativePedStreamStatus NativeQualifyPedStreamingGroups(const NativePedModelMetada
     }
     out = candidate;
     return NativePedStreamStatus::QualifiedGroups;
+}
+} // namespace
+
+NativePedStreamStatus NativeQualifyPedStreamingGroups(const NativePedModelMetadata& metadata,
+    std::uint32_t worldZone, std::array<NativePedStreamGroup, 18>& out) {
+    return QualifyGroups(metadata, 0, worldZone, out);
+}
+
+NativePedStreamStatus NativeQualifyPedGangGroups(const NativePedModelMetadata& metadata,
+    std::array<NativePedStreamGroup, 10>& out) {
+    return QualifyGroups(metadata, 18, 0, out);
 }
 
 NativePedStreamStatus NativePickPedModelToStream(const NativePedStreamInput& input,
@@ -209,4 +223,44 @@ NativePedStreamStatus NativeAdvancePedZoneRequests(const NativePedZoneStreamInpu
     // A successful same-zone replacement instead writes 300 and bypasses it.
     state.TimeBeforeNextLoad = 299;
     return NativePedStreamStatus::ZonePhaseComplete;
+}
+
+NativePedStreamStatus NativeAdvancePedGangRequests(const NativePedGangStreamInput& input,
+    NativePedGangStreamState& state, NativePedGangStreamEffects& out) {
+    out = {};
+    if (!input.ZoneKnown) return NativePedStreamStatus::UnknownZone;
+    if (!input.HasZone) return NativePedStreamStatus::GangPhaseComplete;
+    if (!input.CheatKnown) return NativePedStreamStatus::UnknownCheat;
+    if (input.ZoneStreamingCheat) return NativePedStreamStatus::GangPhaseComplete;
+    if (state.TimeBeforeNextLoad >= 0) {
+        --state.TimeBeforeNextLoad;
+        return NativePedStreamStatus::GangPhaseComplete;
+    }
+    if (state.CurrentMember < 0 || state.CurrentMember >= 21) return NativePedStreamStatus::InvalidInput;
+    if (!input.RequestedGangsKnown) return NativePedStreamStatus::UnknownRequestedGangs;
+    const auto previous = state.CurrentMember;
+    const auto previousNext = previous + 1;
+    state.CurrentMember = previousNext % 21;
+    state.TimeBeforeNextLoad = 550;
+    for (std::size_t gang = 0; gang < input.Groups.size(); ++gang) {
+        if (!(input.RequestedGangs & (1u << gang))) continue;
+        const auto& group = input.Groups[gang];
+        if (!group.Known) return NativePedStreamStatus::UnknownGroup;
+        if (group.Count == 0 || group.Count > 21) return NativePedStreamStatus::InvalidInput;
+        const auto oldA = previous % group.Count;
+        const auto oldB = previousNext % group.Count;
+        const auto newA = state.CurrentMember % group.Count;
+        const auto newB = (state.CurrentMember + 1) % group.Count;
+        for (std::int32_t slot = 0; slot < group.Count; ++slot) {
+            const bool oldMember = slot == oldA || slot == oldB;
+            const bool newMember = slot == newA || slot == newB;
+            if (oldMember == newMember) continue;
+            const auto model = group.Models[std::size_t(slot)].Model;
+            if (model <= 0 || model >= 20000) return NativePedStreamStatus::UnknownModel;
+            assert(out.Count < out.Effects.size());
+            out.Effects[out.Count++] = {newMember ? NativePedGangEffectKind::RequestGameRequired :
+                NativePedGangEffectKind::MakeModelAndTxdDeletable, model};
+        }
+    }
+    return NativePedStreamStatus::GangPhaseComplete;
 }

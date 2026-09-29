@@ -96,6 +96,14 @@ def random_draw(machine, address, size, _):
             state['events'].append((0 if address == 0x40a060 else 1, slot, model))
             if address == 0x408b00:
                 assert struct.unpack('<I', machine.mem_read(stack + 8, 4))[0] == 8, 'source KEEP_IN_MEMORY flag'
+    elif state.get('gang_mode'):
+        if address == 0x4075e0:
+            machine.reg_write(UC_X86_REG_EAX, int(state['cheat']))
+        elif address == 0x408b00:
+            stack = machine.reg_read(UC_X86_REG_ESP)
+            model, flags = struct.unpack('<iI', machine.mem_read(stack + 4, 8))
+            assert flags == 2, 'source gang GAME_REQUIRED-only flag'
+            state['events'].append((1, model))
     elif state.get('zone_mode'):
         if address == 0x40b222:
             # Stop ONLY after the civilian phase, before the gang timer/tail.
@@ -110,9 +118,15 @@ def random_draw(machine, address, size, _):
                 assert struct.unpack('<I', machine.mem_read(stack + 8, 4))[0] == 10, 'source KEEP|GAME flags'
 
 def zone_flags(machine, access, address, size, value, _):
+    instruction = machine.reg_read(UC_X86_REG_EIP)
+    if state.get('gang_mode'):
+        if instruction in (0x40b46a, 0x40b524):
+            assert size == 1 and (address - 0x95c8a6) % 20 == 0
+            state['events'].append((0 if instruction == 0x40b46a else 3,
+                                    (address - 0x95c8a6) // 20))
+        return
     if not state.get('zone_mode'):
         return
-    instruction = machine.reg_read(UC_X86_REG_EIP)
     if instruction not in (0x40b148, 0x40b1e6, 0x40b2cb, 0x40b2f1, 0x40b34a):
         return
     assert size == 1 and (address - 0x95c8a6) % 20 == 0
@@ -276,10 +290,61 @@ for line in native.stdout.splitlines():
     assert actual == expected, ('civilian zone phase slots/count/zone/timer/cursors/RNG/ordered effects', fields, actual, expected)
     zone_checks += 1
 assert zone_checks == 2048
+gang_checks = 0
+for line in native.stdout.splitlines():
+    fields = line.split()
+    if not fields or fields[0] != 'GANG':
+        continue
+    mode, mask, count, current, timer, expected_current, expected_timer, effect_count, *effects = map(int, fields[1:])
+    assert len(effects) == effect_count * 2
+    # Run the COMPLETE original call with a waiting civilian timer, rather than
+    # entering the tail with guessed register/stack state. No RNG is expected.
+    write(0xc98fd8, 'I', 0 if mode == 1 else 0x30a0000)
+    write(0x30a000f, 'B', 0)
+    write(0x95c808, 'i', 0)
+    write(0x95c79c, 'I', 0)
+    write(0x95c7e8, '8i', *([-1] * 8))
+    write(0x9dd0a8, 'i', 0)
+    write(0x9dd0ac, 'i', timer)
+    write(0x9dd0b0, 'i', current)
+    write(0x95c798, 'H', mask)
+    for gang in range(10):
+        group = ordinals[(gang + 18) * 3]
+        write(0xc9c018 + group * 2, 'h', count)
+        for slot in range(count):
+            model = 10 + gang * 21 + slot
+            header = 0x30b0000 + model * 0x40
+            write(0xc9c6b0 + (group * 21 + slot) * 2, 'H', model)
+            write(0xb12818 + model * 4, 'I', header)
+            write(header + 0xa, 'h', 42)
+            # Explicit flags suppress external queues, not parser-completed
+            # assets. Original model/TXD GAME_REQUIRED clears are still run.
+            write(0x95c8a6 + model * 20, 'B', 6)
+    write(0x95c8a6 + 20042 * 20, 'B', 6)
+    state = dict(gang_mode=True, cheat=mode == 2, value=1792, draws=0, events=[])
+    stack = 0x3080000
+    write(stack, '2I', 0x30e0000, 0)
+    uc.reg_write(UC_X86_REG_ESP, stack)
+    uc.reg_write(UC_X86_REG_FPCW, 0x37f)
+    uc.emu_start(0x40b0e0, 0x30e0000, count=500000)
+    assert uc.reg_read(UC_X86_REG_EIP) == 0x30e0000, ('gang-phase instruction cap', fields)
+    actual_timer, actual_current = struct.unpack('<2i', uc.mem_read(0x9dd0ac, 8))
+    expected_events = []
+    for offset in range(0, len(effects), 2):
+        event = tuple(effects[offset:offset + 2])
+        expected_events.append(event)
+        if event[0] == 0:
+            expected_events.append((3, 20042))
+    assert (actual_current, actual_timer, state['events'], state['value'], state['draws']) == (
+        expected_current, expected_timer, expected_events, 1792, 0), ('gang state/intents/no-RNG', fields, state)
+    assert list(struct.unpack('<8i', uc.mem_read(0x95c7e8, 32))) == [-1] * 8
+    assert struct.unpack('<i', uc.mem_read(0x9dd0a8, 4))[0] == (-1 if mode == 0 else 0)
+    gang_checks += 1
+assert gang_checks == 4328
 print('ped-streaming-retail-oracle-ok checks=' + str(checks),
       'group-boundary=strict-less fraction=rand/32768 cursors=preincrement translation=99',
       'slot-plans=' + str(slot_checks), 'zone-phases=' + str(zone_checks),
-      'zone-change-timer=299 replacement-timer=300 gang-phase=unowned',
+      'zone-change-timer=299 replacement-timer=300 gang-phases=' + str(gang_checks),
       'slots=requested-fixtures census=incomplete', 'function-sha256=' + function_hash,
       'slot-function-sha256=' + slot_hash, 'zone-function-sha256=' + zone_hash)
 print(native.stdout.splitlines()[-1])
