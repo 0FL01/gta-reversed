@@ -155,6 +155,21 @@ int main(int argc, char** argv) {
                     cycleZones, observed, error) && observed.Known && observed.Zone == *cycleZone &&
                     observed.RowIndex == (type * 2 + weekend) * 12 + hour / 2,
                     "all real source rows bind explicit clock/week and current zone settings");
+                NativePedGangWarObservation war;
+                war.StateKnown = true; // Explicit NO_ATTACK observation, not an implicit default.
+                NativePedGangMaskInput gangDemand;
+                gangDemand.MemberKnown = true;
+                gangDemand.CurrentMember = 17;
+                Check(NativeQualifyPedGangDemand(observed, true, hour % 2 != 0, war, gangDemand) ==
+                    NativePedStreamStatus::QualifiedGangDemand && gangDemand.ZoneKnown && gangDemand.HasZone &&
+                    gangDemand.DemandKnown && gangDemand.Wanted == (type == 0 && hour % 2 == 0 ? 1022 : 1023) &&
+                    gangDemand.MemberKnown && gangDemand.CurrentMember == 17 && !gangDemand.PedGroups[0].Known &&
+                    !gangDemand.LoadedCars[0].Known,
+                    "shared live zone strengths bind demand, not gang assets/masks/member ownership");
+                war.StateKnown = false;
+                Check(NativeQualifyPedGangDemand(observed, true, false, war, gangDemand) ==
+                    NativePedStreamStatus::UnknownGangWar && gangDemand.DemandKnown && gangDemand.CurrentMember == 17,
+                    "unavailable war retains prior demand without inventing a no-attack observation");
                 for (std::uint32_t region = 0; region < 3; ++region) {
                     NativePedStreamInput input;
                     Check(NativeQualifyPedCycleSelection(metadata, region, observed, input) ==
@@ -177,6 +192,11 @@ int main(int argc, char** argv) {
     NativePopulationCycleObservation observed;
     observed.Zone.Label = "retain";
     const auto retained = observed;
+    NativePedGangMaskInput demand;
+    demand.Wanted = 777;
+    NativePedGangWarObservation war;
+    Check(NativeQualifyPedGangDemand(observed, true, false, war, demand) == NativePedStreamStatus::UnknownZone &&
+        demand.Wanted == 777 && !demand.DemandKnown, "unknown cycle cannot authorize an absent-zone demand");
     Check(!owner.ObserveCycle({2369, -1263, 23}, 24, false, cycleZones, observed, error) && observed == retained,
         "invalid cycle hour retains prior observation");
     Check(!owner.ObserveCycle({0, 0, 9999}, 12, false, cycleZones, observed, error) && observed == retained,
@@ -205,6 +225,15 @@ int main(int argc, char** argv) {
     Check(owner.ObserveCycle({2369, -1263, 23}, 12, false, cycleZones, observed, error) &&
         NativeQualifyPedCycleSelection(metadata, 0, observed, qualified) == NativePedStreamStatus::QualifiedCycleInput,
         "qualified actual cycle can be prepared without a requested-slot owner");
+    Check(NativeQualifyPedGangDemand(observed, false, false, war, demand) == NativePedStreamStatus::UnknownCheat &&
+        demand.Wanted == 777 && !demand.DemandKnown, "actual zone does not infer inactive cheats");
+    cycleZone->GangStrength.fill(0);
+    Check(owner.ObserveCycle({2369, -1263, 23}, 12, false, cycleZones, observed, error),
+        "live zero strengths observed from the same ordered zone owner");
+    war = {true, 2, true, true, {2369, -1263}, {2369, -1263}, true, 9};
+    Check(NativeQualifyPedGangDemand(observed, true, false, war, demand) == NativePedStreamStatus::QualifiedGangDemand &&
+        demand.Wanted == 512 && demand.DemandKnown && !demand.MemberKnown && !demand.PedGroups[9].Known,
+        "actual zone plus explicit near war binds demand without constructing a gang or asset");
     NativePedStreamState selectionState;
     NativePedStreamChoice selectionChoice;
     Check(NativePickPedModelToStream(qualified, streamRng.Reference(), selectionState, selectionChoice) ==

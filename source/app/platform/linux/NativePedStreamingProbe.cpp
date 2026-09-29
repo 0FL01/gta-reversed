@@ -2,6 +2,9 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <bit>
+#include <cmath>
+#include <limits>
 
 namespace {
 std::size_t s_Checks = 0;
@@ -489,6 +492,89 @@ void GangMasks() {
     Check(NativeAdvancePedGangMask(input, rng.Reference(), state, effects) == NativePedStreamStatus::InvalidInput &&
         !effects.Count, "loaded gang group count cannot exceed 23 members");
 }
+
+void DemandCase(std::uint16_t mask, bool cheat, std::int32_t attackState, std::int32_t gang,
+    std::array<float, 2> player, std::array<float, 2> attack, bool hasZone = true) {
+    NativePedGangDemandInput input;
+    input.ZoneKnown = true;
+    input.HasZone = hasZone;
+    input.CheatKnown = true;
+    input.StreetsCheat = cheat;
+    for (std::size_t i = 0; i < input.GangStrength.size(); ++i)
+        input.GangStrength[i] = mask & (1u << i) ? std::uint8_t(1 + (mask + i) % 255) : 0;
+    input.War = {true, attackState, true, true, attack, player, true, gang};
+    NativePedGangDemand out{true, 0x3ff};
+    Check(NativeObservePedGangDemand(input, out) == NativePedStreamStatus::QualifiedGangDemand,
+        "source-qualified demand, not assumed no attack");
+    Check(out.HasZone == hasZone && !(out.Wanted & ~0x3ffu), "bounded qualified source mask");
+    std::printf("DEMAND %u %d %d %d %d %u %u %u %u %u\n", unsigned(mask), int(cheat),
+        attackState, gang, int(hasZone), std::bit_cast<std::uint32_t>(player[0]),
+        std::bit_cast<std::uint32_t>(player[1]), std::bit_cast<std::uint32_t>(attack[0]),
+        std::bit_cast<std::uint32_t>(attack[1]), unsigned(out.Wanted));
+}
+
+void GangDemands() {
+    for (std::uint16_t mask = 0; mask < 1024; ++mask) {
+        DemandCase(mask, false, 0, mask % 10, {0, 0}, {0, 0});
+        DemandCase(mask, false, 1, mask % 10, {std::nextafter(150.0f, 0.0f), 0}, {0, 0});
+        DemandCase(mask, false, 2, mask % 10, {150, 0}, {0, 0});
+        DemandCase(mask, true, 2, mask % 10, {90, std::nextafter(120.0f, 0.0f)}, {0, 0});
+        DemandCase(mask, true, 1, mask % 10, {0, 0}, {0, 0});
+        DemandCase(mask, true, 2, mask % 10, {0, 0}, {0, 0}, false);
+    }
+    for (std::int32_t gang = 0; gang < 10; ++gang)
+        for (const float offset : {0.0f, 10000.0f, -10000.0f, 10000000.0f})
+            for (const float x : {std::nextafter(150.0f, 0.0f), 150.0f, std::nextafter(150.0f, 200.0f)})
+                for (const float y : {0.0f, 0.01f, 0.1f, 1.0f})
+                    DemandCase(0x155, false, 1, gang, {offset + x, offset + y}, {offset, offset});
+    DemandCase(0, false, 2, 9, {std::numeric_limits<float>::max(), 0},
+        {-std::numeric_limits<float>::max(), 0});
+
+    NativePedGangDemandInput input;
+    NativePedGangDemand out{true, 777}, before = out;
+    Check(NativeObservePedGangDemand(input, out) == NativePedStreamStatus::UnknownZone && out == before,
+        "unavailable zone retains output");
+    input.ZoneKnown = true;
+    Check(NativeObservePedGangDemand(input, out) == NativePedStreamStatus::QualifiedGangDemand &&
+        out == NativePedGangDemand{}, "verified absent zone needs no cheat or war observation");
+    input.HasZone = true;
+    out = before;
+    Check(NativeObservePedGangDemand(input, out) == NativePedStreamStatus::UnknownCheat && out == before,
+        "unknown streets cheat not false");
+    input.CheatKnown = true;
+    Check(NativeObservePedGangDemand(input, out) == NativePedStreamStatus::UnknownGangWar && out == before,
+        "unowned gang war not a no-attack default");
+    input.War.StateKnown = true;
+    Check(NativeObservePedGangDemand(input, out) == NativePedStreamStatus::QualifiedGangDemand && !out.Wanted,
+        "observed no attack needs no player, point or gang");
+    input.War.AttackState = 1;
+    out = before;
+    Check(NativeObservePedGangDemand(input, out) == NativePedStreamStatus::UnknownPlayerPosition && out == before,
+        "active attack requires real player position");
+    input.War.PlayerPositionKnown = true;
+    Check(NativeObservePedGangDemand(input, out) == NativePedStreamStatus::UnknownAttackPosition && out == before,
+        "active attack requires real point of attack");
+    input.War.AttackPositionKnown = true;
+    Check(NativeObservePedGangDemand(input, out) == NativePedStreamStatus::UnknownGangMember && out == before,
+        "near attack cannot assume gang zero");
+    input.War.PlayerPosition[0] = 150;
+    Check(NativeObservePedGangDemand(input, out) == NativePedStreamStatus::QualifiedGangDemand && !out.Wanted,
+        "strict boundary excludes attack before gang observation");
+    input.War.PlayerPosition[0] = 0;
+    input.War.GangKnown = true;
+    input.War.Gang = 10;
+    out = before;
+    Check(NativeObservePedGangDemand(input, out) == NativePedStreamStatus::InvalidInput && out == before,
+        "invalid near gang cannot create out-of-domain bits");
+    input.War.Gang = 9;
+    input.War.AttackState = 3;
+    Check(NativeObservePedGangDemand(input, out) == NativePedStreamStatus::InvalidInput && out == before,
+        "unknown enum is not a guessed attack state");
+    input.War.AttackState = 2;
+    input.War.PlayerPosition[0] = std::numeric_limits<float>::quiet_NaN();
+    Check(NativeObservePedGangDemand(input, out) == NativePedStreamStatus::InvalidInput && out == before,
+        "invalid position retains mask");
+}
 }
 
 int main() {
@@ -498,5 +584,6 @@ int main() {
     ZonePhases();
     GangPhases();
     GangMasks();
-    std::printf("native-ped-streaming-ok checks=%zu cases=3072 slot-plans=256 zone-phases=2048 gang-phases=4328 gang-masks=6481 attempts=10 slots=requested-only gang-state=requested-fixtures census=incomplete\n", s_Checks);
+    GangDemands();
+    std::printf("native-ped-streaming-ok checks=%zu cases=3072 slot-plans=256 zone-phases=2048 gang-phases=4328 gang-masks=6481 gang-demands=6625 attempts=10 slots=requested-only gang-state=requested-fixtures census=incomplete\n", s_Checks);
 }

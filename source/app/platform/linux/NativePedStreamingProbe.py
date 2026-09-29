@@ -12,7 +12,7 @@ import subprocess
 import pefile
 from unicorn import Uc, UC_ARCH_X86, UC_MODE_32, UC_HOOK_CODE, UC_HOOK_MEM_WRITE
 from unicorn.x86_const import (UC_X86_REG_EAX, UC_X86_REG_EIP, UC_X86_REG_ESP,
-    UC_X86_REG_FPCW, UC_X86_REG_ESI, UC_X86_REG_EDI, UC_X86_REG_EDX)
+    UC_X86_REG_FPCW, UC_X86_REG_ESI, UC_X86_REG_EDI, UC_X86_REG_EDX, UC_X86_REG_EBP)
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--game-dir', default='/game')
@@ -51,6 +51,8 @@ mask_hash = hashlib.sha256(pe.get_data(0x40b630 - 0x400000, 0x5df)).hexdigest()
 assert mask_hash == '0ebf5bdece38676c2e0f30498bed9c50572ed4998804fa8b54737ad4bdd46ca3'
 count_hash = hashlib.sha256(pe.get_data(0x62f660 - 0x400000, 0x13)).hexdigest()
 assert count_hash == 'ceeb1af1a1f9de70fe643654ad33bf7af354e533ded599fa518c7f587da0e814'
+war_hash = hashlib.sha256(pe.get_data(0x446c00 - 0x400000, 0x76)).hexdigest()
+assert war_hash == 'fee5d80169ea5e16192146be6982222db3d6ae9e2c05a744be5a396b072c53cb'
 translation = pe.get_data(0x945cc0 - 0x400000, 33 * 3 * 4)
 assert hashlib.sha256(translation).hexdigest() == 'd4649a51706637c3136cf70d24b1a00d68a766f5958b3f6d0d6c0ac755e55900'
 # Compare authored native ordinals, not a duplicate handwritten reference table.
@@ -88,6 +90,20 @@ def random_draw(machine, address, size, _):
         state['value'] = (state['value'] * 214013 + 2531011) & 0xffffffff
         state['draws'] += 1
         machine.reg_write(UC_X86_REG_EAX, (state['value'] >> 16) & 32767)
+    elif state.get('demand_mode'):
+        if address == 0x560ce0:
+            # Player position is an explicit owner observation, not an actor
+            # constructor/default position. Original helper arithmetic runs.
+            stack = machine.reg_read(UC_X86_REG_ESP)
+            pointer, player = struct.unpack('<Ii', machine.mem_read(stack + 4, 8))
+            assert player == -1
+            machine.mem_write(pointer, struct.pack('<3I', *state['player'], 0))
+            machine.reg_write(UC_X86_REG_EAX, pointer)
+            state['player_calls'] += 1
+        elif address == 0x40b6d1:
+            pointer = machine.reg_read(UC_X86_REG_EBP) - 8
+            state['wanted'] = struct.unpack('<I', machine.mem_read(pointer, 4))[0]
+            machine.emu_stop()
     elif state.get('slots_mode'):
         slot = (machine.reg_read(UC_X86_REG_ESI) - 0x95c7e8) // 4
         if address == 0x40ce40:
@@ -423,12 +439,42 @@ for line in native.stdout.splitlines():
     assert struct.unpack('<i', uc.mem_read(0x9dd0b0, 4))[0] == current
     mask_checks += 1
 assert mask_checks == 6481
+demand_checks = 0
+# Restore actual GangWars helper after the earlier external-demand fixtures.
+uc.mem_write(0x446c00, pe.get_data(0x446c00 - 0x400000, 0x76))
+uc.ctl_remove_cache(0x446c00, 0x446c76)
+uc.mem_write(0x560ce0, b'\xc3')
+for line in native.stdout.splitlines():
+    fields = line.split()
+    if not fields or fields[0] != 'DEMAND':
+        continue
+    (mask, cheat, attack_state, gang, has_zone, px, py, ax, ay, expected) = map(int, fields[1:])
+    write(0xc98fd8, 'I', 0x30a0000 if has_zone else 0)
+    write(0x30a0000, '10B', *[1 + (mask + i) % 255 if mask & (1 << i) else 0 for i in range(10)])
+    write(0x9e0c83, 'B', cheat)
+    write(0x9e25ec, 'i', attack_state)
+    write(0x9e2624, 'i', gang)
+    write(0x9e2654, '3I', ax, ay, 0)
+    state = dict(demand_mode=True, player=(px, py), player_calls=0, value=1792, draws=0)
+    stack = 0x3080000
+    write(stack, 'I', 0x30e0000)
+    uc.reg_write(UC_X86_REG_ESP, stack)
+    uc.reg_write(UC_X86_REG_FPCW, 0x37f)
+    uc.emu_start(0x40b630, 0x30e0000, count=100000)
+    assert uc.reg_read(UC_X86_REG_EIP) == (0x40b6d1 if has_zone else 0x30e0000), ('demand cap', fields)
+    assert state.get('wanted', 0) == expected, ('source demand/float-spill distance', fields, state)
+    assert state['player_calls'] == int(has_zone and attack_state != 0), ('source player guard', fields)
+    assert state['value'] == 1792 and state['draws'] == 0, 'demand has no RNG'
+    demand_checks += 1
+assert demand_checks == 6625
 print('ped-streaming-retail-oracle-ok checks=' + str(checks),
       'group-boundary=strict-less fraction=rand/32768 cursors=preincrement translation=99',
       'slot-plans=' + str(slot_checks), 'zone-phases=' + str(zone_checks),
       'zone-change-timer=299 replacement-timer=300 gang-phases=' + str(gang_checks),
-      'gang-masks=' + str(mask_checks), 'loaded-gang-car-guard=skip-nonempty demand=explicit-war-observation',
+      'gang-masks=' + str(mask_checks), 'gang-demands=' + str(demand_checks),
+      'loaded-gang-car-guard=skip-nonempty demand=source-war-helper observations=explicit',
       'slots=requested-fixtures census=incomplete', 'function-sha256=' + function_hash,
       'slot-function-sha256=' + slot_hash, 'zone-function-sha256=' + zone_hash,
-      'mask-function-sha256=' + mask_hash, 'car-count-function-sha256=' + count_hash)
+      'mask-function-sha256=' + mask_hash, 'car-count-function-sha256=' + count_hash,
+      'war-function-sha256=' + war_hash)
 print(native.stdout.splitlines()[-1])

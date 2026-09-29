@@ -45,7 +45,8 @@ enum class NativePedStreamStatus {
     UnknownModel, UnknownRng, InvalidInput, InvalidDistribution, QualifiedGroups, PlannedSlots,
     ZonePhaseComplete, UnknownCheat, UnknownReferences, QualifiedCycleInput,
     GangPhaseComplete, UnknownRequestedGangs, GangMaskPhaseComplete,
-    UnknownGangDemand, UnknownGangCars, UnknownStreaming, UnknownGangMember
+    UnknownGangDemand, UnknownGangCars, UnknownStreaming, UnknownGangMember,
+    QualifiedGangDemand, UnknownGangWar, UnknownPlayerPosition, UnknownAttackPosition
 };
 
 struct NativePedRequestedSlots {
@@ -237,3 +238,35 @@ struct NativePedGangMaskEffects {
 // No loader, actor, gang-war controller or census completeness is authorized.
 NativePedStreamStatus NativeAdvancePedGangMask(const NativePedGangMaskInput&,
     NativeSourceRngRef, NativePedGangMaskState&, NativePedGangMaskEffects& out);
+
+struct NativePedGangWarObservation {
+    bool StateKnown = false;
+    std::int32_t AttackState = 0; // NO_ATTACK=0, WAR_NOTIFIED=1, PLAYER_CAME_TO_WAR=2.
+    bool AttackPositionKnown = false, PlayerPositionKnown = false;
+    std::array<float, 2> AttackPosition{}, PlayerPosition{};
+    bool GangKnown = false;
+    std::int32_t Gang = 0;
+};
+struct NativePedGangDemandInput {
+    bool ZoneKnown = false, HasZone = false;
+    std::array<std::uint8_t, 10> GangStrength{};
+    bool CheatKnown = false, StreetsCheat = false;
+    NativePedGangWarObservation War;
+};
+struct NativePedGangDemand {
+    bool HasZone = false;
+    std::uint16_t Wanted = 0;
+    bool operator==(const NativePedGangDemand&) const = default;
+};
+
+// Source zone strengths + streets cheat + TellStreamingWhichGangsAreNeeded.
+// XY only, original float spills and strict distance<150; no independent RNG.
+// An observed NO_ATTACK needs no coordinates/gang, but unknown state is never
+// a no-attack default. Failure retains out. This does not own the war controller.
+NativePedStreamStatus NativeObservePedGangDemand(const NativePedGangDemandInput&,
+    NativePedGangDemand& out);
+// Reuse the actual cycle observer's live SCM-mutated zone strengths. Only demand
+// fields are published; groups, requested masks and loaded facts stay separate.
+NativePedStreamStatus NativeQualifyPedGangDemand(const NativePopulationCycleObservation&,
+    bool cheatKnown, bool streetsCheat, const NativePedGangWarObservation&,
+    NativePedGangMaskInput& out);

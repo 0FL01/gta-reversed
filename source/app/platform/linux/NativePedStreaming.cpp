@@ -3,7 +3,65 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <limits>
+
+NativePedStreamStatus NativeObservePedGangDemand(const NativePedGangDemandInput& input,
+    NativePedGangDemand& out) {
+    if (!input.ZoneKnown) return NativePedStreamStatus::UnknownZone;
+    NativePedGangDemand candidate{input.HasZone, 0};
+    if (!input.HasZone) {
+        out = candidate;
+        return NativePedStreamStatus::QualifiedGangDemand;
+    }
+    if (!input.CheatKnown) return NativePedStreamStatus::UnknownCheat;
+    for (std::size_t gang = 0; gang < input.GangStrength.size(); ++gang)
+        if (input.GangStrength[gang]) candidate.Wanted |= std::uint16_t(1u << gang);
+    if (input.StreetsCheat) candidate.Wanted |= 0xffu;
+    const auto& war = input.War;
+    if (!war.StateKnown) return NativePedStreamStatus::UnknownGangWar;
+    if (war.AttackState < 0 || war.AttackState > 2) return NativePedStreamStatus::InvalidInput;
+    if (war.AttackState) {
+        if (!war.PlayerPositionKnown) return NativePedStreamStatus::UnknownPlayerPosition;
+        if (!war.AttackPositionKnown) return NativePedStreamStatus::UnknownAttackPosition;
+        for (std::size_t i = 0; i < 2; ++i)
+            if (!std::isfinite(war.PlayerPosition[i]) || !std::isfinite(war.AttackPosition[i]))
+                return NativePedStreamStatus::InvalidInput;
+        // Original x87 subtract/spill, extended products/add then one float
+        // spill, sqrt/spill. Keep the extended add, including unequal exponents.
+        const float dx = float(static_cast<long double>(war.PlayerPosition[0]) - war.AttackPosition[0]);
+        const float dy = float(static_cast<long double>(war.PlayerPosition[1]) - war.AttackPosition[1]);
+        const float squared = float(static_cast<long double>(dx) * dx + static_cast<long double>(dy) * dy);
+        const float distance = float(std::sqrt(double(squared)));
+        if (distance < 150.0f) {
+            if (!war.GangKnown) return NativePedStreamStatus::UnknownGangMember;
+            if (war.Gang < 0 || war.Gang >= 10) return NativePedStreamStatus::InvalidInput;
+            candidate.Wanted |= std::uint16_t(1u << war.Gang);
+        }
+    }
+    out = candidate;
+    return NativePedStreamStatus::QualifiedGangDemand;
+}
+
+NativePedStreamStatus NativeQualifyPedGangDemand(const NativePopulationCycleObservation& cycle,
+    bool cheatKnown, bool streetsCheat, const NativePedGangWarObservation& war,
+    NativePedGangMaskInput& out) {
+    NativePedGangDemandInput input;
+    input.ZoneKnown = cycle.Known;
+    input.HasZone = cycle.Known;
+    input.GangStrength = cycle.Zone.GangStrength;
+    input.CheatKnown = cheatKnown;
+    input.StreetsCheat = streetsCheat;
+    input.War = war;
+    NativePedGangDemand demand;
+    const auto status = NativeObservePedGangDemand(input, demand);
+    if (status != NativePedStreamStatus::QualifiedGangDemand) return status;
+    out.ZoneKnown = true;
+    out.HasZone = demand.HasZone;
+    out.DemandKnown = true;
+    out.Wanted = demand.Wanted;
+    return status;
+}
 
 NativePedStreamStatus NativePlanPedSlotRequests(const NativePedRequestedSlots& slots,
     const std::array<std::int32_t, 8>& requested, NativePedSlotPlan& out) {
