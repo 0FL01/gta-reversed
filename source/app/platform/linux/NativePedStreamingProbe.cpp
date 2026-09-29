@@ -152,11 +152,113 @@ void SlotPlans() {
     Check(NativePlanPedSlotRequests(unknown, requests, result) == NativePedStreamStatus::InvalidInput &&
         result.Next.Count == 77, "invalid later request cannot partially retire prior slots");
 }
+
+void ZonePhases() {
+    for (std::uint32_t index = 0; index < 256; ++index) {
+        for (std::uint32_t mode = 0; mode < 8; ++mode) {
+            const auto seed = index * 0x9e3779b9u + mode;
+            constexpr int counts[]{0, 1, 8, 21};
+            const auto groupCount = counts[index % 4];
+            NativePedZoneStreamInput input;
+            input.ZoneKnown = input.CheatKnown = true;
+            input.HasZone = mode != 4;
+            input.ZoneStreamingCheat = mode == 5;
+            input.PopulationType = 0xa0; // Original uses low five PopType bits.
+            input.Selection = Fixture(0, groupCount, 1);
+            NativePedZoneStreamState state;
+            state.Slots.Known = true;
+            state.CurrentZoneType = mode == 0 ? -1 : 0;
+            state.TimeBeforeNextLoad = mode == 1 ? 0 : mode == 6 ? 299 : -1;
+            for (std::size_t i = 0; i < state.Slots.Models.size(); ++i) {
+                const auto model = std::int32_t((index & 1u ? 367 : 10) + i);
+                if (index & (1u << i)) {
+                    state.Slots.Models[i] = model;
+                    ++state.Slots.Count;
+                }
+                input.References[i] = {true, state.Slots.Models[i],
+                    std::uint16_t(mode == 3 || (mode == 7 && i < 3) ? 1 : 0)};
+            }
+            NativeSourceRng rng;
+            Check(rng.SeedOnce(seed) == NativeSourceRngStatus::Ready, "zone-phase seed");
+            NativePedZoneStreamEffects effects;
+            Check(NativeAdvancePedZoneRequests(input, rng.Reference(), state, effects) ==
+                NativePedStreamStatus::ZonePhaseComplete, "qualified civilian phase before gang tail");
+            const auto provenance = *rng.Inspect().Value;
+            std::printf("ZONE %u %u %u %u %d %d %u %llu %u", index, mode, seed, state.Slots.Count,
+                state.CurrentZoneType, state.TimeBeforeNextLoad, provenance.State,
+                static_cast<unsigned long long>(provenance.DrawCount), effects.Count);
+            for (const auto model : state.Slots.Models) std::printf(" %d", model);
+            for (const auto cursor : state.Selection.NextPedToLoad) std::printf(" %d", cursor);
+            for (std::size_t i = 0; i < effects.Count; ++i)
+                std::printf(" %d %d", int(effects.Effects[i].Kind), effects.Effects[i].Model);
+            std::printf("\n");
+        }
+    }
+    NativePedZoneStreamInput input;
+    NativePedZoneStreamState state;
+    const auto initial = state;
+    NativePedZoneStreamEffects effects;
+    Check(NativeAdvancePedZoneRequests(input, {}, state, effects) == NativePedStreamStatus::UnknownZone &&
+        state == initial && !effects.Count, "unknown zone is not an absent zone");
+    input.ZoneKnown = true;
+    Check(NativeAdvancePedZoneRequests(input, {}, state, effects) == NativePedStreamStatus::ZonePhaseComplete &&
+        state == initial, "absent zone short circuits unknown cheat and slot state");
+    input.HasZone = true;
+    Check(NativeAdvancePedZoneRequests(input, {}, state, effects) == NativePedStreamStatus::UnknownCheat &&
+        state == initial, "unknown cheat not disabled");
+    input.CheatKnown = input.ZoneStreamingCheat = true;
+    Check(NativeAdvancePedZoneRequests(input, {}, state, effects) == NativePedStreamStatus::ZonePhaseComplete &&
+        state == initial, "cheat early guard before slot observations");
+    input.ZoneStreamingCheat = false;
+    Check(NativeAdvancePedZoneRequests(input, {}, state, effects) == NativePedStreamStatus::UnknownSlots &&
+        state == initial, "requested slots must be owned");
+    state.Slots.Known = true;
+    state.CurrentZoneType = 0;
+    Check(NativeAdvancePedZoneRequests(input, {}, state, effects) == NativePedStreamStatus::ZonePhaseComplete &&
+        state.TimeBeforeNextLoad == -1, "initial same-zone timer zero decrements without RNG");
+    state.Slots.Models[0] = 7;
+    state.Slots.Count = 1;
+    const auto occupied = state;
+    Check(NativeAdvancePedZoneRequests(input, {}, state, effects) == NativePedStreamStatus::UnknownReferences &&
+        state == occupied && !effects.Count, "unknown refcount cannot authorize slot replacement");
+    input.References[0] = {true, 8, 0};
+    Check(NativeAdvancePedZoneRequests(input, {}, state, effects) == NativePedStreamStatus::UnknownReferences &&
+        state == occupied, "stale identity refcount cannot authorize slot replacement");
+    input.References[0] = {true, 7, 0};
+    input.Selection = Fixture(0, 8, 1);
+    Check(NativeAdvancePedZoneRequests(input, {}, state, effects) == NativePedStreamStatus::UnknownRng &&
+        state == occupied && !effects.Count, "source picker cannot invent RNG");
+    input.PopulationType = 1;
+    input.Selection.Groups[17].Known = false;
+    NativeSourceRng rng;
+    Check(rng.SeedOnce(0) == NativeSourceRngStatus::Ready, "partial phase seed");
+    Check(NativeAdvancePedZoneRequests(input, rng.Reference(), state, effects) == NativePedStreamStatus::UnknownGroup &&
+        state.CurrentZoneType == 1 && state.Slots.Count == 0 && state.Slots.Models[0] == -1 &&
+        state.TimeBeforeNextLoad == -1 && effects.Count == 1 && effects.Effects[0].Model == 7 &&
+        rng.Inspect().Value->DrawCount == 1, "unavailable selection retains ordered retirement/RNG prefix, not fake completion");
+    input.Selection.Groups[17].Known = true;
+    input.Selection.Groups[17].Models[2].RaceKnown = false;
+    state = occupied;
+    NativeSourceRng partial;
+    Check(partial.SeedOnce(0) == NativeSourceRngStatus::Ready, "partial accepted request seed");
+    Check(NativeAdvancePedZoneRequests(input, partial.Reference(), state, effects) == NativePedStreamStatus::UnknownModel &&
+        state.CurrentZoneType == 1 && state.Slots.Count == 1 && state.Slots.Models[0] == 368 &&
+        state.Selection.NextPedToLoad[17] == 2 && state.TimeBeforeNextLoad == -1 && effects.Count == 3 &&
+        effects.Effects[1] == NativePedZoneEffect{NativePedZoneEffectKind::RequestKeepAndGameRequired, 368} &&
+        effects.Effects[2] == NativePedZoneEffect{NativePedZoneEffectKind::ClearGameRequired, 368} &&
+        partial.Inspect().Value->DrawCount == 2, "later unavailable race retains accepted request and all consumed prefixes");
+    state = occupied;
+    state.Slots.Count = 2;
+    const auto invalid = state;
+    Check(NativeAdvancePedZoneRequests(input, {}, state, effects) == NativePedStreamStatus::InvalidInput &&
+        state == invalid && !effects.Count, "inconsistent requested count cannot emit retirement or selection effects");
+}
 }
 
 int main() {
     Guards();
     Cases();
     SlotPlans();
-    std::printf("native-ped-streaming-ok checks=%zu cases=3072 slot-plans=256 attempts=10 slots=requested-only census=incomplete\n", s_Checks);
+    ZonePhases();
+    std::printf("native-ped-streaming-ok checks=%zu cases=3072 slot-plans=256 zone-phases=2048 attempts=10 slots=requested-only gang-phase=unowned census=incomplete\n", s_Checks);
 }

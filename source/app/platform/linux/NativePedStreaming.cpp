@@ -1,6 +1,7 @@
 #include "NativePedStreaming.h"
 
 #include <algorithm>
+#include <cassert>
 #include <limits>
 
 NativePedStreamStatus NativePlanPedSlotRequests(const NativePedRequestedSlots& slots,
@@ -104,4 +105,91 @@ NativePedStreamStatus NativePickPedModelToStream(const NativePedStreamInput& inp
         }
     }
     return NativePedStreamStatus::NoSelection;
+}
+
+NativePedStreamStatus NativeAdvancePedZoneRequests(const NativePedZoneStreamInput& input,
+    NativeSourceRngRef rng, NativePedZoneStreamState& state, NativePedZoneStreamEffects& out) {
+    out = {};
+    if (!input.ZoneKnown) return NativePedStreamStatus::UnknownZone;
+    if (!input.HasZone) return NativePedStreamStatus::ZonePhaseComplete;
+    if (!input.CheatKnown) return NativePedStreamStatus::UnknownCheat;
+    if (input.ZoneStreamingCheat) return NativePedStreamStatus::ZonePhaseComplete;
+    if (!state.Slots.Known) return NativePedStreamStatus::UnknownSlots;
+    if (state.CurrentZoneType < -1 || state.CurrentZoneType > 31)
+        return NativePedStreamStatus::InvalidInput;
+    std::uint32_t count = 0;
+    for (const auto model : state.Slots.Models) {
+        if (model < -1 || model >= 20000) return NativePedStreamStatus::InvalidInput;
+        count += model >= 0;
+    }
+    if (count != state.Slots.Count) return NativePedStreamStatus::InvalidInput;
+    const auto emit = [&](NativePedZoneEffectKind kind, std::int32_t model) {
+        assert(out.Count < out.Effects.size());
+        out.Effects[out.Count++] = {kind, model};
+    };
+    const auto request = [&](std::int32_t model) {
+        emit(NativePedZoneEffectKind::RequestKeepAndGameRequired, model);
+        emit(NativePedZoneEffectKind::ClearGameRequired, model);
+    };
+    const auto choose = [&](NativePedStreamChoice& choice) {
+        auto selection = input.Selection;
+        selection.SlotsKnown = state.Slots.Known;
+        selection.Slots = state.Slots.Models;
+        return NativePickPedModelToStream(selection, rng, state.Selection, choice);
+    };
+    const auto populationType = std::int32_t(input.PopulationType & 31u);
+    if (populationType == state.CurrentZoneType) {
+        if (state.TimeBeforeNextLoad >= 0) {
+            --state.TimeBeforeNextLoad;
+            return NativePedStreamStatus::ZonePhaseComplete;
+        }
+        std::size_t slot = 0;
+        for (; slot < state.Slots.Models.size(); ++slot) {
+            const auto model = state.Slots.Models[slot];
+            if (model == -1) break;
+            const auto& references = input.References[slot];
+            if (!references.Known || references.Model != model)
+                return NativePedStreamStatus::UnknownReferences;
+            if (references.Count == 0) break;
+        }
+        if (slot == state.Slots.Models.size()) return NativePedStreamStatus::ZonePhaseComplete;
+        NativePedStreamChoice choice;
+        const auto status = choose(choice);
+        if (status == NativePedStreamStatus::NoSelection) return NativePedStreamStatus::ZonePhaseComplete;
+        if (status != NativePedStreamStatus::Selected) return status;
+        if (choice.Model == state.Slots.Models[slot]) return NativePedStreamStatus::ZonePhaseComplete;
+        request(choice.Model);
+        if (state.Slots.Count == 8) {
+            emit(NativePedZoneEffectKind::MakeModelAndTxdDeletable, state.Slots.Models[slot]);
+            state.Slots.Models[slot] = -1;
+        } else {
+            ++state.Slots.Count;
+        }
+        const auto freeSlot = std::ranges::find(state.Slots.Models, -1);
+        assert(freeSlot != state.Slots.Models.end());
+        *freeSlot = choice.Model;
+        state.TimeBeforeNextLoad = 300;
+        return NativePedStreamStatus::ZonePhaseComplete;
+    }
+    const auto toLoad = std::max(state.Slots.Count, 4u);
+    for (auto& model : state.Slots.Models) {
+        if (model < 0) continue;
+        emit(NativePedZoneEffectKind::MakeModelAndTxdDeletable, model);
+        model = -1;
+    }
+    state.Slots.Count = 0;
+    state.CurrentZoneType = populationType;
+    for (std::uint32_t i = 0; i < toLoad; ++i) {
+        NativePedStreamChoice choice;
+        const auto status = choose(choice);
+        if (status == NativePedStreamStatus::NoSelection) continue;
+        if (status != NativePedStreamStatus::Selected) return status;
+        request(choice.Model);
+        state.Slots.Models[i] = choice.Model;
+        ++state.Slots.Count;
+    }
+    // Original zone-change branch enters the common decrement with eax=300.
+    // A successful same-zone replacement instead writes 300 and bypasses it.
+    state.TimeBeforeNextLoad = 299;
+    return NativePedStreamStatus::ZonePhaseComplete;
 }

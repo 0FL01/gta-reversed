@@ -39,7 +39,8 @@ struct NativePedStreamChoice {
 
 enum class NativePedStreamStatus {
     Selected, NoSelection, UnknownZone, UnknownSlots, UnknownGroup,
-    UnknownModel, UnknownRng, InvalidInput, InvalidDistribution, QualifiedGroups, PlannedSlots
+    UnknownModel, UnknownRng, InvalidInput, InvalidDistribution, QualifiedGroups, PlannedSlots,
+    ZonePhaseComplete, UnknownCheat, UnknownReferences
 };
 
 struct NativePedRequestedSlots {
@@ -92,3 +93,47 @@ NativePedStreamStatus NativeQualifyPedStreamingGroups(const NativePedModelMetada
 // No model/actor/pool/world effects or census completeness are implied.
 NativePedStreamStatus NativePickPedModelToStream(const NativePedStreamInput&,
     NativeSourceRngRef, NativePedStreamState&, NativePedStreamChoice& out);
+
+struct NativePedSlotReferences {
+    bool Known = false;
+    std::int32_t Model = -1;
+    std::uint16_t Count = 0;
+};
+
+struct NativePedZoneStreamInput {
+    bool ZoneKnown = false, HasZone = false;
+    bool CheatKnown = false, ZoneStreamingCheat = false;
+    std::uint8_t PopulationType = 0;
+    NativePedStreamInput Selection;
+    std::array<NativePedSlotReferences, 8> References{};
+};
+
+struct NativePedZoneStreamState {
+    NativePedRequestedSlots Slots;
+    NativePedStreamState Selection;
+    std::int32_t CurrentZoneType = -1;
+    std::int32_t TimeBeforeNextLoad = 0;
+    bool operator==(const NativePedZoneStreamState&) const = default;
+};
+
+enum class NativePedZoneEffectKind {
+    MakeModelAndTxdDeletable, RequestKeepAndGameRequired, ClearGameRequired
+};
+struct NativePedZoneEffect {
+    NativePedZoneEffectKind Kind{};
+    std::int32_t Model = -1;
+    bool operator==(const NativePedZoneEffect&) const = default;
+};
+struct NativePedZoneStreamEffects {
+    std::array<NativePedZoneEffect, 24> Effects{};
+    std::uint8_t Count = 0;
+};
+
+// ONLY the ordinary civilian phase of StreamZoneModels, before the gang timer.
+// State is the source requested-slot ledger, never a parser-completed roster.
+// Effects are ordered intents; a consumer must fulfill them before observing
+// the advanced ledger. On unavailable selection, retain the consumed state/RNG
+// and emitted effect prefix; do NOT retry this phase as a new source call.
+// Early guard failures leave state unchanged. No asset, actor or census claims.
+NativePedStreamStatus NativeAdvancePedZoneRequests(const NativePedZoneStreamInput&,
+    NativeSourceRngRef, NativePedZoneStreamState&, NativePedZoneStreamEffects& out);
