@@ -5,6 +5,7 @@ Run: docker exec mad-sa-graphics-build python3
  /workspace/gta-reversed/source/app/platform/linux/NativeWorldGroundProbe.py
 Generated objects/logs only under artifacts/graphics. Assets stay read-only.
 """
+import argparse
 import hashlib
 import pathlib
 import shlex
@@ -22,6 +23,9 @@ def function(text, signature):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--sanitized', action='store_true', help='instrument this gate and its reader/authority translation units')
+    options = parser.parse_args()
     root = pathlib.Path('/workspace')
     source = root / 'gta-reversed/source'
     here = source / 'app/platform/linux'
@@ -66,6 +70,15 @@ def main():
     probe = (here / 'NativeWorldGroundProbe.cpp').read_text()
     assert probe.count('// SOURCE_WORLD_ORACLE_INSERT') == 1
     probe = probe.replace('// SOURCE_WORLD_ORACLE_INSERT', '\n'.join(bodies))
+    link_lods = function(loader, 'void LinkLods(int32 numRelatedIPLs)')
+    evidence.append(f'game_sa/FileLoader.cpp:LinkLods sha256={hashlib.sha256(link_lods.encode()).hexdigest()}')
+    # Preserve the source Boolean expression; spell its existing precedence
+    # explicitly so the GCC -Werror oracle does not reject an MSVC-style VERIFY.
+    original_verify = 'VERIFY(!isIPL || gNumLoadedBuildings <= i && i < totalN);'
+    assert link_lods.count(original_verify) == 1
+    link_lods = link_lods.replace(original_verify, 'VERIFY(!isIPL || (gNumLoadedBuildings <= i && i < totalN));')
+    assert probe.count('// SOURCE_LINK_LODS_ORACLE_INSERT') == 1
+    probe = probe.replace('// SOURCE_LINK_LODS_ORACLE_INSERT', link_lods)
     world = (source / 'game_sa/World.h').read_text()
     sector_bodies = []
     for signature in ('static int32 GetSectorX(float x)', 'static int32 GetSectorY(float y)',
@@ -87,17 +100,23 @@ def main():
         else:
             flags.append(args[i]); i += 1
     flags += ['-I' + str(here), '-UNDEBUG', '-Wall', '-Wextra', '-ffp-contract=off', '-fno-fast-math', '-ffunction-sections', '-fdata-sections']
-    stem = out / 'NativeWorldGroundProbe'
+    if options.sanitized:
+        flags += ['-g', '-O1', '-fsanitize=address,undefined', '-fno-omit-frame-pointer']
+    suffix = '-sanitized' if options.sanitized else ''
+    stem = out / ('NativeWorldGroundProbe' + suffix)
     objects = []
     with stem.with_suffix('.build.log').open('w') as log:
-        for unit in ('NativeWorldGround', 'NativeSourceGround', 'NativeWorldEntityInfo', 'NativeCollisionAssets', 'StreamPager', 'TexSample'):
-            obj = out / ('worldground-' + unit + '.o')
+        for unit in ('NativeWorldGround', 'NativeSourceGround', 'NativeWorldEntityInfo', 'NativeCollisionAssets', 'NativeLodCatalog', 'StreamPager', 'TexSample'):
+            obj = out / ('worldground-' + unit + suffix + '.o')
             subprocess.run(flags + (['-Werror'] if unit == 'NativeWorldGround' else []) +
                            ['-c', str(here / (unit + '.cpp')), '-o', str(obj)], cwd=root / 'build', stdout=log, stderr=subprocess.STDOUT, check=True)
             objects.append(str(obj))
         obj = stem.with_suffix('.o')
         subprocess.run(flags + ['-Werror', '-x', 'c++', '-', '-c', '-o', str(obj)], input=probe, text=True, cwd=root / 'build', stdout=log, stderr=subprocess.STDOUT, check=True)
-        subprocess.run([flags[0], '-Wl,--gc-sections', str(obj), *objects, 'vendor/librw/src/librw.a', '-lpthread', '-lm', '-o', str(stem)], cwd=root / 'build', stdout=log, stderr=subprocess.STDOUT, check=True)
+        linker = [flags[0], '-Wl,--gc-sections']
+        if options.sanitized:
+            linker += ['-fsanitize=address,undefined']
+        subprocess.run(linker + [str(obj), *objects, 'vendor/librw/src/librw.a', '-lpthread', '-lm', '-o', str(stem)], cwd=root / 'build', stdout=log, stderr=subprocess.STDOUT, check=True)
     run = subprocess.run([str(stem), '/game'], capture_output=True, text=True)
     stem.with_suffix('.log').write_text('\n'.join(evidence) + '\n' + run.stdout + run.stderr)
     print(run.stdout, end='')

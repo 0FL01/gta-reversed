@@ -37,6 +37,12 @@ int main(int argc, char** argv) {
     Require(host.SeedSourceRngAfterRwInit(error), error.c_str());
     const auto context = NativeCollisionContext::LoadBeforeWorker(argv[1], 900, error);
     Require(context && host.InitializeBeforeWorker(argv[1], error, context), error.c_str());
+    NativeWorldEntityInfo metadata;
+    Require(metadata.LoadBeforeWorker(argv[1],context->Population,error),error.c_str());
+    const auto catalog=NativeLodCatalog::LoadBeforeWorker(argv[1],context->Population,error);
+    Require(bool(catalog),error.c_str());
+    const auto groundAuthority=NativeWorldGround::PrepareWithCatalog(*context,metadata,*catalog,{false,1.0f},error,1);
+    Require(bool(groundAuthority),error.c_str());
     Require(host.RunPass(256).Status == NativeScriptStatus::Waiting && host.State().Commands == 53,
         "actual startup main53");
     Require(host.PrepareInitialGarageWorldBeforeWorker(error), error.c_str());
@@ -46,6 +52,19 @@ int main(int argc, char** argv) {
     Require(world.Initialize(host) && world.active->cpu->Generation == 3,
         "initial exact source CPU/COL/GPU world");
     const auto center = world.active->cpu->Position;
+    const auto verifyGroundPair = [&] {
+        const auto& cpu=*world.active->cpu;
+        const NativeWorldGroundCommit commit{cpu.Generation,1,cpu.Position.X,cpu.Position.Y,
+            context->Radius,cpu.SourceCollision,1.0f};
+        const auto publication=groundAuthority->Publish(commit,2229.5f,-1342.0f);
+        const auto hit=NativeWorldGround::Query(publication,{2229.5f,-1342.0f,23.125f},cpu.Generation,1);
+        Require(hit.Status==NativeSourceGroundStatus::Hit && publication.Diagnostics.empty() &&
+            std::bit_cast<std::uint32_t>(hit.Point[2])==std::bit_cast<std::uint32_t>(22.99150276f),
+            "source building-only query belongs to exact active scene/COL/GPU generation");
+        Require(NativeWorldGround::Query(publication,{2229.5f,-1342.0f,23.125f},cpu.Generation+1,1).Reason==
+            NativeSourceGroundReason::StaleWorld,"retired/foreign generation cannot satisfy ground");
+    };
+    verifyGroundPair();
     host.SealStartup();
     world.Start(true);
     bool scriptPending = false;
@@ -110,11 +129,13 @@ int main(int argc, char** argv) {
         world.active->cpu->SourceCollision == firstCollision &&
         world.active->cpu->BorrowedCollision == firstQuery && &world.active->Collision() == host.World() &&
         world.retiring && !world.pending, "adjacent services share exact committed scene/COL/GPU");
+    verifyGroundPair();
     retire();
     pollReady(collisionRequest(100001));
     Require(host.WorldRevision() == 5 && world.CommitScriptWorld(host, error), error.c_str());
     Require(world.active->cpu->Generation == 5 && world.active->cpu->SourceCollision == host.Publication().SourceCollision &&
         &world.active->Collision() == host.World(), "second exact source publication");
+    verifyGroundPair();
     Require(!world.CommitScriptWorld(host, error) && world.active->cpu->Generation == 5,
         "duplicate swap rejected");
     retire();
@@ -138,6 +159,6 @@ int main(int argc, char** argv) {
     retire();
     Require(glGetError() == GL_NO_ERROR && host.InspectSourceRng().Value->DrawCount == 0,
         "GL and RNG invariants");
-    std::printf("script-world-publication-ok checks=%u generations=3,4,5 gpu-before-ready=1 adjacent-services=paired cancel=retired rng-draws=0\n",
+    std::printf("script-world-publication-ok checks=%u generations=3,4,5 gpu-before-ready=1 adjacent-services=paired cancel=retired building-ground=owned rng-draws=0\n",
         s_Checks);
 }

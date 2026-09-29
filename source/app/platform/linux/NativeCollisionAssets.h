@@ -133,6 +133,11 @@ struct NativeCollisionSnapshot {
     size_t MissingModels{}, EmptyModels{}, InteriorExcluded{}, TimeShared{};
     // Names absent from the complete source catalog. No invented default boxes.
     std::map<std::string, size_t> KnownAbsence;
+    // Primitive-empty is not catalog absence or !HasCollisionVolumes. Preserve
+    // the exact immutable headers/bounds, keyed by requested lower-case model
+    // identity (including time-partner resolution), without adding geometry.
+    // This shares the full-interior census scope above, not the spatial window.
+    std::map<std::string, std::shared_ptr<const NativeCollisionModel>> EmptyBindings;
 };
 struct NativeCollisionAssetStats {
     size_t Models{}, Spheres{}, Boxes{}, Triangles{}, Empty{}, Unsupported{}, HeaderNameFallback{};

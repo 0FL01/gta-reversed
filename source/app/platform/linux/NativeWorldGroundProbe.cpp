@@ -1,5 +1,6 @@
 #include "NativeWorldGround.h"
 #include "StreamPager.h"
+#include <algorithm>
 #include <bit>
 #include <cstdio>
 #include <functional>
@@ -51,10 +52,29 @@ struct CRect {
 };
 struct Box { CVector m_vecMin, m_vecMax; };
 struct Col { Box box; const Box& GetBoundingBox() const { return box; } };
-struct Model { Col col; Col* GetColModel() { return &col; } void SetOwnsColModel(bool) {} };
+struct Model {
+    Col col;
+    Col* CurrentCol = &col;
+    float m_fDrawDistance = 100;
+    bool bDoWeOwnTheColModel{};
+    Col* GetColModel() { return CurrentCol; }
+    void SetOwnsColModel(bool value) { bDoWeOwnTheColModel=value; }
+    void DeleteCollisionModel() { CurrentCol=nullptr; }
+    void SetColModel(Col* value) { CurrentCol=value; }
+};
 struct CEntity {
     Model* model{}; NativeSourceGroundTransform transform; bool collision{}, m_bIsBIGBuilding{}, m_bStreamingDontDelete{}, building{};
+    bool m_bUnderwater{};
+    int32 LodIndex=-1;
+    CEntity* Lod{};
+    uint8_t LodChildren{};
     Model* GetModelInfo() const { return model; }
+    int32 GetLodIndex() const { return LodIndex; }
+    uint8_t GetNumLodChildren() const { return LodChildren; }
+    CEntity* GetLod() const { return Lod; }
+    void SetLod(CEntity* value) { Lod=value; }
+    void AddLodChildren() { ++LodChildren; }
+    void RemoveLodChildren() { --LodChildren; }
     void SetUsesCollision(bool b) { collision=b; } void SetTypeBuilding() { building=true; }
     int GetType() const { return building ? ENTITY_TYPE_BUILDING : ENTITY_TYPE_DUMMY; }
     void TransformFromObjectSpace(CVector& out,CVector p) const {
@@ -77,12 +97,26 @@ struct CWorld {
     static SectorLists& GetSector(int x,int y) { Check(x>=0 && x<120 && y>=0 && y<120,"source sector range"); return Sectors[y*120+x]; }
     static SectorLists& GetRepeatSector(int x,int y) { return GetSector(x,y); }
     static List& GetLodPtrList(int,int) { return Lods; }
+    static void Add(CEntity* entity) { entity->Add(entity->GetBoundRect()); }
     static float GetSectorfX(float x) { return x/50.0f+60.0f; }
     static float GetSectorfY(float y) { return y/50.0f+60.0f; }
     // SOURCE_SECTOR_ORACLE_INSERT
     template<class Fn> static bool IterateLodSectorsOverlappedByRect(CRect,Fn fn) { return fn(0,0); }
 };
+static std::array<CEntity*,256> gpLoadedBuildings;
+static uint32 gNumLoadedBuildings;
+static std::span<CEntity*> GetLoadedBuildings() { return {gpLoadedBuildings.data(),gNumLoadedBuildings}; }
+struct Camera { float m_fLODDistMultiplier=1; };
+static Camera TheCamera;
+struct CColAccel {
+    static bool isCacheLoading() { return false; }
+    static void addIPLEntity(CEntity**,uint32,uint32) {}
+    static void cacheIPLSection(CEntity**,uint32) {}
+};
 // SOURCE_WORLD_ORACLE_INSERT
+#define VERIFY(value) Check((value),"extracted LinkLods source verification")
+// SOURCE_LINK_LODS_ORACLE_INSERT
+#undef VERIFY
 }
 
 using Status = NativeSourceGroundStatus;
@@ -141,8 +175,40 @@ static void Arithmetic() {
     for (auto [x,sector] : {std::pair{-3000.0f,0}, {-50.01f,58}, {-50.0f,59}, {-0.01f,59}, {0.0f,60}, {49.99f,60}, {50.0f,61}, {2999.0f,119}})
         Check(NativeWorldGround::Sector(x)==sector,"50m source sector boundary");
 }
+static void ContextualLodInvariant() {
+    // Execute the complete source body, not a restatement of its condition.
+    // Every text-parent/child order must keep at least one child even when
+    // the multi-child branch removes earlier siblings with non-owned COL.
+    for (uint32 children : {1u,2u,3u}) {
+        for (uint32 parentIndex=0; parentIndex<=children; ++parentIndex) {
+            std::array<oracle::CBuilding,4> entities;
+            std::array<oracle::Model,4> models;
+            for (uint32 index=0; index<=children; ++index) {
+                entities[index].model=&models[index];
+                entities[index].LodIndex=index==parentIndex ? -1 : int32(parentIndex);
+                oracle::gpLoadedBuildings[index]=&entities[index];
+            }
+            oracle::gNumLoadedBuildings=children+1;
+            oracle::LinkLods(0);
+            Check(entities[parentIndex].GetNumLodChildren()>=1 &&
+                entities[parentIndex].m_bIsBIGBuilding && !entities[parentIndex].collision,
+                "extracted source LinkLods never removes the last text child in any encounter order");
+        }
+    }
+    std::array<oracle::CBuilding,2> entities;
+    std::array<oracle::Model,2> models;
+    entities[0].model=&models[0]; entities[1].model=&models[1];
+    entities[1].SetLod(&entities[0]);
+    entities[0].AddLodChildren(); // exact LoadIplBoundingBox parent handoff
+    oracle::gpLoadedBuildings[0]=&entities[0]; oracle::gpLoadedBuildings[1]=&entities[1];
+    oracle::gNumLoadedBuildings=1;
+    oracle::LinkLods(1);
+    Check(entities[0].m_bIsBIGBuilding && !entities[0].collision &&
+        models[0].GetColModel()==models[1].GetColModel(),
+        "source related-binary tail aliases COL only after text parent becomes collision-disabled");
+}
 static void Fixtures() {
-    Arithmetic(); std::string error;
+    Arithmetic(); ContextualLodInvariant(); std::string error;
     NativeCollisionPopulation p; p.IncludesStreamed=true;
     p.Models={{1,{"floor",false}},{2,{"dummy",false}},{3,{"unknowncol",false}},{4,{"big",false}}};
     p.Instances={Placement(1,"floor",0),Placement(2,"dummy",1)};
@@ -227,6 +293,63 @@ static void Fixtures() {
     ew=NativeWorldGround::PreparePopulation(p,load(p),*eb,error,7); auto ep=ew->Publish(ec,10,10);
     Check(ep.Snapshot->Targets.size()==1 && ep.Snapshot->Targets[0].UsesCollision==NativeSourceGroundKnown::Yes &&
         NativeWorldGround::Query(ep,{10,10,10},10,7).Status==Status::Miss,"V2 primitive-empty != HasCollisionVolumes false");
+    // The actual reader omits these from geometric Instances, but must retain
+    // their exact constructor headers in the same publication.
+    auto retainedEmpty=std::make_shared<NativeCollisionSnapshot>();
+    retainedEmpty->EmptyBindings.emplace("floor",empty);
+    ec.SourceCollision=retainedEmpty;
+    ew=NativeWorldGround::PreparePopulation(p,load(p),*retainedEmpty,error,7);
+    Check(bool(ew),error);
+    ep=ew->Publish(ec,10,10);
+    Check(retainedEmpty->Instances.empty() && ep.Snapshot->Targets.size()==1 &&
+        ep.Snapshot->Targets.front().Model==empty &&
+        NativeWorldGround::Query(ep,{10,10,10},10,7).Status==Status::Miss,
+        "retained primitive-empty header supplies bounds and flags without invented geometry");
+    auto missingEmpty=std::make_shared<NativeCollisionSnapshot>();
+    ec.SourceCollision=missingEmpty;
+    Check(NativeWorldGround::Query(ew->Publish(ec,10,10),{10,10,10},10,7).Status==Status::Unsupported,
+        "absent committed empty header is not known absence or clearance");
+    auto changedEmpty=std::make_shared<NativeCollisionSnapshot>(*retainedEmpty);
+    changedEmpty->EmptyBindings["floor"]=std::make_shared<NativeCollisionModel>(*empty);
+    ec.SourceCollision=changedEmpty;
+    Check(NativeWorldGround::Query(ew->Publish(ec,10,10),{10,10,10},10,7).Status==Status::Unsupported,
+        "same-name changed empty header cannot satisfy old prepared owner");
+    Check(NativeWorldGround::Query(ep,{10,10,10},10,7).Status==Status::Miss,
+        "held empty-header publication remains immutable");
+    auto noVolumes=std::make_shared<NativeCollisionModel>(*empty); noVolumes->Flags=0;
+    auto noVolumesBinding=std::make_shared<NativeCollisionSnapshot>();
+    noVolumesBinding->EmptyBindings.emplace("floor",noVolumes);
+    ec.SourceCollision=noVolumesBinding;
+    ew=NativeWorldGround::PreparePopulation(p,load(p),*noVolumesBinding,error,7);
+    Check(bool(ew) && ew->Publish(ec,10,10).Snapshot->Targets.empty(),
+        "retained no-volume header applies source collision-disabled constructor state");
+    ec.SourceCollision=missingEmpty;
+    Check(NativeWorldGround::Query(ew->Publish(ec,10,10),{10,10,10},10,7).Status==Status::Unsupported,
+        "missing no-volume proof cannot disable collision by an old header");
+    auto invalidEmpty=std::make_shared<NativeCollisionSnapshot>();
+    auto invalidModel=std::make_shared<NativeCollisionModel>(*empty);
+    invalidModel->Faces.push_back({{0,1,2},{}});
+    invalidEmpty->EmptyBindings.emplace("floor",invalidModel);
+    Check(!NativeWorldGround::PreparePopulation(p,load(p),*invalidEmpty,error,7),
+        "empty header with nonempty primitive array rejected");
+    invalidModel=std::make_shared<NativeCollisionModel>(*empty);
+    invalidModel->Min[0]=std::numeric_limits<float>::quiet_NaN();
+    invalidEmpty->EmptyBindings["floor"]=invalidModel;
+    Check(!NativeWorldGround::PreparePopulation(p,load(p),*invalidEmpty,error,7),
+        "nonfinite empty header cannot provide collision-disable or bound proof");
+    invalidModel=std::make_shared<NativeCollisionModel>(*empty);
+    invalidModel->Min[0]=invalidModel->Max[0]+1.0f;
+    invalidEmpty->EmptyBindings["floor"]=invalidModel;
+    Check(!NativeWorldGround::PreparePopulation(p,load(p),*invalidEmpty,error,7),
+        "inverted empty header bounds rejected");
+    auto unresolvedEmptyLod=p;
+    unresolvedEmptyLod.Instances[0].Binary=false;
+    unresolvedEmptyLod.Instances[0].Ipl="fixture.ipl";
+    unresolvedEmptyLod.Instances[1].Lod=0;
+    ew=NativeWorldGround::PreparePopulation(unresolvedEmptyLod,load(unresolvedEmptyLod),*noVolumesBinding,error,7);
+    ec.SourceCollision=noVolumesBinding;
+    Check(bool(ew) && NativeWorldGround::Query(ew->Publish(ec,10,10),{10,10,10},10,7).Status==Status::Unsupported,
+        "unresolved model-wide LOD reassignment cannot inherit old no-volume clearance");
     auto malformed=std::make_shared<NativeCollisionModel>(); malformed->Unsupported="fixture unverified header";
     eb=std::make_shared<NativeCollisionSnapshot>(); eb->Instances={Bind(p.Instances[0],malformed)}; ec.SourceCollision=eb;
     ew=NativeWorldGround::PreparePopulation(p,load(p),*eb,error,7);
@@ -241,12 +364,53 @@ static void Actual(const char* game) {
     auto context=NativeCollisionContext::LoadBeforeWorker(game,900,error); Check(bool(context),error);
     NativeWorldEntityInfo info; Check(info.LoadBeforeWorker(game,context->Population,error),error);
     auto world=NativeWorldGround::Prepare(*context,info,error,23); Check(bool(world),error);
+    const auto catalog=NativeLodCatalog::LoadBeforeWorker(game,context->Population,error);
+    Check(bool(catalog),error);
+    auto contextual=NativeWorldGround::PrepareWithCatalog(*context,info,*catalog,{false,1.0f},error,23);
+    Check(bool(contextual),error);
+    Check(!NativeWorldGround::PrepareWithCatalog(*context,info,*catalog,{true,1.0f},error,23),
+        "cache-loading lane cannot be inferred from the initial non-cache graph");
+    Check(!NativeWorldGround::PrepareWithCatalog(*context,info,*catalog,{false,0.0f},error,23),
+        "invalid source initial LOD profile rejected");
+    auto changedContext=*context; changedContext.Population.Instances.front().Position[0]+=1.0f;
+    Check(!NativeWorldGround::PrepareWithCatalog(changedContext,info,*catalog,{false,1.0f},error,23),
+        "changed placement cannot reuse disk graph constructor dependencies");
     auto startup=std::make_shared<NativeCollisionSnapshot>(), airfield=std::make_shared<NativeCollisionSnapshot>(), downtown=std::make_shared<NativeCollisionSnapshot>();
+    auto missionWorld=std::make_shared<NativeCollisionSnapshot>();
     Check(context->Snapshot(2488.562255859375f,-1666.864501953125f,*startup,error),error);
     Check(context->Snapshot(325,2537,*airfield,error),error);
     Check(context->Snapshot(1534,-1747,*downtown,error),error);
+    Check(context->Snapshot(2358.65625f,-1246.34814453125f,*missionWorld,error),error);
+    // Regression for the real shared LOD model that used to be omitted using
+    // its old empty/no-volume header. Far envelopes can be excluded, but a
+    // nearby possible collider must remain Unsupported, not guessed as clear.
+    const auto sharedParent=std::ranges::find_if(catalog->Nodes(),[](const auto& node) {
+        return node.Identity.ModelId==3296 && !node.Identity.Binary && !node.Children.empty();
+    });
+    const auto sharedInstance=std::ranges::find_if(context->Population.Instances,[](const auto& placement) {
+        return placement.ModelId==3296 && placement.Binary && placement.Interior==0;
+    });
+    Check(sharedParent!=catalog->Nodes().end() && sharedInstance!=context->Population.Instances.end(),
+        "real shared lod_oiltank constructor/reassignment fixture");
+    const auto possibleCollider=context->Assets.LookupModel(catalog->Nodes()[sharedParent->Children.front()].Identity.Model);
+    Check(possibleCollider.Status==NativeCollisionModelStatus::Ready && bool(possibleCollider.Model),
+        "real contextual child supplies possible collider, not an invented default box");
+    NativeSourceGroundTransform sharedTransform;
+    Check(NativeWorldGround::SourceTransform(*sharedInstance,sharedTransform),"real shared LOD transform");
+    const auto sharedRect=NativeWorldGround::SourceRect(*possibleCollider.Model,sharedTransform,&*sharedInstance);
+    const float sharedX=(sharedRect[0]+sharedRect[2])*0.5f, sharedY=(sharedRect[1]+sharedRect[3])*0.5f;
+    auto sharedCollision=std::make_shared<NativeCollisionSnapshot>();
+    Check(context->Snapshot(sharedX,sharedY,*sharedCollision,error),error);
     Check(context->Population.Instances.size()==50935 && startup->Instances.size()==5805,"actual full IPL/source COL startup census");
     NativeCollisionSnapshot all; Check(context->Assets.Snapshot(context->Population,0,0,1e30f,all,error),error);
+    Check(!all.EmptyBindings.empty() && all.EmptyBindings.size()<=all.EmptyModels,
+        "reader preserves primitive-empty headers alongside unchanged geometric census");
+    for (const auto& [name,model] : all.EmptyBindings) {
+        const auto exact=context->Assets.LookupModel(name);
+        Check(exact.Status==NativeCollisionModelStatus::Empty && exact.Model==model &&
+            model->Empty && model->Spheres.empty() && model->Boxes.empty() && model->Faces.empty(),
+            "retained empty header is exact source catalog ownership, not a default box");
+    }
     std::set<std::tuple<std::string,uint32_t,bool>> bound;
     for (const auto& i:all.Instances) bound.emplace(i.Placement.Ipl,i.Placement.Record,i.Placement.Binary);
     std::vector<NativePlacementIdentity> omittedDummies;
@@ -272,13 +436,29 @@ static void Actual(const char* game) {
     NativeWorldGroundCommit sc{31,23,2488.562255859375f,-1666.864501953125f,900,startup,1.0f};
     auto far=world->Publish(sc,325,2537);
     Check(NativeWorldGround::Query(far,{325,2537,17.5f},31,23).Reason==Reason::UnknownCoverage,"far world not startup geometry");
+    const NativeWorldGroundCommit sharedCommit{35,23,sharedX,sharedY,900,sharedCollision,1.0f};
+    const auto sharedPublication=contextual->Publish(sharedCommit,sharedX,sharedY);
+    Check(std::ranges::any_of(sharedPublication.Snapshot->Targets,[&](const auto& target) {
+        return target.Identity.Matches(*sharedInstance) && !target.CollisionModelKnown &&
+            target.UsesCollision==NativeSourceGroundKnown::Unknown;
+    }) && NativeWorldGround::Query(sharedPublication,{sharedX,sharedY,sharedInstance->Position[2]},35,23).Status==Status::Unsupported,
+        "nearby shared LOD collider envelope retains unknown effective constructor/owner");
+    auto missingSharedHeader=std::make_shared<NativeCollisionSnapshot>(*missionWorld);
+    Check(missingSharedHeader->EmptyBindings.erase("lod_oiltank")==1,
+        "exact shared empty header exists in the full-interior source publication");
+    const NativeWorldGroundCommit missingSharedCommit{36,23,2358.65625f,-1246.34814453125f,900,missingSharedHeader,1.0f};
+    Check(NativeWorldGround::Query(contextual->Publish(missingSharedCommit,2229.5f,-1342.0f),
+        {2229.5f,-1342.0f,23.125f},36,23).Status==Status::Unsupported,
+        "missing shared constructor header forbids exclusion by an old collider envelope");
     for (const auto& [x,y,z,air] : {std::tuple{2488.562255859375f,-1666.864501953125f,30.0f,false},
-         {325.0f,2537.0f,17.5f,true}, {1534.0f,-1747.0f,11.0f,false}}) {
+         {325.0f,2537.0f,17.5f,true}, {1534.0f,-1747.0f,11.0f,false},
+         {2229.5f,-1342.0f,23.125f,false}}) {
         auto commit=sc; if (air) { commit={32,23,325,2537,900,airfield,1.0f}; }
         if (x==1534) commit={33,23,1534,-1747,900,downtown,1.0f};
+        if (x==2229.5f) commit={34,23,2358.65625f,-1246.34814453125f,900,missionWorld,1.0f};
         auto pub=world->Publish(commit,x,y); auto r=NativeWorldGround::Query(pub,{x,y,z},commit.WorldGeneration,23);
         Check(r.Status==Status::Unsupported,
-            "actual world query must remain Unsupported without empty-model bounds, LinkLods and source-order authority");
+            "actual world query remains Unsupported without full LinkLods/model bindings and source-order authority");
         size_t omittedDummyCandidates{};
         for (const auto& t:pub.Snapshot->Targets)
             omittedDummyCandidates+=std::ranges::find(omittedDummies,t.Identity)!=omittedDummies.end();
@@ -291,6 +471,32 @@ static void Actual(const char* game) {
             std::cout<<"LIMIT issue="<<int(issue)<<" count="<<n<<" model="<<d->Candidate.Model<<" id="<<d->Candidate.ModelId
                 <<" ipl="<<d->Candidate.Ipl<<" record="<<d->Candidate.Record<<" source="<<d->SourceReason<<'\n';
         }
+        const auto contextualPublication=contextual->Publish(commit,x,y);
+        const auto contextualResult=NativeWorldGround::Query(contextualPublication,{x,y,z},commit.WorldGeneration,23);
+        Check(contextualPublication.Snapshot->Targets.size()<=pub.Snapshot->Targets.size(),
+            "exact contextual IPL dependency set does not invent additional potential buildings");
+        std::map<NativeWorldGroundIssue,size_t> contextualIssues;
+        for (const auto& diagnostic:contextualPublication.Diagnostics) ++contextualIssues[diagnostic.Issue];
+        std::cout<<"CONTEXTUAL query="<<x<<','<<y<<','<<z<<" status="<<int(contextualResult.Status)
+            <<" reason="<<int(contextualResult.Reason)<<" candidates="<<contextualPublication.Snapshot->Targets.size()
+            <<" diagnostics="<<contextualPublication.Diagnostics.size()
+            <<" z="<<contextualResult.Point[2]<<" primitive="<<contextualResult.PrimitiveIndex<<'\n';
+        for (const auto& [issue,count]:contextualIssues) {
+            const auto diagnostic=std::ranges::find_if(contextualPublication.Diagnostics,
+                [&](const auto& value){return value.Issue==issue;});
+            std::cout<<"CONTEXTUAL_LIMIT issue="<<int(issue)<<" count="<<count
+                <<" model="<<diagnostic->Candidate.Model<<" id="<<diagnostic->Candidate.ModelId
+                <<" source="<<diagnostic->SourceReason<<'\n';
+        }
+        Check(contextualResult.Status==Status::Hit && contextualPublication.Diagnostics.empty(),
+            "complete contextual native initial-world sector yields a source building-only hit");
+        const auto expectedZ=x==2488.562255859375f ? 12.34375f : x==325.0f ? 15.80784416f :
+            x==1534.0f ? 10.484375f : 22.99150276f;
+        Check(std::bit_cast<uint32_t>(contextualResult.Point[2])==std::bit_cast<uint32_t>(expectedZ),
+            "actual contextual building-only height bits");
+        auto changedProfile=commit; changedProfile.LodDistanceMultiplier=1.2f;
+        Check(contextual->Publish(changedProfile,x,y).Diagnostics.front().Issue==NativeWorldGroundIssue::StaleCommit,
+            "contextual initial LOD state is pinned to the prepared profile");
         if (air) {
             const auto it=std::ranges::find_if(airfield->Instances,[](const auto& i){return i.Placement.ModelId==16177 && i.Placement.Record==32;});
             Check(it!=airfield->Instances.end(),"Rustler source terrain binding"); NativeSourceGroundTransform t;

@@ -43,6 +43,10 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
         app/platform/linux/NativeCarGeneratorRuntime.cpp
         app/platform/linux/NativeLiveEntityBounds.cpp
         app/platform/linux/NativeCollisionAssets.cpp
+        app/platform/linux/NativeWorldEntityInfo.cpp
+        app/platform/linux/NativeLodCatalog.cpp
+        app/platform/linux/NativeWorldGround.cpp
+        app/platform/linux/NativeSourceGround.cpp
         app/platform/linux/NativeScriptSchema.cpp
         app/platform/linux/NativeScriptCorpus.cpp
         app/platform/linux/NativeScriptContentLedger.cpp
@@ -127,6 +131,16 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
         app/platform/linux/WalkSim.cpp
     )
     target_compile_features(mad-sa-linux PRIVATE cxx_std_23)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        set_source_files_properties(
+            app/platform/linux/NativeCollisionAssets.cpp
+            app/platform/linux/NativeWorldEntityInfo.cpp
+            app/platform/linux/NativeLodCatalog.cpp
+            app/platform/linux/NativeWorldGround.cpp
+            app/platform/linux/NativeSourceGround.cpp
+            PROPERTIES COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-Wall;-Wextra;-Wpedantic"
+        )
+    endif()
     target_include_directories(mad-sa-linux PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     # Radio streams decode through system libvorbisfile/libogg (already in
     # mad-sa:dev as libvorbis-dev/libogg-dev, same precedent as system

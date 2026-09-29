@@ -22,4 +22,4 @@ if __name__ == '__main__':
         print(result.stdout, end='')
         result.check_returncode()
         assert 'script-world-publication-ok' in result.stdout
-        assert 'gpu-before-ready=1 adjacent-services=paired cancel=retired rng-draws=0' in result.stdout
+        assert 'gpu-before-ready=1 adjacent-services=paired cancel=retired building-ground=owned rng-draws=0' in result.stdout

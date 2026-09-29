@@ -2,6 +2,7 @@
 #pragma once
 #include "NativeSourceGround.h"
 #include "NativeWorldEntityInfo.h"
+#include "NativeLodCatalog.h"
 
 enum class NativeWorldGroundIssue {
     None, PopulationIncomplete, Metadata, CollisionBinding, TextLodState,
@@ -34,6 +35,13 @@ public:
     // No COL parser, pager, filesystem or mutable metadata is used after this call.
     static std::shared_ptr<const NativeWorldGround> Prepare(
         const NativeCollisionContext&, const NativeWorldEntityInfo&, std::string& error, uint64_t metadataRevision = 0);
+    // Refine constructor dependencies through the existing disk-validated IPL
+    // graph. Non-cache initial pass only; still not mutable CIplStore parity.
+    // Contextual parent identities replace the legacy all-file ordinal
+    // superset. Unresolved shared-model aliases/order remain Unsupported.
+    static std::shared_ptr<const NativeWorldGround> PrepareWithCatalog(
+        const NativeCollisionContext&, const NativeWorldEntityInfo&, const NativeLodCatalog&,
+        const NativeLinkLodsInputs&, std::string& error, uint64_t metadataRevision = 0);
     // Pure import/fixture boundary: bindings may be incomplete. Their absence is
     // never proof of null COL or sector exclusion. No caller completeness bit.
     static std::shared_ptr<const NativeWorldGround> PreparePopulation(
@@ -62,9 +70,14 @@ private:
         NativeSourceGroundTarget Target;
         std::optional<float> DrawDistance;
         bool BindingMayChange{};
+        bool DrawDistanceMayChange{};
+        bool ProvenInitialBigBuilding{};
+        bool PotentialColliderHeadersKnown{};
+        std::vector<std::shared_ptr<const NativeCollisionModel>> PotentialColliderHeaders;
         NativeWorldGroundDiagnostic Diagnostic;
     };
     std::vector<Entity> m_Entities;
     bool m_CompletePopulation{};
     uint64_t m_MetadataRevision{};
+    std::optional<float> m_InitialLodMultiplier;
 };

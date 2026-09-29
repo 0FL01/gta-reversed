@@ -369,7 +369,11 @@ bool NativeCollisionAssets::Snapshot(const NativeCollisionPopulation& population
         // An unsupported parser result has no trustworthy extent. Referencing
         // it must fail even when its malformed header claims it is far away.
         Require(model.Unsupported.empty(),"referenced unsupported COL: "+key+" "+model.Unsupported);
-        if (model.Empty) { ++next.EmptyModels; continue; }
+        if (model.Empty) {
+            ++next.EmptyModels;
+            next.EmptyBindings.emplace(key, found->second);
+            continue;
+        }
         NativeCollisionInstance inst; inst.Placement=p; inst.Model=found->second; inst.TimeShared=shared;
         inst.Basis=replacement ? replacement->Basis : Basis(p.Quaternion);
         if (replacement) inst.Placement.Position = replacement->Position;
@@ -418,6 +422,7 @@ bool NativeCollisionAssets::SnapshotSelected(const NativeCollisionPopulation& po
         Require(model.Unsupported.empty(), "selected unsupported COL: " + key + " " + model.Unsupported);
         if (model.Empty) {
             ++next.EmptyModels;
+            next.EmptyBindings.emplace(key, found->second);
             continue;
         }
         NativeCollisionInstance instance;

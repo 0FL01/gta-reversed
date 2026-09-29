@@ -13,6 +13,7 @@
 #include "app/platform/linux/NativeGaragesRuntime.h"
 #include "app/platform/linux/NativeCarGeneratorRuntime.h"
 #include "app/platform/linux/NativeLiveEntityBounds.h"
+#include "app/platform/linux/NativeWorldGround.h"
 #include "app/platform/linux/NativeCarGeneratorPopulation.h"
 #include "app/platform/linux/NativePadFeedback.h"
 #include "app/platform/linux/NativeInputLifecycle.h"
@@ -986,6 +987,7 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
     GpuScene actorGpu, scriptGpu, entryGpu;
     std::unique_ptr<NativeCarGeneratorRuntime> carGenerators;
     NativeCarGeneratorPopulation carPopulation;
+    std::shared_ptr<const NativeWorldGround> generatorGround;
     struct PendingPopulationVehicle {
         std::uint64_t Ticket = 0;
         std::int32_t Model = -1;
@@ -1001,6 +1003,25 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
         // model without the exact ordered streaming roster and world effects.
         if (!carPopulation.LoadBeforeWorker(gameDir, scriptHost.CarGenerators().ModelDefinitions(), gameplayError)) {
             std::printf("play-fail car population source: %s\n", gameplayError.c_str());
+            return 1;
+        }
+        NativeWorldEntityInfo entityMetadata;
+        if (!entityMetadata.LoadBeforeWorker(gameDir, collisionContext->Population, gameplayError)) {
+            std::printf("play-fail initial entity metadata: %s\n", gameplayError.c_str());
+            return 1;
+        }
+        const auto lodCatalog = NativeLodCatalog::LoadBeforeWorker(gameDir, collisionContext->Population, gameplayError);
+        if (!lodCatalog) {
+            std::printf("play-fail initial IPL graph: %s\n", gameplayError.c_str());
+            return 1;
+        }
+        // The owned native initial profile is the non-cache lane and source
+        // CCamera's initial LOD multiplier1. This is not mutable retail
+        // CIplStore/ambient-population parity or the lab's draw-distance scale.
+        generatorGround = NativeWorldGround::PrepareWithCatalog(*collisionContext,
+            entityMetadata, *lodCatalog, {false, 1.0f}, gameplayError, 1);
+        if (!generatorGround) {
+            std::printf("play-fail initial building authority: %s\n", gameplayError.c_str());
             return 1;
         }
         carGenerators = std::make_unique<NativeCarGeneratorRuntime>(scriptHost.CarGenerators(), gameplay,
@@ -1616,6 +1637,20 @@ int Realtime_Run(int argc, char** argv, const char* gameDir) {
                                 vehicle->State.Collision->BoundRadius : -1.0f);
                     }
                     if (demand.Action.Requirement == NativeCarGeneratorRequirement::CollisionBlockage) {
+                        if (generatorGround && demand.WorldGeneration == world.active->cpu->Generation &&
+                            demand.Collision == world.active->cpu->SourceCollision &&
+                            demand.Collision == scriptHost.Publication().SourceCollision) {
+                            const NativeWorldGroundCommit commit{demand.WorldGeneration, 1,
+                                world.active->cpu->Position.X, world.active->cpu->Position.Y,
+                                collisionContext->Radius, demand.Collision, 1.0f};
+                            const auto publication = generatorGround->Publish(commit, position.X, position.Y);
+                            const auto ground = NativeWorldGround::Query(publication,
+                                {position.X, position.Y, position.Z}, demand.WorldGeneration, 1);
+                            std::printf("play-cargen-building-ground status=%d reason=%d targets=%zu diagnostics=%zu z=%.9f primitive=%u generation=%llu profile=initial-noncache1 source-parity=0\n",
+                                int(ground.Status), int(ground.Reason), publication.Snapshot->Targets.size(),
+                                publication.Diagnostics.size(), ground.Point[2], ground.PrimitiveIndex,
+                                static_cast<unsigned long long>(ground.WorldGeneration));
+                        }
                         std::string proofError;
                         const auto proof = NativeLiveEntityBounds::Capture(scriptHost,
                             scriptHost.RegisteredPlayerPed(), vehicleSnapshot, proofError);

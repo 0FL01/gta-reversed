@@ -1,5 +1,6 @@
 #include "NativeWorldGround.h"
 #include <algorithm>
+#include <deque>
 #include <limits>
 #include <set>
 #include <tuple>
@@ -11,6 +12,10 @@ using Class = NativeSourceGroundClass;
 using Issue = NativeWorldGroundIssue;
 using Key = std::tuple<std::string, uint32_t, bool>;
 static Key IdentityKey(const NativeCollisionPlacement& p) { return {p.Ipl, p.Record, p.Binary}; }
+static std::string ModelKey(std::string name) {
+    for (auto& c : name) if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+    return name;
+}
 static bool Finite(V v) { return std::ranges::all_of(v, [](float f) { return std::isfinite(f); }); }
 static V Point(const NativeSourceGroundTransform& t, V p) {
     V out{};
@@ -88,16 +93,177 @@ std::shared_ptr<const NativeWorldGround> NativeWorldGround::Prepare(
     // census, NEVER an imported or committed window's MissingModels counter.
     for (auto& e : next->m_Entities) {
         if (e.Target.Model || e.BindingMayChange || e.Target.InWorld != Known::Yes || !e.Target.VerifiedClassification) continue;
-        auto name = e.Placement.Model;
-        for (auto& c : name) if (c >= 'A' && c <= 'Z') c += 'a'-'A';
+        const auto name = ModelKey(e.Placement.Model);
         if (!all.KnownAbsence.contains(name)) {
             e.Diagnostic = Diagnostic(Issue::CollisionBinding,e.Target.Identity,
-                "full catalog proves primitive-empty COL omitted by Assets::Snapshot; original header/bounds unavailable (V2+ HasCollisionVolumes is flags&2, NOT primitive count)");
+                "full catalog has no retained supported constructor binding for this identity");
         } else {
             e.Diagnostic = Diagnostic(Issue::CollisionBinding,e.Target.Identity,
                 "full COL catalog absence; objs/tobj/anim Init starts null, hier LoadClumpObject alone binds TempColBBox; GetBoundRect/GetColModel dereference forbids inventing normal-sector null-model membership");
         }
     }
+    return next;
+}
+
+std::shared_ptr<const NativeWorldGround> NativeWorldGround::PrepareWithCatalog(
+    const NativeCollisionContext& context, const NativeWorldEntityInfo& metadata,
+    const NativeLodCatalog& catalog, const NativeLinkLodsInputs& inputs,
+    std::string& error, uint64_t metadataRevision) {
+    if (!catalog.DiskValidated() || inputs.CacheLoading || !std::isfinite(inputs.LodMultiplier) ||
+        inputs.LodMultiplier <= 0.0f || catalog.Nodes().size() != context.Population.Instances.size()) {
+        error = "initial ground requires a complete disk-validated non-cache IPL graph and LOD profile";
+        return {};
+    }
+    auto next = std::const_pointer_cast<NativeWorldGround>(Prepare(context, metadata, error, metadataRevision));
+    if (!next) return {};
+    std::map<Key, const NativeLodNode*> nodes;
+    std::set<int> reboundModels, mutableDrawModels;
+    std::set<const NativeCollisionModel*> reboundBindings;
+    struct PotentialColliders {
+        bool Unknown{};
+        std::map<const NativeCollisionModel*, std::shared_ptr<const NativeCollisionModel>> Headers;
+    };
+    std::map<int, PotentialColliders> potentialColliders;
+    std::map<int, std::vector<int>> volumeDependents;
+    std::map<const NativeCollisionModel*, int> initialAliases;
+    for (const auto& node : catalog.Nodes()) {
+        if (!nodes.emplace(IdentityKey(node.Placement), &node).second ||
+            node.Children.size() > 255 ||
+            (node.Link != NativeLodLinkStatus::None && node.Link != NativeLodLinkStatus::Bound)) {
+            error = "invalid or duplicate contextual IPL ground identity";
+            return {};
+        }
+        const auto initial = context.Assets.LookupModel(node.Identity.Model);
+        const auto initialMetadata = catalog.Metadata(node);
+        if (initialMetadata.Status != NativeWorldInfoStatus::Ready || !initialMetadata.Model) {
+            error = "contextual IPL model lacks initial constructor metadata";
+            return {};
+        }
+        const bool supportedHeader = initial.Model && initial.Model->Unsupported.empty() &&
+            initial.Model->Version >= 1 && initial.Model->Version <= 4;
+        const bool knownNullAtomic = initial.Status == NativeCollisionModelStatus::KnownAbsent &&
+            (initialMetadata.Model->Kind == NativeWorldModelKind::Atomic ||
+             initialMetadata.Model->Kind == NativeWorldModelKind::TimeAtomic);
+        const bool possibleVolumes = supportedHeader ? (initial.Model->Version == 1 ?
+            (!initial.Model->Spheres.empty() || !initial.Model->Boxes.empty() || !initial.Model->Faces.empty()) :
+            (initial.Model->Flags & 2u) != 0) : !knownNullAtomic;
+        auto& potential = potentialColliders[node.Identity.ModelId];
+        potential.Unknown |= !supportedHeader && !knownNullAtomic;
+        if (supportedHeader && possibleVolumes) potential.Headers.emplace(initial.Model.get(),initial.Model);
+        if (initial.Model) {
+            const auto [alias, first] = initialAliases.emplace(initial.Model.get(), node.Identity.ModelId);
+            if (!first && alias->second != node.Identity.ModelId) {
+                volumeDependents[alias->second].push_back(node.Identity.ModelId);
+                volumeDependents[node.Identity.ModelId].push_back(alias->second);
+            }
+        }
+        if (!node.Parent) continue;
+        if (*node.Parent >= catalog.Nodes().size()) {
+            error = "contextual IPL parent is outside the complete graph";
+            return {};
+        }
+        const auto& parent = catalog.Nodes()[*node.Parent];
+        volumeDependents[node.Identity.ModelId].push_back(parent.Identity.ModelId);
+        reboundModels.insert(parent.Identity.ModelId);
+        const auto binding = context.Assets.LookupModel(parent.Identity.Model);
+        if (binding.Model) reboundBindings.insert(binding.Model.get());
+        if (parent.Children.size() > 1) mutableDrawModels.insert(node.Identity.ModelId);
+    }
+    // Propagate the complete possible-collider envelope through source model
+    // reassignment edges. Repeated model IDs can form cycles; the finite set
+    // union reaches a fixed point without assuming cross-archive load order.
+    // Null atomics supply no assignment (`if (cm)`); unsupported/clump state
+    // stays Unknown. No member of the union is claimed as the effective COL.
+    std::deque<int> pending;
+    std::set<int> queued;
+    for (const auto& [model, potential] : potentialColliders) {
+        (void)potential;
+        pending.push_back(model);
+        queued.insert(model);
+    }
+    while (!pending.empty()) {
+        const auto model = pending.front();
+        pending.pop_front();
+        queued.erase(model);
+        const auto dependents = volumeDependents.find(model);
+        if (dependents == volumeDependents.end()) continue;
+        for (const auto parent : dependents->second) {
+            const auto& source = potentialColliders.at(model);
+            auto& destination = potentialColliders.at(parent);
+            bool changed = source.Unknown && !destination.Unknown;
+            destination.Unknown |= source.Unknown;
+            for (const auto& [pointer, owner] : source.Headers)
+                changed |= destination.Headers.emplace(pointer, owner).second;
+            if (changed && queued.insert(parent).second) pending.push_back(parent);
+        }
+    }
+    for (auto& entity : next->m_Entities) {
+        auto& target = entity.Target;
+        const auto found = nodes.find(IdentityKey(entity.Placement));
+        if (found == nodes.end()) {
+            error = "population placement is absent from contextual IPL ground graph";
+            return {};
+        }
+        const auto& node = *found->second;
+        const auto graphMetadata = catalog.Metadata(node), currentMetadata = metadata.Query(entity.Placement);
+        if (!node.Identity.Matches(entity.Placement) || node.Placement.Position != entity.Placement.Position ||
+            node.Placement.Quaternion != entity.Placement.Quaternion ||
+            node.Placement.Flags != entity.Placement.Flags || node.Placement.Lod != entity.Placement.Lod ||
+            graphMetadata.Status != NativeWorldInfoStatus::Ready || !graphMetadata.Model ||
+            currentMetadata.Status != NativeWorldInfoStatus::Ready || !currentMetadata.Model ||
+            graphMetadata.Model->InitialClass != currentMetadata.Model->InitialClass ||
+            graphMetadata.Model->Kind != currentMetadata.Model->Kind ||
+            graphMetadata.Model->ObjectInfo != currentMetadata.Model->ObjectInfo ||
+            graphMetadata.Model->DrawDistance != currentMetadata.Model->DrawDistance) {
+            error = "contextual IPL ground graph disagrees with prepared source metadata";
+            return {};
+        }
+        entity.BindingMayChange = reboundModels.contains(node.Identity.ModelId) ||
+            (target.Model && reboundBindings.contains(target.Model.get()));
+        entity.DrawDistanceMayChange = mutableDrawModels.contains(node.Identity.ModelId);
+        target.CollisionModelKnown = target.Model && target.Model->Unsupported.empty() &&
+            target.Model->Version >= 1 && target.Model->Version <= 4 && !entity.BindingMayChange;
+        const bool supportedHeader = target.Model && target.Model->Unsupported.empty() &&
+            target.Model->Version >= 1 && target.Model->Version <= 4;
+        const auto& potential = potentialColliders.at(node.Identity.ModelId);
+        entity.PotentialColliderHeadersKnown = !potential.Unknown;
+        for (const auto& [pointer, owner] : potential.Headers) {
+            (void)pointer;
+            entity.PotentialColliderHeaders.push_back(owner);
+        }
+        const bool provenNoVolumeConstructor = supportedHeader && !potential.Unknown && potential.Headers.empty();
+        if ((!entity.BindingMayChange && target.CollisionModelKnown) || provenNoVolumeConstructor) {
+            const bool hasVolumes = target.Model->Version == 1 ?
+                (!target.Model->Spheres.empty() || !target.Model->Boxes.empty() || !target.Model->Faces.empty()) :
+                (target.Model->Flags & 2u) != 0;
+            target.UsesCollision = hasVolumes ? Known::Yes : Known::No;
+        } else {
+            // A later instance of a shared model may be constructed after a
+            // LinkLods COL reassignment. Its old empty/no-volume header is not
+            // proof that the effective source constructor disables collision.
+            target.UsesCollision = Known::Unknown;
+        }
+        // LinkLods removes a child only in its count>1 branch. It cannot
+        // remove the last child, so an initial nonzero count stays nonzero
+        // at every visit (the byte-wrap case was rejected above). Binary
+        // children already increment the parent in LoadIplBoundingBox;
+        // text children do so in LinkLods' first pass. This proves the text
+        // parent's collision-disabled BigBuilding state without guessing
+        // model aliases or cross-archive encounter order.
+        entity.ProvenInitialBigBuilding = !node.Identity.Binary && !node.Children.empty();
+        if (target.VerifiedClassification && target.SourceEffectiveTransformKnown) {
+            entity.Diagnostic = {};
+            if (entity.BindingMayChange) {
+                entity.Diagnostic = Diagnostic(Issue::TextLodState, target.Identity,
+                    "contextual IPL parent can rebind this shared model COL; effective owner unresolved");
+            } else if (!target.CollisionModelKnown) {
+                entity.Diagnostic = Diagnostic(Issue::CollisionBinding, target.Identity,
+                    "contextual IPL graph retains an unresolved constructor COL binding");
+            }
+        }
+    }
+    next->m_InitialLodMultiplier = inputs.LodMultiplier;
+    error.clear();
     return next;
 }
 
@@ -124,6 +290,9 @@ std::shared_ptr<const NativeWorldGround> NativeWorldGround::PreparePopulation(
         possibleLodModels.insert(p.ModelId);
         if (const auto it = models.find(IdentityKey(p)); it != models.end() && it->second->Model)
             possibleLodBindings.insert(it->second->Model.get());
+        if (const auto empty = bindings.EmptyBindings.find(ModelKey(p.Model));
+            empty != bindings.EmptyBindings.end() && empty->second)
+            possibleLodBindings.insert(empty->second.get());
     }
     for (const auto& p : population.Instances) {
         if (!seen.insert(IdentityKey(p)).second) { error = "duplicate population source/record/binary identity"; return {}; }
@@ -135,6 +304,19 @@ std::shared_ptr<const NativeWorldGround> NativeWorldGround::PreparePopulation(
         if (const auto it = models.find(IdentityKey(p)); it != models.end()) {
             if (!t.Identity.Matches(it->second->Placement)) { error = "COL binding model identity mismatch"; return {}; }
             initial.Model = it->second->Model;
+        } else if (const auto empty = bindings.EmptyBindings.find(ModelKey(p.Model));
+                   empty != bindings.EmptyBindings.end()) {
+            const auto& model = empty->second;
+            if (!model || !model->Empty || !model->Unsupported.empty() ||
+                model->Version < 1 || model->Version > 4 || !model->Spheres.empty() ||
+                !model->Boxes.empty() || !model->Faces.empty() || !Finite(model->Min) ||
+                !Finite(model->Max) || !Finite(model->BoundCenter) ||
+                !std::isfinite(model->BoundRadius) || model->BoundRadius < 0 ||
+                model->Min[0] > model->Max[0] || model->Min[1] > model->Max[1] || model->Min[2] > model->Max[2]) {
+                error = "invalid primitive-empty source COL binding";
+                return {};
+            }
+            initial.Model = model;
         }
         t = NativeSourceGround::BindInitialMetadata(initial,info,true);
         if (info.Model) e.DrawDistance = info.Model->DrawDistance;
@@ -152,7 +334,8 @@ std::shared_ptr<const NativeWorldGround> NativeWorldGround::PreparePopulation(
         const auto hasVolumes = t.Model && (t.Model->Version == 1 ?
             (!t.Model->Spheres.empty() || !t.Model->Boxes.empty() || !t.Model->Faces.empty()) : (t.Model->Flags & 2u) != 0);
         const auto sourceHeaderKnown = t.Model && t.Model->Unsupported.empty() && t.Model->Version >= 1 && t.Model->Version <= 4;
-        t.UsesCollision = sourceHeaderKnown ? (hasVolumes ? Known::Yes : Known::No) : Known::Unknown;
+        t.UsesCollision = sourceHeaderKnown && !e.BindingMayChange ?
+            (hasVolumes ? Known::Yes : Known::No) : Known::Unknown;
         t.BigBuilding = p.Binary ? Known::No : Known::Unknown;
         t.NormalSector = p.Binary ? Known::Yes : Known::Unknown;
         // LinkLods is deliberately not guessed from names, bounds, Lod==-1 or
@@ -182,6 +365,8 @@ NativeWorldGroundPublication NativeWorldGround::Publish(const NativeWorldGroundC
     const auto fail = [&](Issue issue, const char* why) { publication.Diagnostics.push_back(Diagnostic(issue,{},why)); return publication; };
     if (commit.MetadataRevision != m_MetadataRevision)
         return fail(Issue::StaleCommit,"metadata revision differs from immutable prepared population metadata");
+    if (m_InitialLodMultiplier && commit.LodDistanceMultiplier != m_InitialLodMultiplier)
+        return fail(Issue::StaleCommit,"initial contextual IPL LOD profile differs from prepared source state");
     if (!commit.SourceCollision || !std::isfinite(x) || !std::isfinite(y) || x < -3000 || x >= 3000 || y < -3000 || y >= 3000 ||
         !std::isfinite(commit.X) || !std::isfinite(commit.Y) || !std::isfinite(commit.Radius) || commit.Radius <= 0 ||
         (commit.LodDistanceMultiplier && (!std::isfinite(*commit.LodDistanceMultiplier) || *commit.LodDistanceMultiplier <= 0)))
@@ -207,6 +392,7 @@ NativeWorldGroundPublication NativeWorldGround::Publish(const NativeWorldGroundC
     // single-sector list performs the source scan-code dedup structurally.
     for (size_t index = m_Entities.size(); index-- > 0;) {
         const auto& e = m_Entities[index]; auto t = e.Target; auto diagnostic = e.Diagnostic;
+        bool constructorHeaderRetained = true;
         if (t.VerifiedClassification && t.EffectiveClass == Class::Other) continue;
         if (t.InWorld == Known::No) continue;
         const auto* override = commit.SourceCollision->Overrides ? commit.SourceCollision->Overrides->Find(e.Placement) : nullptr;
@@ -216,11 +402,55 @@ NativeWorldGroundPublication NativeWorldGround::Publish(const NativeWorldGroundC
             // empty-COL or SetupBigBuilding flags by merely saying enabled=true.
             if (!override->CollisionEnabled) t.UsesCollision = Known::No;
         }
-        if (!e.Placement.Binary && commit.LodDistanceMultiplier && e.DrawDistance &&
-            *commit.LodDistanceMultiplier * *e.DrawDistance > 300.0f) {
+        if (e.ProvenInitialBigBuilding || (!e.Placement.Binary && !e.DrawDistanceMayChange &&
+            commit.LodDistanceMultiplier && e.DrawDistance &&
+            *commit.LodDistanceMultiplier * *e.DrawDistance > 300.0f)) {
             t.BigBuilding = Known::Yes; t.NormalSector = Known::No; t.UsesCollision = Known::No;
         }
+        // An empty header still controls UsesCollision and GetBoundRect. It is
+        // usable only when this exact publication retains the same owner. Do
+        // not use old bounds to cull an absent/changed constructor binding.
+        if (t.Model && t.Model->Empty && t.BigBuilding != Known::Yes) {
+            const auto instance = committed.find(IdentityKey(e.Placement));
+            const auto empty = commit.SourceCollision->EmptyBindings.find(ModelKey(e.Placement.Model));
+            const bool retained = (instance != committed.end() &&
+                t.Identity.Matches(instance->second->Placement) && instance->second->Model == t.Model) ||
+                (empty != commit.SourceCollision->EmptyBindings.end() && empty->second == t.Model);
+            if (!retained) {
+                constructorHeaderRetained = false;
+                t.Model.reset();
+                t.CollisionModelKnown = false;
+                if (!override || override->CollisionEnabled) t.UsesCollision = Known::Unknown;
+                diagnostic = Diagnostic(Issue::CommittedGeometry,t.Identity,
+                    "primitive-empty constructor header absent or changed in committed source COL owner");
+            }
+        }
         if (t.UsesCollision == Known::No || t.BigBuilding == Known::Yes) continue;
+        if (constructorHeaderRetained && e.BindingMayChange && e.PotentialColliderHeadersKnown &&
+            !e.PotentialColliderHeaders.empty() && t.SourceEffectiveTransformKnown) {
+            bool outsideEveryPossibleCollider = true;
+            for (const auto& header : e.PotentialColliderHeaders) {
+                // An enabled but primitive-empty COL cannot produce a line
+                // hit. Keep the constructor flag distinct from that fact.
+                if (header->Empty) continue;
+                auto rect = SourceRect(*header,t.Transform,override ? nullptr : &e.Placement);
+                if (!std::ranges::all_of(rect, [](float value) { return std::isfinite(value); })) {
+                    outsideEveryPossibleCollider = false;
+                    break;
+                }
+                rect[0] = std::max(rect[0],-3000.0f); rect[1] = std::max(rect[1],-3000.0f);
+                if (rect[2] >= 3000) rect[2] = 2999;
+                if (rect[3] >= 3000) rect[3] = 2999;
+                if (rect[0] <= rect[2] && rect[1] <= rect[3] &&
+                    rect[2] >= -3000 && rect[3] >= -3000 && rect[0] < 3000 && rect[1] < 3000 &&
+                    sx >= Sector(rect[0]) && sx <= Sector(rect[2]) &&
+                    sy >= Sector(rect[1]) && sy <= Sector(rect[3])) {
+                    outsideEveryPossibleCollider = false;
+                    break;
+                }
+            }
+            if (outsideEveryPossibleCollider) continue;
+        }
         if (t.Model && t.Model->Unsupported.empty() && t.Model->Version >= 1 && t.Model->Version <= 4 &&
             !e.BindingMayChange && t.SourceEffectiveTransformKnown) {
             auto rect = SourceRect(*t.Model,t.Transform,override ? nullptr : &e.Placement);
@@ -236,7 +466,8 @@ NativeWorldGroundPublication NativeWorldGround::Publish(const NativeWorldGroundC
                 if (sx < Sector(rect[0]) || sx > Sector(rect[2]) || sy < Sector(rect[1]) || sy > Sector(rect[3])) continue;
             }
         }
-        if (!e.Placement.Binary && !e.BindingMayChange && commit.LodDistanceMultiplier && e.DrawDistance &&
+        if (!e.Placement.Binary && !e.BindingMayChange && !e.DrawDistanceMayChange &&
+            commit.LodDistanceMultiplier && e.DrawDistance &&
             *commit.LodDistanceMultiplier * *e.DrawDistance <= 300.0f) {
             // No incoming ordinal even in the conservative all-file superset.
             t.BigBuilding = Known::No; t.NormalSector = Known::Yes;
@@ -244,7 +475,11 @@ NativeWorldGroundPublication NativeWorldGround::Publish(const NativeWorldGroundC
         if (diagnostic.Issue == Issue::None && t.BigBuilding == Known::Unknown)
             diagnostic = Diagnostic(Issue::TextLodState,t.Identity,"FileLoader::LinkLods inbound children/collision-model reassignment and camera multiplier not committed; Lod==-1 is not proof of normal sector");
         const auto found = committed.find(IdentityKey(e.Placement));
-        if (t.Model && (found == committed.end() || !t.Identity.Matches(found->second->Placement) || found->second->Model != t.Model)) {
+        const auto empty = commit.SourceCollision->EmptyBindings.find(ModelKey(e.Placement.Model));
+        const bool retainedEmpty = t.Model && t.Model->Empty &&
+            empty != commit.SourceCollision->EmptyBindings.end() && empty->second == t.Model;
+        if (t.Model && !retainedEmpty &&
+            (found == committed.end() || !t.Identity.Matches(found->second->Placement) || found->second->Model != t.Model)) {
             // Full-source transform membership can differ from normalized COL
             // window membership. Never borrow uncommitted geometry for a hit.
             t.CollisionModelKnown = false;
