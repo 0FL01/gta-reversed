@@ -86,6 +86,7 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
         app/platform/linux/NativePathGraph.cpp
         app/platform/linux/NativeSourceEventFlow.cpp
         app/platform/linux/NativePopulationRuntime.cpp
+        app/platform/linux/NativeAmbientPedPolicy.cpp
         app/platform/linux/NativeCombatRuntime.cpp
         app/platform/linux/NativeWantedRuntime.cpp
         app/platform/linux/NativeRestartLifecycle.cpp
@@ -139,6 +140,7 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
             app/platform/linux/NativeLodCatalog.cpp
             app/platform/linux/NativeWorldGround.cpp
             app/platform/linux/NativeDynamicSectorLists.cpp
+            app/platform/linux/NativeAmbientPedPolicy.cpp
             app/platform/linux/NativeSourceGround.cpp
             PROPERTIES COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-Wall;-Wextra;-Wpedantic"
         )

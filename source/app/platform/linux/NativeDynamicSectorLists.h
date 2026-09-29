@@ -28,8 +28,8 @@ struct NativeDynamicSectorQuery {
     bool operator==(const NativeDynamicSectorQuery&) const = default;
 };
 
-// Replays CPhysical::Add/Remove and CWorld's vehicle/ped repeat lists from explicit
-// owner events with already source-effective matrices and COL bounds. A snapshot
+// Replays regular (non-BigBuilding) CPhysical::Add/Remove and CWorld's vehicle/ped
+// repeat lists from explicit owner events with source-effective matrices and COL bounds. A snapshot
 // sorted by pool slot is NOT a substitute for these events. This owner does not
 // generate population or certify its completeness. Its 500-link limit is only
 // the shared source allocator's upper bound; unrelated object allocations are
@@ -57,7 +57,7 @@ private:
     };
     struct Entry {
         NativeLiveEntityBound Bound;
-        std::array<int, 4> Sectors{}; // minX, minY, maxX, maxY after source clamp
+        std::array<int, 4> Sectors{}; // minX, minY, maxX, maxY; physical path does not clamp
     };
 
     void AddLinks(NativeDynamicEntityKey, const Entry&);
