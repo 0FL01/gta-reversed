@@ -40,6 +40,8 @@ struct NativeAmbientPedSelectionInput {
 
 struct NativeAmbientPedSelection {
     std::int32_t PedType = -1;
+    // For PedType==6 this is the CCopPed constructor's eCopType key, NOT a
+    // model-info ID. Source ChoosePolicePedOccupation returns CITYCOP (zero).
     std::int32_t Model = -1;
     bool operator==(const NativeAmbientPedSelection&) const = default;
 };

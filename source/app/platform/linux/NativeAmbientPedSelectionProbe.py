@@ -44,6 +44,7 @@ pe = pefile.PE(str(game / 'gta-sa.exe'))
 assert pe.OPTIONAL_HEADER.ImageBase == 0x400000
 function_hash = hashlib.sha256(pe.get_data(0x62d4d0 - 0x400000, 0x4e6)).hexdigest()
 assert function_hash == 'a2912c529b1fd5d70ea13b8db8f92fdf60e89db40ea27bae2810b5c814f7e632', 'retail selector changed'
+assert pe.get_data(0x62e920 - 0x400000, 3) == bytes.fromhex('33c0c3'), 'CITYCOP helper changed'
 image = pe.get_memory_mapped_image()
 uc = Uc(UC_ARCH_X86, UC_MODE_32)
 uc.mem_map(0x400000, (len(image) + 0xfff) & ~0xfff)
@@ -56,7 +57,7 @@ def write(address, fmt, *values):
 def read_int(address):
     return struct.unpack('<i', uc.mem_read(address, 4))[0]
 
-for address in (0x853e0c, 0x446950, 0x62e920, 0x62d160, 0x62ef20, 0x630b50):
+for address in (0x853e0c, 0x446950, 0x62d160, 0x62ef20, 0x630b50):
     uc.mem_write(address, b'\xc3')
 uc.mem_write(0x853e30, bytes.fromhex(
     '83ec0c d93c24 668b0424 660d000c 6689442402 d96c2402 '
@@ -72,7 +73,8 @@ def hook(machine, address, size, _):
         machine.reg_write(UC_X86_REG_EAX, int(state['profile'] == 12))
     elif address == 0x62e920:
         state['police'] += 1
-        machine.reg_write(UC_X86_REG_EAX, 280)
+        # Leave the original xor-eax/ret body intact: zero is eCopType CITYCOP,
+        # not MODEL_PLAYER and not a preselected loaded model280.
     elif address == 0x62d160:
         state['gang'] += 1
         machine.reg_write(UC_X86_REG_EAX, 0 if state['mode'] == 2 else 7)

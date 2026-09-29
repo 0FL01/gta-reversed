@@ -17,7 +17,7 @@ struct Models final : NativeAmbientPedModelObservations {
     bool Police(NativeSourceRngRef, std::int32_t& model) noexcept override {
         ++PoliceCalls;
         if (Mode == 5) return false;
-        model = 280;
+        model = 0; // Source CITYCOP constructor key, not an invented loaded ID.
         return true;
     }
     bool Gang(NativeSourceRngRef, NativeAmbientPedSelection& out) noexcept override {
@@ -125,6 +125,12 @@ int main() {
     Check(NativeSelectAmbientPed(input, rng.Reference(), models, out) ==
         NativeAmbientPedSelectionStatus::InvalidInput && rng.Inspect().Value == before,
         "invalid non-station inputs reject before deficit draws");
+    input.TargetCivilian = 0;
+    input.TargetCop = 20;
+    models.Mode = 0;
+    Check(NativeSelectAmbientPed(input, rng.Reference(), models, out) ==
+        NativeAmbientPedSelectionStatus::Selected && out == NativeAmbientPedSelection{6, 0},
+        "CITYCOP is a constructor key, never a player model or model280 fallback");
     std::printf("native-ambient-ped-selection-ok checks=%d cases=%u model-authority=explicit birth=unowned census=incomplete\n",
         s_Checks, caseId);
 }

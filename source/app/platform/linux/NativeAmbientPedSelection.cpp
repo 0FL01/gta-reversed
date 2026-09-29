@@ -22,7 +22,7 @@ NativeAmbientPedSelectionStatus ChoosePolice(NativeSourceRngRef rng,
     NativeAmbientPedSelection candidate{6, -1};
     if (!observations.Police(rng, candidate.Model))
         return NativeAmbientPedSelectionStatus::UnsupportedModelObservation;
-    if (candidate.Model <= 0) return NativeAmbientPedSelectionStatus::InvalidInput;
+    if (candidate.Model < 0) return NativeAmbientPedSelectionStatus::InvalidInput;
     out = candidate;
     return NativeAmbientPedSelectionStatus::Selected;
 }
