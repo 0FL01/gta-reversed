@@ -79,6 +79,9 @@ public:
 
     std::size_t CarGroups() const { return m_Groups.size(); }
     std::size_t CycleRows() const { return m_Rows.size(); }
+    // Borrow immutable authored membership from this existing startup reader.
+    // Failure retains out; membership is not a loaded/streaming observation.
+    bool ObserveGroupModels(std::uint32_t group, std::span<const std::int32_t>& out) const noexcept;
 private:
     struct Model {
         std::int32_t Id = -1;

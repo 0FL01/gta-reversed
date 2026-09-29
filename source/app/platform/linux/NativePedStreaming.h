@@ -5,6 +5,7 @@
 #include "NativeSourceRng.h"
 
 struct NativePopulationCycleObservation;
+class NativeCarGeneratorPopulation;
 
 struct NativePedStreamModel {
     std::int32_t Model = -1;
@@ -43,7 +44,8 @@ enum class NativePedStreamStatus {
     Selected, NoSelection, UnknownZone, UnknownSlots, UnknownGroup,
     UnknownModel, UnknownRng, InvalidInput, InvalidDistribution, QualifiedGroups, PlannedSlots,
     ZonePhaseComplete, UnknownCheat, UnknownReferences, QualifiedCycleInput,
-    GangPhaseComplete, UnknownRequestedGangs
+    GangPhaseComplete, UnknownRequestedGangs, GangMaskPhaseComplete,
+    UnknownGangDemand, UnknownGangCars, UnknownStreaming, UnknownGangMember
 };
 
 struct NativePedRequestedSlots {
@@ -180,3 +182,58 @@ struct NativePedGangStreamEffects {
 // unavailable later gang retains advanced state/intents, not a replayable call.
 NativePedStreamStatus NativeAdvancePedGangRequests(const NativePedGangStreamInput&,
     NativePedGangStreamState&, NativePedGangStreamEffects& out);
+
+struct NativePedGangCarModel {
+    std::int32_t Model = -1;
+    bool StreamingKnown = false, Loaded = false;
+};
+struct NativePedGangCarGroup {
+    bool Known = false;
+    std::uint16_t Count = 0;
+    std::array<NativePedGangCarModel, 23> Models{};
+};
+// Reuse cargrp.dat's existing owner, including source order/duplicates/cap.
+// The returned identities deliberately have StreamingKnown=false.
+NativePedStreamStatus NativeQualifyPedGangCarGroups(const NativeCarGeneratorPopulation&,
+    std::array<NativePedGangCarGroup, 10>& out);
+struct NativePedGangLoadedCars {
+    bool Known = false;
+    std::uint16_t Count = 0;
+};
+struct NativePedGangMaskInput {
+    bool ZoneKnown = false, HasZone = false;
+    // Final zone-strength/streets-cheat/GangWars demand, from its separate owner.
+    // Unknown GangWars output is NOT equivalent to no attack or a zero mask.
+    bool DemandKnown = false;
+    std::uint16_t Wanted = 0;
+    bool MemberKnown = false;
+    std::int32_t CurrentMember = 0;
+    std::array<NativePedStreamGroup, 10> PedGroups{};
+    std::array<NativePedGangCarGroup, 10> CarGroups{};
+    std::array<NativePedGangLoadedCars, 10> LoadedCars{};
+};
+struct NativePedGangMaskState {
+    bool Known = false;
+    // Original ms_loadedGangs/ms_loadedGangCars are REQUEST masks, not readiness.
+    std::uint16_t RequestedPeds = 0, RequestedCars = 0;
+    bool operator==(const NativePedGangMaskState&) const = default;
+};
+enum class NativePedGangMaskEffectKind { MakeModelAndTxdDeletable, RequestKeepInMemory };
+struct NativePedGangMaskEffect {
+    NativePedGangMaskEffectKind Kind{};
+    std::int32_t Model = -1;
+    bool operator==(const NativePedGangMaskEffect&) const = default;
+};
+struct NativePedGangMaskEffects {
+    std::array<NativePedGangMaskEffect, 220> Effects{};
+    std::uint16_t Count = 0;
+};
+
+// StreamZoneModels_Gangs with an explicitly observed final demand and stable
+// per-call car-group counts. Preserve the original inverted car-count guard:
+// a NONEMPTY loaded gang-car group skips the car branch, including retirement.
+// Ordered prefixes and consumed RNG survive unavailable later observations;
+// fulfill them before exposing advanced masks, never replay as a fresh call.
+// No loader, actor, gang-war controller or census completeness is authorized.
+NativePedStreamStatus NativeAdvancePedGangMask(const NativePedGangMaskInput&,
+    NativeSourceRngRef, NativePedGangMaskState&, NativePedGangMaskEffects& out);

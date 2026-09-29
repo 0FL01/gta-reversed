@@ -349,6 +349,146 @@ void GangPhases() {
     Check(NativeAdvancePedGangRequests(input, state, effects) == NativePedStreamStatus::InvalidInput &&
         state == invalid && !effects.Count, "invalid source member cursor cannot wrap into fabricated authority");
 }
+
+NativePedGangMaskInput MaskFixture(std::uint16_t base, int profile, int pedCount, int carCount,
+    std::int32_t current) {
+    NativePedGangMaskInput input;
+    input.ZoneKnown = input.DemandKnown = input.MemberKnown = true;
+    input.HasZone = profile != 4;
+    input.Wanted = profile == 5 ? std::uint16_t(base | 0x2ff) : base;
+    input.CurrentMember = current;
+    input.PedGroups = GangFixture(0, std::uint16_t(pedCount)).Groups;
+    for (std::size_t gang = 0; gang < 10; ++gang) {
+        input.LoadedCars[gang] = {true, std::uint16_t(profile == 2 ? 23 : (profile == 1 && gang % 3 == 0))};
+        auto& group = input.CarGroups[gang];
+        group.Known = true;
+        group.Count = std::uint16_t(carCount);
+        for (std::size_t slot = 0; slot < group.Count; ++slot)
+            group.Models[slot] = {std::int32_t(500 + gang * 23 + slot), true,
+                profile == 3 || (profile == 1 && (gang + slot) % 2 == 0)};
+    }
+    return input;
+}
+
+void MaskCase(std::uint16_t base, int profile, int pedCount, int carCount, std::int32_t current) {
+    const auto input = MaskFixture(base, profile, pedCount, carCount, current);
+    NativePedGangMaskState state{true,
+        std::uint16_t(profile == 1 ? (~base & 1023) : profile == 2 ? base : profile == 3 ? 0x83ff : 0),
+        std::uint16_t(profile == 1 ? base >> 1 : profile == 3 ? 0x8000 : 0)};
+    const auto before = state;
+    const auto seed = std::uint32_t(base) * 0x9e3779b9u + std::uint32_t(profile * 21 + current);
+    NativeSourceRng rng;
+    Check(rng.SeedOnce(seed) == NativeSourceRngStatus::Ready, "mask fixture uses one borrowed CRT stream");
+    NativePedGangMaskEffects effects;
+    Check(NativeAdvancePedGangMask(input, rng.Reference(), state, effects) ==
+        NativePedStreamStatus::GangMaskPhaseComplete, "qualified gang mask phase completes");
+    if (input.HasZone)
+        Check(state.RequestedCars == input.Wanted && (state.RequestedPeds & 1023) == input.Wanted,
+            "request bits track source intents, not asset readiness");
+    else Check(state == before && !effects.Count && !rng.Inspect().Value->DrawCount, "absent zone leaves all masks and RNG");
+    const auto provenance = *rng.Inspect().Value;
+    std::printf("MASK %u %d %d %d %d %u %u %u %u %u %llu %u", unsigned(base), profile, pedCount,
+        carCount, current, seed, unsigned(before.RequestedPeds), unsigned(before.RequestedCars),
+        unsigned(state.RequestedPeds), unsigned(state.RequestedCars),
+        static_cast<unsigned long long>(provenance.DrawCount), provenance.State);
+    std::printf(" %u", unsigned(effects.Count));
+    for (std::size_t i = 0; i < effects.Count; ++i)
+        std::printf(" %d %d", int(effects.Effects[i].Kind), effects.Effects[i].Model);
+    std::printf("\n");
+}
+
+void GangMasks() {
+    constexpr int counts[]{1, 2, 8, 21};
+    constexpr int carCounts[]{1, 4, 23};
+    for (std::uint16_t mask = 0; mask < 1024; ++mask)
+        for (int profile = 0; profile < 6; ++profile)
+            MaskCase(mask, profile, counts[mask % 4], carCounts[mask % 3], mask % 21);
+    for (std::int32_t current = 0; current < 21; ++current)
+        for (const auto count : counts)
+            for (int profile = 0; profile < 4; ++profile) MaskCase(0x155, profile, count, 23, current);
+    MaskCase(0, 3, 21, 23, 20); // All 210 retirement intents, original car retirement is empty.
+
+    auto input = MaskFixture(1, 0, 2, 1, 0);
+    NativePedGangMaskState state{true, 0, 0};
+    NativePedGangMaskEffects effects;
+    NativeSourceRng rng;
+    Check(rng.SeedOnce(0) == NativeSourceRngStatus::Ready, "mask guard shared seed");
+    input.ZoneKnown = false;
+    Check(NativeAdvancePedGangMask(input, rng.Reference(), state, effects) == NativePedStreamStatus::UnknownZone &&
+        !effects.Count && !state.RequestedPeds, "unknown zone not verified absent zone");
+    input.ZoneKnown = true;
+    input.DemandKnown = false;
+    Check(NativeAdvancePedGangMask(input, rng.Reference(), state, effects) == NativePedStreamStatus::UnknownGangDemand &&
+        !effects.Count && !rng.Inspect().Value->DrawCount, "unknown war policy not a default no-attack mask");
+    input.HasZone = false;
+    state.Known = false;
+    Check(NativeAdvancePedGangMask(input, {}, state, effects) == NativePedStreamStatus::GangMaskPhaseComplete,
+        "known no-zone precedes demand and requested-mask authority");
+    input.HasZone = input.DemandKnown = true;
+    Check(NativeAdvancePedGangMask(input, {}, state, effects) == NativePedStreamStatus::UnknownRequestedGangs,
+        "unknown request masks never default to empty");
+    state.Known = true;
+    input.MemberKnown = false;
+    Check(NativeAdvancePedGangMask(input, rng.Reference(), state, effects) == NativePedStreamStatus::UnknownGangMember &&
+        !effects.Count && !state.RequestedPeds, "unknown source member never becomes zero");
+    input.MemberKnown = true;
+    input.CurrentMember = 21;
+    Check(NativeAdvancePedGangMask(input, rng.Reference(), state, effects) == NativePedStreamStatus::InvalidInput &&
+        !effects.Count && !state.RequestedPeds, "invalid member cannot advance a requested mask");
+    input.CurrentMember = 0;
+    input.LoadedCars[0].Known = false;
+    Check(NativeAdvancePedGangMask(input, rng.Reference(), state, effects) == NativePedStreamStatus::UnknownGangCars &&
+        state.RequestedPeds == 1 && !state.RequestedCars && effects.Count == 2,
+        "ped requests and bit publication precede unknown gang-car count");
+    state = {true, 0, 0};
+    input.LoadedCars[0].Known = true;
+    input.CarGroups[0].Models[0].StreamingKnown = false;
+    Check(NativeAdvancePedGangMask(input, rng.Reference(), state, effects) == NativePedStreamStatus::UnknownStreaming &&
+        state.RequestedPeds == 1 && !state.RequestedCars && effects.Count == 2 && rng.Inspect().Value->DrawCount == 1,
+        "unknown selected car preserves consumed draw and ped prefix, not fake unready or loaded");
+    state = {true, 0, 0};
+    input.LoadedCars[0].Count = 1;
+    Check(NativeAdvancePedGangMask(input, {}, state, effects) == NativePedStreamStatus::GangMaskPhaseComplete &&
+        effects.Count == 2 && state.RequestedCars == 1,
+        "original nonempty car-count guard skips unknown model/RNG without changing readiness");
+    state = {true, 1, 1};
+    input.LoadedCars[0].Known = false;
+    input.PedGroups[0].Known = false;
+    Check(NativeAdvancePedGangMask(input, {}, state, effects) == NativePedStreamStatus::GangMaskPhaseComplete && !effects.Count,
+        "identical request masks early-return before groups and loaded-car observations");
+    state = {true, 0, 0};
+    input = MaskFixture(1, 0, 2, 1, 0);
+    input.CarGroups[0].Count = 0;
+    Check(NativeAdvancePedGangMask(input, rng.Reference(), state, effects) == NativePedStreamStatus::InvalidInput &&
+        state.RequestedPeds == 1 && !state.RequestedCars && rng.Inspect().Value->DrawCount == 2,
+        "empty car group rejects original modulo-zero after the consumed rand prefix");
+    input = MaskFixture(3, 0, 1, 1, 0);
+    state = {true, 0, 0};
+    input.PedGroups[1].Known = false;
+    Check(NativeAdvancePedGangMask(input, rng.Reference(), state, effects) == NativePedStreamStatus::UnknownGroup &&
+        state.RequestedPeds == 1 && !state.RequestedCars && effects.Count == 3 &&
+        effects.Effects[0].Model == effects.Effects[1].Model,
+        "same-model double request is not deduplicated; later unknown preserves interleaved car intent");
+    input.Wanted = 1024;
+    Check(NativeAdvancePedGangMask(input, rng.Reference(), state, effects) == NativePedStreamStatus::InvalidInput &&
+        !effects.Count, "unqualified demand bits cannot refer to non-gang groups");
+    input = MaskFixture(1, 0, 2, 1, 0);
+    state = {true, 0, 0};
+    Check(NativeAdvancePedGangMask(input, {}, state, effects) == NativePedStreamStatus::UnknownRng &&
+        state.RequestedPeds == 1 && effects.Count == 2 && !state.RequestedCars,
+        "missing RNG preserves authentic preceding requests, not a seeded substitute");
+    input.PedGroups[0].Count = 22;
+    state = {true, 0, 0};
+    Check(NativeAdvancePedGangMask(input, {}, state, effects) == NativePedStreamStatus::InvalidInput && !effects.Count,
+        "oversized ped group never overruns its source allocation");
+    input = MaskFixture(1, 0, 2, 1, 0);
+    input.CarGroups[0].Count = 24;
+    Check(NativeAdvancePedGangMask(input, rng.Reference(), state, effects) == NativePedStreamStatus::InvalidInput &&
+        effects.Count == 2 && state.RequestedPeds == 1, "oversized car group preserves ped prefix without a draw");
+    input.LoadedCars[0].Count = 24;
+    Check(NativeAdvancePedGangMask(input, rng.Reference(), state, effects) == NativePedStreamStatus::InvalidInput &&
+        !effects.Count, "loaded gang group count cannot exceed 23 members");
+}
 }
 
 int main() {
@@ -357,5 +497,6 @@ int main() {
     SlotPlans();
     ZonePhases();
     GangPhases();
-    std::printf("native-ped-streaming-ok checks=%zu cases=3072 slot-plans=256 zone-phases=2048 gang-phases=4328 attempts=10 slots=requested-only gang-state=requested-fixtures census=incomplete\n", s_Checks);
+    GangMasks();
+    std::printf("native-ped-streaming-ok checks=%zu cases=3072 slot-plans=256 zone-phases=2048 gang-phases=4328 gang-masks=6481 attempts=10 slots=requested-only gang-state=requested-fixtures census=incomplete\n", s_Checks);
 }

@@ -149,6 +149,13 @@ bool NativeCarGeneratorPopulation::LoadBeforeWorker(const char* gameDir,
     return false;
 }
 
+bool NativeCarGeneratorPopulation::ObserveGroupModels(std::uint32_t group,
+    std::span<const std::int32_t>& out) const noexcept {
+    if (!m_Loaded || group >= m_Groups.size()) return false;
+    out = m_Groups[group];
+    return true;
+}
+
 bool NativeCarGeneratorPopulation::Select(NativeScriptPosition player, std::uint8_t hour,
     bool weekend, std::span<const NativeZonePopulationEntry> zoneStates,
     std::span<const NativeCarLoadedModel> orderedLoadedModels, NativeSourceRngRef rng,

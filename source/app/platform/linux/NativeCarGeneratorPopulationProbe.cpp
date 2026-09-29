@@ -113,6 +113,31 @@ int main(int argc, char** argv) {
     NativePedModelMetadata metadata;
     Check(names.LoadBeforeWorker(argv[1], {}, error) && metadata.LoadBeforeWorker(argv[1], names, error),
         "same complete IDE and ped metadata authority for cycle binding");
+    std::array<NativePedGangCarGroup, 10> gangCars{};
+    Check(NativeQualifyPedGangCarGroups(owner, gangCars) == NativePedStreamStatus::QualifiedGroups,
+        "gang car identities reuse the owned 34-row cargrp reader");
+    for (std::size_t gang = 0; gang < gangCars.size(); ++gang) {
+        std::span<const std::int32_t> source;
+        Check(owner.ObserveGroupModels(std::uint32_t(18 + gang), source) &&
+            gangCars[gang].Known && gangCars[gang].Count == source.size(), "exact source gang car group count");
+        if (rows) std::printf("CAR_GROUP %zu %u", 18 + gang, unsigned(gangCars[gang].Count));
+        for (std::size_t i = 0; i < source.size(); ++i) {
+            Check(gangCars[gang].Models[i].Model == source[i] &&
+                !gangCars[gang].Models[i].StreamingKnown && !gangCars[gang].Models[i].Loaded,
+                "authored car identity and order never imply a loaded or requested model");
+            if (rows) std::printf(" %d", source[i]);
+        }
+        if (rows) std::printf("\n");
+    }
+    const std::int32_t keep[]{777};
+    std::span<const std::int32_t> borrowed = keep;
+    Check(!owner.ObserveGroupModels(34, borrowed) && borrowed.data() == keep,
+        "out-of-range source group retains prior span");
+    NativeCarGeneratorPopulation unknownGroups;
+    const auto priorIdentity = gangCars[0].Models[0].Model;
+    Check(NativeQualifyPedGangCarGroups(unknownGroups, gangCars) == NativePedStreamStatus::UnknownGroup &&
+        gangCars[0].Models[0].Model == priorIdentity && gangCars[0].Known,
+        "unowned car reader cannot publish a fake empty group snapshot");
     auto cycleZones = std::vector<NativeZonePopulationEntry>(zones.Entries().begin(), zones.Entries().end());
     auto cycleZone = std::ranges::find(cycleZones, prior.Zone, &NativeZonePopulationEntry::Label);
     Check(cycleZone != cycleZones.end(), "qualified source zone identity");

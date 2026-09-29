@@ -73,7 +73,36 @@ for line in result.stdout.splitlines():
     assert values[10:] == expected_rows[index], ('source row/order/rescale', fields)
     seen.add(index)
 assert seen == set(range(480))
+models = {}
+in_cars = False
+for raw in Path('/game/data/vehicles.ide').read_text(encoding='latin1').splitlines():
+    raw = raw.split('#', 1)[0].strip()
+    if not raw:
+        continue
+    if raw == 'cars':
+        in_cars = True
+    elif raw == 'end':
+        in_cars = False
+    elif in_cars:
+        fields = raw.replace(',', ' ').split()
+        models[fields[1].lower()] = int(fields[0])
+car_groups = []
+for raw in Path('/game/data/cargrp.dat').read_text(encoding='latin1').splitlines():
+    raw = raw.split('#', 1)[0].split('//', 1)[0].replace(',', ' ').strip()
+    if raw:
+        car_groups.append([models[name.lower()] for name in raw.split()[:23]])
+assert len(car_groups) == 34
+seen_car_groups = set()
+for line in result.stdout.splitlines():
+    fields = line.split()
+    if not fields or fields[0] != 'CAR_GROUP':
+        continue
+    group, count, *ids = map(int, fields[1:])
+    assert 18 <= group < 28 and group not in seen_car_groups
+    assert len(ids) == count and ids == car_groups[group], ('owned gang car membership/order/cap', fields)
+    seen_car_groups.add(group)
+assert seen_car_groups == set(range(18, 28))
 assert result.stdout.splitlines()[-1].startswith('native-loaded-cars-ok ')
 print('population-cycle-source-oracle-ok rows=480 clock-cases=960 regions=3 '
-      'reader=shared source-zone=ELS1a settings=explicit slots=unowned census=incomplete')
+      'gang-car-groups=10 reader=shared source-zone=ELS1a settings=explicit slots=unowned census=incomplete')
 print(result.stdout.splitlines()[-1])

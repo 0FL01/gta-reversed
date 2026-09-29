@@ -47,6 +47,10 @@ slot_hash = hashlib.sha256(pe.get_data(0x40ce10 - 0x400000, 0x250)).hexdigest()
 assert slot_hash == '555539fe76c00e7543195218708300a680889d2cfd8e47d9ebe398cbbc629d27'
 zone_hash = hashlib.sha256(pe.get_data(0x40b0e0 - 0x400000, 0x54b)).hexdigest()
 assert zone_hash == 'd50fc51ffb16c70dd2a674c9fbf05536b64ab2f1c9af41122b8700e1b0eb0562'
+mask_hash = hashlib.sha256(pe.get_data(0x40b630 - 0x400000, 0x5df)).hexdigest()
+assert mask_hash == '0ebf5bdece38676c2e0f30498bed9c50572ed4998804fa8b54737ad4bdd46ca3'
+count_hash = hashlib.sha256(pe.get_data(0x62f660 - 0x400000, 0x13)).hexdigest()
+assert count_hash == 'ceeb1af1a1f9de70fe643654ad33bf7af354e533ded599fa518c7f587da0e814'
 translation = pe.get_data(0x945cc0 - 0x400000, 33 * 3 * 4)
 assert hashlib.sha256(translation).hexdigest() == 'd4649a51706637c3136cf70d24b1a00d68a766f5958b3f6d0d6c0ac755e55900'
 # Compare authored native ordinals, not a duplicate handwritten reference table.
@@ -96,6 +100,19 @@ def random_draw(machine, address, size, _):
             state['events'].append((0 if address == 0x40a060 else 1, slot, model))
             if address == 0x408b00:
                 assert struct.unpack('<I', machine.mem_read(stack + 8, 4))[0] == 8, 'source KEEP_IN_MEMORY flag'
+    elif state.get('mask_mode'):
+        if address == 0x446c00:
+            # Explicit external GangWars observation. The demand controller is
+            # not owned by this request kernel; no hidden no-attack fallback.
+            stack = machine.reg_read(UC_X86_REG_ESP)
+            pointer = struct.unpack('<I', machine.mem_read(stack + 4, 4))[0]
+            wanted = struct.unpack('<I', machine.mem_read(pointer, 4))[0]
+            write(pointer, 'I', wanted | state['war_extra'])
+        elif address == 0x408b00:
+            stack = machine.reg_read(UC_X86_REG_ESP)
+            model, flags = struct.unpack('<iI', machine.mem_read(stack + 4, 8))
+            assert flags == 8, 'source mask transition KEEP_IN_MEMORY flag'
+            state['events'].append((1, model))
     elif state.get('gang_mode'):
         if address == 0x4075e0:
             machine.reg_write(UC_X86_REG_EAX, int(state['cheat']))
@@ -119,6 +136,12 @@ def random_draw(machine, address, size, _):
 
 def zone_flags(machine, access, address, size, value, _):
     instruction = machine.reg_read(UC_X86_REG_EIP)
+    if state.get('mask_mode'):
+        if instruction in (0x40b7cc, 0x40b884):
+            assert size == 1 and (address - 0x95c8a6) % 20 == 0
+            state['events'].append((0 if instruction == 0x40b7cc else 3,
+                                    (address - 0x95c8a6) // 20))
+        return
     if state.get('gang_mode'):
         if instruction in (0x40b46a, 0x40b524):
             assert size == 1 and (address - 0x95c8a6) % 20 == 0
@@ -341,10 +364,71 @@ for line in native.stdout.splitlines():
     assert struct.unpack('<i', uc.mem_read(0x9dd0a8, 4))[0] == (-1 if mode == 0 else 0)
     gang_checks += 1
 assert gang_checks == 4328
+mask_checks = 0
+uc.mem_write(0x446c00, b'\xc3')  # External GangWars demand observation, hooked above.
+for line in native.stdout.splitlines():
+    fields = line.split()
+    if not fields or fields[0] != 'MASK':
+        continue
+    (base, profile, ped_count, car_count, current, seed, peds_before, cars_before,
+     peds_after, cars_after, draws, rng_state, effect_count, *effects) = map(int, fields[1:])
+    assert len(effects) == effect_count * 2
+    write(0xc98fd8, 'I', 0 if profile == 4 else 0x30a0000)
+    write(0x30a0000, '10B', *[255 if base & (1 << gang) else 0 for gang in range(10)])
+    write(0x9e0c83, 'B', int(profile == 5))
+    write(0x95c798, 'H', peds_before)
+    write(0x95c794, 'H', cars_before)
+    write(0x9dd0b0, 'i', current)
+    for gang in range(10):
+        group = ordinals[(gang + 18) * 3]
+        write(0xc9c018 + group * 2, 'h', ped_count)
+        for slot in range(ped_count):
+            model = 10 + gang * 21 + slot
+            header = 0x30b0000 + model * 0x40
+            write(0xc9c6b0 + (group * 21 + slot) * 2, 'H', model)
+            write(0xb12818 + model * 4, 'I', header)
+            write(header + 0xa, 'h', 42)
+            write(0x95c8a6 + model * 20, 'B', 6)
+        loaded_count = 23 if profile == 2 else int(profile == 1 and gang % 3 == 0)
+        # Original CountMembers stops at a NEGATIVE model, not upstream 2000.
+        # Run that pinned routine itself with a stable explicit loaded-group
+        # snapshot. Requests are mocked intents and never mutate these counts.
+        members = [500 + gang * 23 + slot for slot in range(loaded_count)] + [-1] * (23 - loaded_count)
+        write(0xc9bd80 + gang * 46, '23h', *members)
+        write(0xc9bff4 + gang * 2, 'h', car_count)
+        for slot in range(car_count):
+            model = 500 + gang * 23 + slot
+            loaded = profile == 3 or (profile == 1 and (gang + slot) % 2 == 0)
+            write(0xc9c3cc + (gang * 23 + slot) * 2, 'H', model)
+            write(0x95c8b0 + model * 20, 'B', int(loaded))
+    write(0x95c8a6 + 20042 * 20, 'B', 6)
+    state = dict(mask_mode=True, war_extra=512 if profile == 5 else 0, value=seed, draws=0, events=[])
+    stack = 0x3080000
+    write(stack, '2I', 0x30e0000, 0)
+    uc.reg_write(UC_X86_REG_ESP, stack)
+    uc.reg_write(UC_X86_REG_FPCW, 0x37f)
+    uc.emu_start(0x40b630, 0x30e0000, count=500000)
+    assert uc.reg_read(UC_X86_REG_EIP) == 0x30e0000, ('gang-mask instruction cap', fields)
+    actual_peds = struct.unpack('<H', uc.mem_read(0x95c798, 2))[0]
+    actual_cars = struct.unpack('<H', uc.mem_read(0x95c794, 2))[0]
+    expected_events = []
+    for offset in range(0, len(effects), 2):
+        event = tuple(effects[offset:offset + 2])
+        expected_events.append(event)
+        if event[0] == 0:
+            expected_events.append((3, 20042))
+    actual = actual_peds, actual_cars, state['value'], state['draws'], state['events']
+    expected = peds_after, cars_after, rng_state, draws, expected_events
+    assert actual == expected, ('gang masks/ped-car interleave/CRT draws/ordered intents', fields, actual, expected)
+    assert struct.unpack('<i', uc.mem_read(0x9dd0b0, 4))[0] == current
+    mask_checks += 1
+assert mask_checks == 6481
 print('ped-streaming-retail-oracle-ok checks=' + str(checks),
       'group-boundary=strict-less fraction=rand/32768 cursors=preincrement translation=99',
       'slot-plans=' + str(slot_checks), 'zone-phases=' + str(zone_checks),
       'zone-change-timer=299 replacement-timer=300 gang-phases=' + str(gang_checks),
+      'gang-masks=' + str(mask_checks), 'loaded-gang-car-guard=skip-nonempty demand=explicit-war-observation',
       'slots=requested-fixtures census=incomplete', 'function-sha256=' + function_hash,
-      'slot-function-sha256=' + slot_hash, 'zone-function-sha256=' + zone_hash)
+      'slot-function-sha256=' + slot_hash, 'zone-function-sha256=' + zone_hash,
+      'mask-function-sha256=' + mask_hash, 'car-count-function-sha256=' + count_hash)
 print(native.stdout.splitlines()[-1])

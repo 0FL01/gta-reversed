@@ -74,6 +74,87 @@ NativePedStreamStatus NativeQualifyPedGangGroups(const NativePedModelMetadata& m
     return QualifyGroups(metadata, 18, 0, out);
 }
 
+NativePedStreamStatus NativeQualifyPedGangCarGroups(const NativeCarGeneratorPopulation& population,
+    std::array<NativePedGangCarGroup, 10>& out) {
+    std::array<NativePedGangCarGroup, 10> candidate{};
+    for (std::size_t gang = 0; gang < candidate.size(); ++gang) {
+        std::span<const std::int32_t> models;
+        if (!population.ObserveGroupModels(std::uint32_t(18 + gang), models))
+            return NativePedStreamStatus::UnknownGroup;
+        if (models.size() > candidate[gang].Models.size()) return NativePedStreamStatus::InvalidInput;
+        candidate[gang].Known = true;
+        candidate[gang].Count = std::uint16_t(models.size());
+        for (std::size_t i = 0; i < models.size(); ++i) {
+            if (models[i] <= 0 || models[i] >= 20000) return NativePedStreamStatus::UnknownModel;
+            candidate[gang].Models[i].Model = models[i];
+        }
+    }
+    out = candidate;
+    return NativePedStreamStatus::QualifiedGroups;
+}
+
+NativePedStreamStatus NativeAdvancePedGangMask(const NativePedGangMaskInput& input,
+    NativeSourceRngRef rng, NativePedGangMaskState& state, NativePedGangMaskEffects& out) {
+    out = {};
+    if (!input.ZoneKnown) return NativePedStreamStatus::UnknownZone;
+    if (!input.HasZone) return NativePedStreamStatus::GangMaskPhaseComplete;
+    if (!input.DemandKnown) return NativePedStreamStatus::UnknownGangDemand;
+    if (input.Wanted & ~0x3ffu) return NativePedStreamStatus::InvalidInput;
+    if (!state.Known) return NativePedStreamStatus::UnknownRequestedGangs;
+    if (input.Wanted == state.RequestedPeds && input.Wanted == state.RequestedCars)
+        return NativePedStreamStatus::GangMaskPhaseComplete;
+    const auto emit = [&](NativePedGangMaskEffectKind kind, std::int32_t model) {
+        assert(out.Count < out.Effects.size());
+        out.Effects[out.Count++] = {kind, model};
+    };
+    for (std::size_t gang = 0; gang < input.PedGroups.size(); ++gang) {
+        const auto bit = std::uint16_t(1u << gang);
+        const bool wanted = (input.Wanted & bit) != 0;
+        const bool requested = (state.RequestedPeds & bit) != 0;
+        if (wanted != requested) {
+            const auto& group = input.PedGroups[gang];
+            if (!group.Known) return NativePedStreamStatus::UnknownGroup;
+            if (group.Count > group.Models.size()) return NativePedStreamStatus::InvalidInput;
+            if (wanted) {
+                if (!input.MemberKnown) return NativePedStreamStatus::UnknownGangMember;
+                if (input.CurrentMember < 0 || input.CurrentMember > 20 || !group.Count)
+                    return NativePedStreamStatus::InvalidInput;
+                for (std::int32_t offset = 0; offset < 2; ++offset) {
+                    const auto model = group.Models[std::size_t((input.CurrentMember + offset) % group.Count)].Model;
+                    if (model <= 0 || model >= 20000) return NativePedStreamStatus::UnknownModel;
+                    emit(NativePedGangMaskEffectKind::RequestKeepInMemory, model);
+                }
+                state.RequestedPeds |= bit;
+            } else {
+                for (std::size_t slot = 0; slot < group.Count; ++slot) {
+                    const auto model = group.Models[slot].Model;
+                    if (model <= 0 || model >= 20000) return NativePedStreamStatus::UnknownModel;
+                    emit(NativePedGangMaskEffectKind::MakeModelAndTxdDeletable, model);
+                }
+                state.RequestedPeds &= std::uint16_t(~bit);
+            }
+        }
+        const auto& cars = input.LoadedCars[gang];
+        if (!cars.Known) return NativePedStreamStatus::UnknownGangCars;
+        if (cars.Count > 23) return NativePedStreamStatus::InvalidInput;
+        // Literal original branch, NOT the tempting >=1 correction. With a
+        // stable empty snapshot the retirement branch copies zero members.
+        if (cars.Count || !wanted || (state.RequestedCars & bit)) continue;
+        const auto& group = input.CarGroups[gang];
+        if (!group.Known) return NativePedStreamStatus::UnknownGroup;
+        if (group.Count > group.Models.size()) return NativePedStreamStatus::InvalidInput;
+        const auto draw = rng.NextRand15();
+        if (!draw.Value) return NativePedStreamStatus::UnknownRng;
+        if (!group.Count) return NativePedStreamStatus::InvalidInput; // Original divides by zero after rand.
+        const auto& model = group.Models[*draw.Value % group.Count];
+        if (model.Model <= 0 || model.Model >= 20000) return NativePedStreamStatus::UnknownModel;
+        if (!model.StreamingKnown) return NativePedStreamStatus::UnknownStreaming;
+        if (!model.Loaded) emit(NativePedGangMaskEffectKind::RequestKeepInMemory, model.Model);
+    }
+    state.RequestedCars = input.Wanted;
+    return NativePedStreamStatus::GangMaskPhaseComplete;
+}
+
 NativePedStreamStatus NativePickPedModelToStream(const NativePedStreamInput& input,
     NativeSourceRngRef rng, NativePedStreamState& state, NativePedStreamChoice& out) {
     if (!input.ZoneKnown) return NativePedStreamStatus::UnknownZone;
