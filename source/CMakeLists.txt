@@ -86,6 +86,7 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
         app/platform/linux/NativePathGraph.cpp
         app/platform/linux/NativePedCreationCoordinates.cpp
         app/platform/linux/NativeAmbientPedSelection.cpp
+        app/platform/linux/NativeCivilianOccupation.cpp
         app/platform/linux/NativeSourceEventFlow.cpp
         app/platform/linux/NativePopulationRuntime.cpp
         app/platform/linux/NativeAmbientPedPolicy.cpp
@@ -145,6 +146,7 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
             app/platform/linux/NativeAmbientPedPolicy.cpp
             app/platform/linux/NativePedCreationCoordinates.cpp
             app/platform/linux/NativeAmbientPedSelection.cpp
+            app/platform/linux/NativeCivilianOccupation.cpp
             app/platform/linux/NativeSourceGround.cpp
             PROPERTIES COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-Wall;-Wextra;-Wpedantic"
         )
