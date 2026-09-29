@@ -39,6 +39,24 @@ NativeLiveEntityBound VehicleBound(const NativeVehicleRecord& record) {
     entry.WorldCenter = NativeLiveBoundCenter(entry.Transform, entry.Model.Center);
     return entry;
 }
+NativeLiveEntityBound MissionPedBound(const RealtimeScriptHost& host,
+    const NativeScriptPedState& state) {
+    NativeLiveEntityBound entry;
+    entry.Kind = NativeLiveEntityKind::MissionPed;
+    entry.Reference = state.Reference.Value;
+    entry.ModelId = state.ModelId;
+    NativeScriptPosition location = state.Position;
+    if (state.InVehicle) {
+        const auto* vehicle = host.Vehicles().Resolve({state.Vehicle.Value});
+        if (!vehicle || !vehicle->State.InWorld) return entry; // unresolved placement remains Unknown
+        const auto& carPosition = vehicle->State.Matrix.Position;
+        location = {carPosition[0], carPosition[1], carPosition[2]};
+    }
+    entry.Transform.Position = {location.X, location.Y, location.Z};
+    entry.Model = NativeLiveBoundsFromCol(host.Garages().Ped1Collision().get());
+    entry.WorldCenter = NativeLiveBoundCenter(entry.Transform, entry.Model.Center);
+    return entry;
+}
 bool SameExtent(const NativeVehicleProducerExtent& a, const NativeVehicleProducerExtent& b) {
     return a.Owned == b.Owned && a.NativeHostComplete == b.NativeHostComplete &&
         a.SourceParityComplete == b.SourceParityComplete;
@@ -155,10 +173,15 @@ std::shared_ptr<const NativeLiveEntityBounds> NativeLiveEntityBounds::Capture(co
     proof->m_WorldGeneration = residency.Generation();
     proof->m_HostWorldRevision = host.WorldRevision();
     proof->m_PlayerRevision = player->Activity().Revision;
+    proof->m_MissionPedRevision = host.ScriptPeds().Revision();
+    proof->m_MissionPeds = host.ScriptPeds().Active();
     proof->m_Entries.push_back(PlayerBound(host, ped, *player));
     for (std::size_t slot = 0; slot < NativeVehiclePoolCapacity; ++slot) {
         const auto* record = proof->m_Vehicles->AtSlot(slot);
         if (record && record->State.InWorld) proof->m_Entries.push_back(VehicleBound(*record));
+    }
+    for (const auto& missionPed : proof->m_MissionPeds) {
+        if (missionPed.InWorld) proof->m_Entries.push_back(MissionPedBound(host, missionPed));
     }
     error.clear();
     return proof;
@@ -173,12 +196,18 @@ bool NativeLiveEntityBounds::Matches(const RealtimeScriptHost& host, std::uint64
     const auto* player = host.ResolvePed(m_Ped);
     if (player != m_Player || !player || !player->State().Ready || player->State().CarPresent ||
         player->Activity().Revision != m_PlayerRevision || PlayerBound(host, m_Ped, *player) != m_Entries.front()) return false;
+    if (host.ScriptPeds().Revision() != m_MissionPedRevision ||
+        host.ScriptPeds().Active() != m_MissionPeds) return false;
     std::size_t index = 1;
     for (std::size_t slot = 0; slot < NativeVehiclePoolCapacity; ++slot) {
         const auto* record = host.Vehicles().AtSlot(slot);
         if (record && record->State.InWorld) {
             if (index >= m_Entries.size() || VehicleBound(*record) != m_Entries[index++]) return false;
         }
+    }
+    for (const auto& ped : m_MissionPeds) {
+        if (ped.InWorld && (index >= m_Entries.size() ||
+            MissionPedBound(host, ped) != m_Entries[index++])) return false;
     }
     return index == m_Entries.size();
 }
@@ -194,5 +223,22 @@ NativeLiveBlockageResult NativeLiveEntityBounds::Query(const RealtimeScriptHost&
     result.PlayerRevision = PlayerRevision();
     result.StoredPosition = pos;
     result.CandidateModelId = candidate ? candidate->Definition.ModelId : -1;
+    return result;
+}
+
+NativeLiveBlockageResult NativeLiveEntityBounds::QueryLoadedModel(const RealtimeScriptHost& host,
+    std::uint64_t frame, std::uint64_t worldGeneration, NativeCollisionVector pos,
+    std::int32_t modelId, const std::shared_ptr<const NativeCollisionModel>& model) const {
+    NativeLiveBlockageResult result;
+    if (!Matches(host, frame, worldGeneration)) result.Reason = NativeLiveBlockageReason::StaleProof;
+    else if (!model || host.LoadedVehicleCollision(modelId) != model)
+        result.Reason = NativeLiveBlockageReason::UnknownCandidateModel;
+    else result = NativeLiveCheckForBlockage(m_Entries, pos, NativeLiveBoundsFromCol(model.get()));
+    result.Frame = Frame();
+    result.WorldGeneration = m_WorldGeneration;
+    result.VehicleRevision = VehicleRevision();
+    result.PlayerRevision = PlayerRevision();
+    result.StoredPosition = pos;
+    result.CandidateModelId = modelId;
     return result;
 }

@@ -221,6 +221,9 @@ public:
     const WorldShotScene& PreparedModel() const { return m_Model; }
     const WorldShotScene& PreparedForSaleModel() const { return m_ForSaleModel; }
     const WorldShotScene& PreparedSaveModel() const { return m_SaveModel; }
+    const WorldShotScene& PreparedOysterModel() const { return m_OysterModel; }
+    const WorldShotScene& PreparedHorseshoeModel() const { return m_HorseshoeModel; }
+    const WorldShotScene& PreparedPhotoModel() const { return m_PhotoModel; }
     const NativeScriptPropertyGeometry& SaveGeometry() const { return m_SaveGeometry; }
     // Explicit fail-closed requirement. Snapshot-aware callers can satisfy it
     // with a later frame/revision; legacy callers retain the old latch contract.

@@ -28,6 +28,7 @@
 #include "app/platform/linux/NativeScriptObjects.h"
 #include "app/platform/linux/NativeVehiclePool.h"
 #include "app/platform/linux/NativeCarGeneratorResidency.h"
+#include "app/platform/linux/NativeCarGeneratorPopulation.h"
 #include "app/platform/linux/NativeSourceRng.h"
 #include "app/platform/linux/RealtimeGameplay.h"
 #include "app/platform/linux/StreamPager.h"
@@ -93,6 +94,7 @@ public:
     // Captures OS_TimeMS exactly once; repeated calls never reseed.
     bool SeedSourceRngAfterRwInit(std::string& error);
     NativeSourceRngRef SourceRng() { return m_SourceRng.Reference(); }
+    bool IsSourceWeekend() const { return m_DayOfWeek == 0 || m_DayOfWeek == 6; }
     NativeSourceRngInspection InspectSourceRng() const { return m_SourceRng.Inspect(); }
     // Local CRT algorithm authority, not original global draw-order parity:
     // source ENEX random startup draws are still unported.
@@ -161,6 +163,7 @@ public:
     const NativeMissionAudio& MissionAudio() const { return m_MissionAudio; }
     const NativeBeatTrack& BeatTrack() const { return m_BeatTrack; }
     const NativeScriptPeds& ScriptPeds() const { return m_ScriptPeds; }
+    NativeScriptPedRef RegisteredPlayerPed() const { return m_PedActive ? PedRef() : NativeScriptPedRef{}; }
     const NativeScriptTrains& ScriptTrains() const { return m_ScriptTrains; }
     std::size_t ScriptCameraCommandCount() const { return m_ScriptCameraCommands.size(); }
     bool Widescreen() const { return m_ScriptWidescreen; }
@@ -328,6 +331,13 @@ public:
     const std::optional<PendingScriptModel>& PendingModel() const { return m_PendingModel; }
     bool FulfillPendingModel(const NativeScriptRequestId&, std::shared_ptr<const WorldShotScene>,
         std::shared_ptr<const NativeCollisionModel>, std::string& error);
+    // Only a matching packet from the sole parser worker may enter this
+    // source-ordered vehicle roster. No parked vehicle is created here.
+    bool AdoptLoadedPopulationVehicle(std::int32_t model, std::string_view name,
+        std::string_view texture, std::shared_ptr<const WorldShotScene> scene,
+        std::shared_ptr<const NativeCollisionModel> collision, std::string& error);
+    std::vector<NativeCarLoadedModel> LoadedVehicleModels() const;
+    std::shared_ptr<const NativeCollisionModel> LoadedVehicleCollision(std::int32_t model) const;
     NativeScriptBooleanResult QueryPlayerState(const NativeScriptPlayerStateQueryRequest&) override;
     NativeScriptServiceResult ForceWeatherNow(const NativeScriptWeatherRequest&) override;
     NativeScriptServiceResult ReleaseWeather(const NativeScriptRequestId&) override;
@@ -403,7 +413,8 @@ public:
 
 private:
     NativeScriptReferenceResult<NativeScriptObjectRef> CreateObjectInternal(const NativeScriptObjectRequest&, bool noOffset);
-    NativeScriptServiceResult PublishWorld(const NativeScriptSceneRequest& request, bool requireGround = false);
+    NativeScriptServiceResult PublishWorld(const NativeScriptSceneRequest& request,
+        std::uint16_t opcode, float direction = 0.0f);
     std::optional<NativeScriptServiceResult> Replay(const RealtimeScriptHostEvent& event);
     void Commit(RealtimeScriptHostEvent event);
     NativeScriptPedRef PedRef() const;
@@ -447,6 +458,9 @@ private:
     std::optional<PendingScriptModel> m_PendingModel;
     std::map<std::int32_t, std::shared_ptr<const WorldShotScene>> m_ScriptModels;
     std::map<std::int32_t, std::shared_ptr<const NativeCollisionModel>> m_ScriptModelCollisions;
+    std::map<std::int32_t, std::shared_ptr<const WorldShotScene>> m_LoadedCarScenes;
+    std::map<std::int32_t, std::shared_ptr<const NativeCollisionModel>> m_LoadedCarCollisions;
+    std::vector<std::int32_t> m_LoadedCarOrder;
     std::map<std::int32_t, std::int32_t> m_ScriptVehicleLights;
     std::map<std::int32_t, bool> m_ScriptVehicleCollision;
     std::optional<NativeScriptVehicleRef> m_PlayerScriptVehicle;

@@ -41,6 +41,7 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
         app/platform/linux/NativeCarGeneratorPopulation.cpp
         app/platform/linux/NativeCarGeneratorResidency.cpp
         app/platform/linux/NativeCarGeneratorRuntime.cpp
+        app/platform/linux/NativeLiveEntityBounds.cpp
         app/platform/linux/NativeCollisionAssets.cpp
         app/platform/linux/NativeScriptSchema.cpp
         app/platform/linux/NativeScriptCorpus.cpp

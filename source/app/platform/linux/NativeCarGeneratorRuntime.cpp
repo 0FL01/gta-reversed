@@ -80,6 +80,53 @@ const NativeCarGeneratorRuntimeDemand* NativeCarGeneratorRuntime::ResolveDemand(
     return found == m_Frame.Demands.end() ? nullptr : &*found;
 }
 
+NativeScriptServiceResult NativeCarGeneratorRuntime::CommitRandomSelection(
+    NativeCarGeneratorDemandId id, std::int32_t model, NativeVehicleType type,
+    float sourceBoundLength) {
+    if (std::this_thread::get_id() != m_Thread || m_Frame.Demands.size() != 1 ||
+        m_Frame.Demands[0].Id != id ||
+        m_Frame.Demands[0].Action.Requirement != NativeCarGeneratorRequirement::RandomPopulationSelection ||
+        m_Registry.Revision() != m_Frame.Demands[0].RegistryRevision ||
+        m_Vehicles.Owner() != m_Frame.Demands[0].VehicleOwner ||
+        m_Vehicles.PublicationGeneration() != m_Frame.Demands[0].VehicleGeneration ||
+        m_Vehicles.Revision() != m_Frame.Demands[0].VehicleRevision ||
+        !m_Registry.Resolve(m_Frame.Demands[0].Action.Generator) ||
+        m_Registry.Resolve(m_Frame.Demands[0].Action.Generator)->ModelId !=
+            m_Frame.Demands[0].GeneratorState.ModelId ||
+        !std::isfinite(sourceBoundLength) || sourceBoundLength < 0) {
+        return Error("random car selection does not match retained source generation, pool or demand");
+    }
+    if (model == -1 || type == NativeVehicleType::Boat || sourceBoundLength > 8.0f) {
+        // The original DoInternalProcessing returns without a spawned vehicle
+        // for these outcomes. No replacement model or additional RNG is used.
+        m_Frame.Demands.clear();
+        m_Frame.Process.Result = {NativeScriptServiceStatus::Ready, {}};
+        return m_Frame.Process.Result;
+    }
+    std::string error;
+    const auto generator = m_Frame.Demands[0].Action.Generator;
+    if (!m_Registry.CommitRandomPopulationSelection(generator, model, type,
+        sourceBoundLength, error)) return Error(error);
+    auto& demand = m_Frame.Demands[0];
+    demand.RegistryRevision = m_Registry.Revision();
+    m_Frame.RegistryRevision = demand.RegistryRevision;
+    demand.GeneratorState = *m_Registry.Resolve(generator);
+    demand.Action.Requirement = NativeCarGeneratorRequirement::CollisionBlockage;
+    demand.Action.Request.ModelId = model;
+    demand.Action.Request.VehicleType = type;
+    demand.Action.Result = {NativeScriptServiceStatus::Pending,
+        "query source vehicle/ped broadphase and COL bounds at the generator"};
+    m_Frame.Process.Result = demand.Action.Result;
+    for (auto& action : m_Frame.Process.Actions) {
+        if (action.Generator == generator &&
+            action.Requirement == NativeCarGeneratorRequirement::RandomPopulationSelection) {
+            action = demand.Action;
+            break;
+        }
+    }
+    return m_Frame.Process.Result;
+}
+
 NativeScriptServiceResult NativeCarGeneratorRuntime::Tick(const realtime_streaming::CpuWorld& world,
     NativeCarGeneratorRuntimeInput input, std::shared_ptr<const NativeVehiclePoolSnapshot> vehicles) {
     if (std::this_thread::get_id() != m_Thread) return Error("car-generator runtime requires its main-thread owner");

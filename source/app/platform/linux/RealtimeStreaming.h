@@ -163,6 +163,9 @@ public:
     bool RequestStaticModel(const StaticModelRequest& request) {
         std::lock_guard lock(m_Mutex);
         if (m_Stop || !request.Ticket || request.GameDir.empty() || request.Model.empty() || request.Texture.empty()) return false;
+        // Moving Waiting into the worker does not free the one-slot producer:
+        // a second ticket must not overwrite its still-unconsumed completion.
+        if (m_StaticModelInFlight) return m_StaticModelInFlight == request.Ticket;
         if ((m_StaticModelWaiting && m_StaticModelWaiting->Ticket != request.Ticket) ||
             (m_StaticModelReady && m_StaticModelReady->Ticket != request.Ticket)) return false;
         if (!m_StaticModelWaiting && !m_StaticModelReady) m_StaticModelWaiting = request;
@@ -180,6 +183,7 @@ public:
     bool RequestScriptTexture(const ScriptTextureRequest& request) {
         std::lock_guard lock(m_Mutex);
         if (m_Stop || !request.Ticket || request.GameDir.empty() || request.Name.empty()) return false;
+        if (m_ScriptTextureInFlight) return m_ScriptTextureInFlight == request.Ticket;
         if ((m_ScriptTextureWaiting && m_ScriptTextureWaiting->Ticket != request.Ticket) ||
             (m_ScriptTextureReady && m_ScriptTextureReady->Ticket != request.Ticket)) return false;
         if (!m_ScriptTextureWaiting && !m_ScriptTextureReady) m_ScriptTextureWaiting = request;
@@ -276,27 +280,44 @@ private:
             if (m_StaticModelWaiting) {
                 auto request = std::move(*m_StaticModelWaiting);
                 m_StaticModelWaiting.reset();
+                m_StaticModelInFlight = request.Ticket;
                 lock.unlock();
                 StaticModelCompletion completion{.Ticket=request.Ticket,.Scene={},.Collision={},.Error={}};
-                auto scene = std::make_shared<WorldShotScene>();
-                if (m_StaticModelLoader && m_StaticModelLoader(request,*scene,completion.Collision,completion.Error)) completion.Scene = std::move(scene);
-                else if (!m_StaticModelLoader) completion.Error = "script model loader is unavailable";
-                else completion.Error = request.Model + ": " + completion.Error;
+                try {
+                    auto scene = std::make_shared<WorldShotScene>();
+                    if (m_StaticModelLoader && m_StaticModelLoader(request,*scene,completion.Collision,completion.Error))
+                        completion.Scene = std::move(scene);
+                    else if (!m_StaticModelLoader) completion.Error = "script model loader is unavailable";
+                    else completion.Error = request.Model + ": " + completion.Error;
+                } catch (const std::exception& e) {
+                    completion.Error = request.Model + ": " + e.what();
+                } catch (...) {
+                    completion.Error = request.Model + ": unknown static-model parser exception";
+                }
                 lock.lock();
+                m_StaticModelInFlight = 0;
                 m_StaticModelReady = std::move(completion);
                 continue;
             }
             if (m_ScriptTextureWaiting) {
                 auto request = std::move(*m_ScriptTextureWaiting);
                 m_ScriptTextureWaiting.reset();
+                m_ScriptTextureInFlight = request.Ticket;
                 lock.unlock();
                 ScriptTextureCompletion completion{.Ticket=request.Ticket,.Packet={},.Error={}};
-                auto packet = std::make_shared<NativeScriptTextureDictionaryPacket>();
-                if (m_ScriptTextureLoader && m_ScriptTextureLoader(request,*packet,completion.Error))
-                    completion.Packet = std::move(packet);
-                else if (!m_ScriptTextureLoader) completion.Error = "script texture loader is unavailable";
-                else completion.Error = request.Name + ": " + completion.Error;
+                try {
+                    auto packet = std::make_shared<NativeScriptTextureDictionaryPacket>();
+                    if (m_ScriptTextureLoader && m_ScriptTextureLoader(request,*packet,completion.Error))
+                        completion.Packet = std::move(packet);
+                    else if (!m_ScriptTextureLoader) completion.Error = "script texture loader is unavailable";
+                    else completion.Error = request.Name + ": " + completion.Error;
+                } catch (const std::exception& error) {
+                    completion.Error = request.Name + ": " + error.what();
+                } catch (...) {
+                    completion.Error = request.Name + ": unknown texture parser exception";
+                }
                 lock.lock();
+                m_ScriptTextureInFlight = 0;
                 m_ScriptTextureReady = std::move(completion);
                 continue;
             }
@@ -369,8 +390,10 @@ private:
     NativeVehicleAssetQueue m_Vehicles;
     std::optional<StaticModelRequest> m_StaticModelWaiting;
     std::optional<StaticModelCompletion> m_StaticModelReady;
+    std::uint64_t m_StaticModelInFlight = 0;
     std::optional<ScriptTextureRequest> m_ScriptTextureWaiting;
     std::optional<ScriptTextureCompletion> m_ScriptTextureReady;
+    std::uint64_t m_ScriptTextureInFlight = 0;
     bool m_LastWasVehicle = false;
     std::unique_ptr<CpuWorld> m_Ready, m_Retired, m_StopActive, m_StopPending;
     // Last: every field above is initialized before Run can observe it.

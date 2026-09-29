@@ -31,8 +31,11 @@ int NativePickupsProbe(const char* dir, std::uint64_t& commands, std::uint16_t& 
     check(std::string(entities.PreparedSaveModel().stats.dffName)=="pickupsave.dff" &&
         std::string(entities.PreparedSaveModel().stats.txdName)=="icons4.txd" && entities.SaveGeometry().ColHeaderId==1277 &&
         entities.SaveGeometry().ColLibrary=="models/gta3.img:dynamic.col","actual source MI_PICKUP_SAVEGAME IDE/DFF/TXD/COL identity");
-    check(entities.PreparedImages().size()==entities.PreparedModel().images.size()+entities.PreparedForSaleModel().images.size()+entities.PreparedSaveModel().images.size(),
-        "all texture indices refer to one immutable startup upload, ordinary images appended");
+    check(entities.PreparedImages().size() == entities.PreparedModel().images.size() +
+        entities.PreparedForSaleModel().images.size() + entities.PreparedSaveModel().images.size() +
+        entities.PreparedOysterModel().images.size() + entities.PreparedHorseshoeModel().images.size() +
+        entities.PreparedPhotoModel().images.size(),
+        "all six source pickup image families refer to one immutable startup upload");
     Require(host.RunPass(256).Executed==53,"actual main53 first frame");
     Require(host.PrepareInitialGarageWorldBeforeWorker(error),error); host.SealStartup();
     const auto main = static_cast<const NativeScriptThreadState&>(host.State());

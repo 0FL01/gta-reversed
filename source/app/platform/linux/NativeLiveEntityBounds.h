@@ -2,6 +2,7 @@
 #pragma once
 #include "NativeGeneratedVehicleAssets.h"
 #include "NativeVehiclePool.h"
+#include "NativeScriptPeds.h"
 
 class RealtimeScriptHost;
 class RealtimeGameplay;
@@ -13,7 +14,7 @@ struct NativeLiveModelBounds {
     float Radius{};
     bool operator==(const NativeLiveModelBounds&) const = default;
 };
-enum class NativeLiveEntityKind { Player, Vehicle };
+enum class NativeLiveEntityKind { Player, Vehicle, MissionPed };
 struct NativeLiveEntityBound {
     NativeLiveEntityKind Kind{};
     std::int32_t Reference = -1, ModelId = -1;
@@ -49,7 +50,7 @@ NativeLiveBlockageResult NativeLiveCheckForBlockage(std::span<const NativeLiveEn
 
 class NativeLiveEntityBounds {
 public:
-    // Sole current native ped producer is the host's registered player0.
+    // Captures the registered player plus the host's source mission-ped owner.
     // Capture after ReconcileCarGeneratorsBeforeWorldCommit + world adoption,
     // and PublishVehicles(frame). No IO, no allocation into vehicle pools.
     // Unknown vehicle COL is retained as a possible candidate, never omitted.
@@ -59,13 +60,18 @@ public:
     NativeLiveBlockageResult Query(const RealtimeScriptHost&, std::uint64_t frame,
         std::uint64_t worldGeneration, NativeCollisionVector storedPosition,
         const NativeGeneratedVehicleAsset& candidate) const;
+    NativeLiveBlockageResult QueryLoadedModel(const RealtimeScriptHost&, std::uint64_t frame,
+        std::uint64_t worldGeneration, NativeCollisionVector storedPosition,
+        std::int32_t modelId,
+        const std::shared_ptr<const NativeCollisionModel>& sourceModel) const;
     std::span<const NativeLiveEntityBound> Entries() const { return m_Entries; }
     std::uint64_t Frame() const { return m_Vehicles->Frame(); }
     std::uint64_t WorldGeneration() const { return m_WorldGeneration; }
     std::uint64_t VehicleRevision() const { return m_Vehicles->Revision(); }
     std::uint64_t PlayerRevision() const { return m_PlayerRevision; }
+    std::uint64_t MissionPedRevision() const { return m_MissionPedRevision; }
     const NativeVehicleCensus& VehicleCensus() const { return m_Vehicles->Census(); }
-    // NativeHostComplete covers the registered producers only. No NPC/traffic,
+    // This covers registered producers only. No complete ambient population,
     // sector-link ordering or retail CWorld/CPopulation parity is asserted.
     static constexpr bool SourceParityComplete = false;
 private:
@@ -76,6 +82,7 @@ private:
     std::shared_ptr<const NativeVehiclePoolSnapshot> m_Vehicles;
     std::shared_ptr<const NativeCollisionSnapshot> m_World;
     std::shared_ptr<const NativePlacementOverrides> m_Overrides;
-    std::uint64_t m_WorldGeneration{}, m_HostWorldRevision{}, m_PlayerRevision{};
+    std::uint64_t m_WorldGeneration{}, m_HostWorldRevision{}, m_PlayerRevision{}, m_MissionPedRevision{};
+    std::vector<NativeScriptPedState> m_MissionPeds;
     std::vector<NativeLiveEntityBound> m_Entries;
 };

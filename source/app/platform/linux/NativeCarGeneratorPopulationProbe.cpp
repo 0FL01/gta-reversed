@@ -34,6 +34,13 @@ int main(int argc, char** argv) {
         selected.AppropriateLoadedCars[0] == 400, "no bicycle/train/mission fallback");
     const auto prior = selected;
     const auto before = rng.Inspect().Value->DrawCount;
+    NativeCarPopulationSelection preview;
+    Check(owner.PreviewAppropriate({2369, -1263, 23}, 12, false, zones.Entries(),
+        roster, preview, error) && preview.ModelId == -1 &&
+        preview.AppropriateLoadedCars == prior.AppropriateLoadedCars &&
+        preview.WeightSum == prior.WeightSum && preview.Draws == 0 &&
+        rng.Inspect().Value->DrawCount == before,
+        "appropriate count before StreamOneNewCar consumes no RNG");
     Check(!owner.Select({0, 0, 9999}, 12, false, zones.Entries(), roster,
         rng.Reference(), selected, error) && selected.ModelId == prior.ModelId &&
         rng.Inspect().Value->DrawCount == before, "unqualified zone failure atomic");
@@ -55,6 +62,9 @@ int main(int argc, char** argv) {
         rng.Reference(), selected, error) && selected.ModelId == -1 &&
         selected.Draws == 0 && rng.Inspect().Value->DrawCount == before,
         "no eligible model is MODEL_INVALID without consuming RNG");
+    Check(owner.PreviewAppropriate({2369, -1263, 23}, 12, false, zones.Entries(),
+        nonCars, preview, error) && preview.AppropriateLoadedCars.empty() &&
+        rng.Inspect().Value->DrawCount == before, "no appropriate member starts source stream gate");
     std::array<NativeCarLoadedModel, 5> suppressed = roster;
     suppressed[0].ScriptSuppressed = true;
     Check(owner.Select({2369, -1263, 23}, 12, false, zones.Entries(), suppressed,

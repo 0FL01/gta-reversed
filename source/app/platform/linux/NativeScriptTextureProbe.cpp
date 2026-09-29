@@ -8,7 +8,9 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <future>
 #include <optional>
+#include <stdexcept>
 #include <string_view>
 #include <thread>
 
@@ -71,6 +73,58 @@ int main(int argc, char** argv) {
         "source splash completion");
     const auto splashCount = completion->Packet->Images.size();
     worker.Stop({}, {});
+    std::promise<void> entered, release;
+    const auto released = release.get_future().share();
+    realtime_streaming::Worker singleSlot(false, {}, {}, 1, {},
+        [&](const realtime_streaming::StaticModelRequest&, WorldShotScene&,
+            std::shared_ptr<const NativeCollisionModel>&, std::string& error) {
+            entered.set_value();
+            released.wait();
+            error = "intentional model fixture failure";
+            return false;
+        });
+    Check(singleSlot.RequestStaticModel({101, argv[1], "landstal", "landstal", true}),
+        "one source-model parser ticket admitted");
+    Check(entered.get_future().wait_for(std::chrono::seconds(5)) == std::future_status::ready,
+        "source-model parser in-flight barrier");
+    Check(!singleSlot.RequestStaticModel({102, argv[1], "taxi", "taxi", true}) &&
+        singleSlot.RequestStaticModel({101, argv[1], "landstal", "landstal", true}),
+        "new ticket rejected and duplicate idempotent while worker parses");
+    release.set_value();
+    std::optional<realtime_streaming::StaticModelCompletion> failedModel;
+    for (unsigned i = 0; i < 1000 && !failedModel; ++i) {
+        failedModel = singleSlot.TakeStaticModel(101);
+        if (!failedModel) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    Check(failedModel && failedModel->Ticket == 101 &&
+        failedModel->Error.find("intentional model fixture failure") != std::string::npos &&
+        !singleSlot.TakeStaticModel(102), "only first model completion may publish");
+    singleSlot.Stop({}, {});
+    std::promise<void> textureEntered, textureRelease;
+    const auto textureReleased = textureRelease.get_future().share();
+    realtime_streaming::Worker textureSlot(false, {}, {}, 1, {}, {},
+        [&](const realtime_streaming::ScriptTextureRequest&,
+            NativeScriptTextureDictionaryPacket&, std::string&) -> bool {
+            textureEntered.set_value();
+            textureReleased.wait();
+            throw std::runtime_error("intentional texture fixture exception");
+        });
+    Check(textureSlot.RequestScriptTexture({201, argv[1], "LD_NONE"}), "texture ticket admitted");
+    Check(textureEntered.get_future().wait_for(std::chrono::seconds(5)) == std::future_status::ready,
+        "texture parser in-flight barrier");
+    Check(!textureSlot.RequestScriptTexture({202, argv[1], "loadsc0"}) &&
+        textureSlot.RequestScriptTexture({201, argv[1], "LD_NONE"}),
+        "texture slot rejects competing ticket and holds duplicate during parse");
+    textureRelease.set_value();
+    std::optional<realtime_streaming::ScriptTextureCompletion> failedTexture;
+    for (unsigned i = 0; i < 1000 && !failedTexture; ++i) {
+        failedTexture = textureSlot.TakeScriptTexture(201);
+        if (!failedTexture) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    Check(failedTexture && failedTexture->Ticket == 201 && !failedTexture->Packet &&
+        failedTexture->Error.find("intentional texture fixture exception") != std::string::npos &&
+        !textureSlot.TakeScriptTexture(202), "only the exact texture error completion publishes");
+    textureSlot.Stop({}, {});
     StreamPager_Shutdown();
     std::printf("native-script-texture-ok checks=%d dictionary=LD_NONE images=%zu required=24 "
         "splash=loadsc0:%zu worker=sole feedback=0\n", g_Checks, imageCount, splashCount);

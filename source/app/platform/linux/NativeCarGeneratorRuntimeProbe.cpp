@@ -245,11 +245,29 @@ int main(int argc, char** argv) try {
             randomRuntime.Frame().Demands[0].Id.Owner != demand.Id.Owner &&
             randomRuntime.Frame().Demands[0].Action.Request.ModelId == -1 && randomRegistry.Resolve(random)->ModelId == -1,
             "shared RNG/population selection remains exact owned Unsupported request without selecting a fallback");
+        const auto randomDemand = randomRuntime.Frame().Demands[0].Id;
+        const auto randomRevision = randomRegistry.Revision();
+        Require(randomRuntime.CommitRandomSelection({randomDemand.Owner + 1, randomDemand.Sequence},
+                400, NativeVehicleType::Automobile, 4.0f).Status == NativeScriptServiceStatus::Error &&
+            randomRegistry.Revision() == randomRevision && randomRegistry.Resolve(random)->ModelId == -1,
+            "foreign population completion cannot mutate the retained generator");
+        Require(randomRuntime.CommitRandomSelection(randomDemand, 400, NativeVehicleType::Automobile,
+                4.0f).Status == NativeScriptServiceStatus::Pending &&
+            randomRegistry.Resolve(random)->ModelId == -400 &&
+            randomRuntime.Frame().Demands.size() == 1 &&
+            randomRuntime.Frame().Demands[0].Action.Requirement ==
+                NativeCarGeneratorRequirement::CollisionBlockage &&
+            randomRuntime.Frame().Demands[0].RegistryRevision == randomRegistry.Revision() &&
+            pool.Events().empty(),
+            "LABELLED completed selection advances only to unresolved source COL blockage");
+        Require(randomRuntime.CommitRandomSelection(randomDemand, 400, NativeVehicleType::Automobile,
+                4.0f).Status == NativeScriptServiceStatus::Error,
+            "duplicate random completion cannot consume the source generator twice");
         Require(host.Session().Threads()[0].Commands == 53, "fixture made no new VM execution claim");
         std::printf("NativeCarGeneratorRuntimeProbe PASS sourceQuarter=1,2,3,0 first014B=LABELLED-constructor-fixture "
             "activity=actual-main53 pending=model476-source-vehicle-ped-COL demand-retained=8 no-spawn=1 "
             "visibility=actual-camera-projection-fixture source-occlusion=unfulfilled motion=owned-displacement "
-            "random=typed-unsupported foreign-authority=reject wrong-thread=reject\n");
+            "random=typed-selection-to-blockage foreign-authority=reject wrong-thread=reject\n");
     }
     StreamPager_Shutdown();
     return 0;

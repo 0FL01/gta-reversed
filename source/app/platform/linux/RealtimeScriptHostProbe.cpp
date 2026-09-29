@@ -93,6 +93,10 @@ int main(int argc, char** argv) {
             s.PedAimingRotation, game.Camera().Yaw, game.Actors().stats.triangles, s.CarPresent);
         Check(s.Ready && s.MissionCreated && s.PlayerOnFootTask && !s.InVehicle && !s.CarPresent &&
             game.Actors().stats.triangles == 2, "mission-owned on-foot live player, no preview car published");
+        const auto sourcePlayer = host.ScriptPlayerPosition();
+        Check(sourcePlayer && Near(sourcePlayer->X, s.PedRoot.X) &&
+            Near(sourcePlayer->Y, s.PedRoot.Y) && Near(sourcePlayer->Z, s.PedRoot.Z),
+            "source player position is live immediately after CreatePlayer, before first mission warp");
         Check(Near(s.Ped.Z, 12.8757f) && Near(scene.Z, 13.3757f) && Near(s.PedRoot.Z, s.Ped.Z + 1),
             "authored feet preserved; source ped1 bbox root offset is 1, scene Z is independently +0.5");
         const float rad = 262 * std::numbers::pi_v<float> / 180;
@@ -352,6 +356,12 @@ int main(int argc, char** argv) {
         auto moved = deferred; ++moved.Position.Z;
         Check(host.LoadScene(moved).Status == NativeScriptServiceStatus::Error && polls == 2 && host.WorldRevision() == stableRevision,
             "pending service ID cannot change source position between polls");
+        Check(host.RequestCollision({deferred.Id, deferred.Position.X, deferred.Position.Y}).Status == NativeScriptServiceStatus::Error &&
+            host.LoadSceneInDirection({deferred.Id, deferred.Position, 0.0f}).Status == NativeScriptServiceStatus::Error &&
+            polls == 2 && host.WorldTransaction().Identity.Opcode == 0x03CB &&
+            host.WorldTransaction().Identity.ArgumentCount == 3 &&
+            host.WorldTransaction().Identity.Arguments[2] == std::bit_cast<std::uint32_t>(deferred.Position.Z),
+            "world transaction identity retains opcode and exact Z without inventing a ground test");
         Check(host.CreateLockedProperty({deferred.Id, property.AuthoredPosition, property.Text}).Result.Status == NativeScriptServiceStatus::Error &&
             entities.Revision() == entityRevision, "pending world identity cannot allocate a property actor");
         const auto enexRevision = host.EntryExits().Revision();

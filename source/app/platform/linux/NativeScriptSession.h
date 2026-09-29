@@ -65,7 +65,7 @@ struct NativeScriptPlayerRequest {
 // Script handles include the host pool/group generation. Never substitute a
 // player index, pointer, or unversioned slot for these opaque script references.
 struct NativeScriptGroupRef { std::int32_t Value = -1; };
-struct NativeScriptPedRef { std::int32_t Value = -1; };
+struct NativeScriptPedRef { std::int32_t Value = -1; bool operator==(const NativeScriptPedRef&) const = default; };
 struct NativeScriptPickupRef { std::int32_t Value = -1; };
 struct NativeScriptBlipRef { std::int32_t Value = -1; };
 struct NativeScriptObjectRef {
@@ -74,7 +74,7 @@ struct NativeScriptObjectRef {
 };
 // Source generator slot references: zero is valid; -1 is allocation failure.
 struct NativeScriptCarGeneratorRef { std::int32_t Value = -1; };
-struct NativeScriptVehicleRef { std::int32_t Value = -1; };
+struct NativeScriptVehicleRef { std::int32_t Value = -1; bool operator==(const NativeScriptVehicleRef&) const = default; };
 template<typename Ref> struct NativeScriptReferenceResult {
     NativeScriptServiceResult Result;
     Ref Reference;

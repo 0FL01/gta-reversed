@@ -86,6 +86,11 @@ public:
         std::shared_ptr<const NativeVehiclePoolSnapshot>);
     const NativeCarGeneratorRuntimeFrame& Frame() const { return m_Frame; }
     const NativeCarGeneratorRuntimeDemand* ResolveDemand(NativeCarGeneratorDemandId) const;
+    // Resume only the exact retained source generator at its selection site;
+    // never rerun Process/quarter/clock. The next required consumer (actual
+    // COL blockage) remains Pending instead of being treated as clear.
+    NativeScriptServiceResult CommitRandomSelection(NativeCarGeneratorDemandId,
+        std::int32_t model, NativeVehicleType type, float sourceBoundLength);
 
     // Pure query adapter (except main-thread BVH counters). Also useful for
     // independently witnessing source-world geometry away from the player.

@@ -260,3 +260,12 @@ std::size_t NativeScriptPeds::Alive() const noexcept {
     for (const auto& slot : m_Slots) alive += slot.Alive ? 1u : 0u;
     return alive;
 }
+
+std::vector<NativeScriptPedState> NativeScriptPeds::Active() const {
+    std::vector<NativeScriptPedState> active;
+    active.reserve(Alive());
+    for (const auto& slot : m_Slots) {
+        if (slot.Alive) active.push_back(slot.State);
+    }
+    return active;
+}

@@ -258,6 +258,22 @@ int main(int argc, char** argv) try {
         Require(!host.Vehicles().Update(refs.front(), wrongModel, error) && host.Vehicles().Revision() == revision,
             "typed model/COL mismatch rejected without mutation");
         for (const auto ref : refs) Require(host.Vehicles().Release(ref, error), error);
+        auto& scriptedPeds = const_cast<NativeScriptPeds&>(host.ScriptPeds());
+        NativeScriptPedRef scriptedPed;
+        const NativeScriptPosition scriptedPosition{root[0] + 50.0f, root[1], root[2]};
+        Require(scriptedPeds.CreateOnFoot(4, 7, scriptedPosition, true, scriptedPed, error) ==
+            NativeScriptPedStatus::Ok, error);
+        Require(!proof->Matches(host, 16, generation), "new mission ped invalidates old bound proof");
+        pool = host.PublishVehicles(17, error);
+        proof = NativeLiveEntityBounds::Capture(host, ped, pool, error);
+        Require(bool(proof) && proof->Entries().size() == 2 &&
+            proof->Entries()[1].Kind == NativeLiveEntityKind::MissionPed &&
+            proof->Entries()[1].Model == NativeLiveBoundsFromCol(host.Garages().Ped1Collision().get()) &&
+            proof->Query(host, 17, generation,
+                {scriptedPosition.X, scriptedPosition.Y, scriptedPosition.Z}, landstal).Status == Status::Blocked,
+            "registered mission ped uses source ped1 COL and participates in blockage");
+        Require(scriptedPeds.Release(scriptedPed, error) == NativeScriptPedStatus::Ok &&
+            !proof->Matches(host, 17, generation), "mission ped release invalidates bound proof");
         std::printf("owner-fixtures PASS late-census=1 late-position=1 frame-generation=1 liveness-independent=1 unknown-vehicle=1\n");
         std::printf("pool-fixtures PASS capacity=110 last-slot-included=1 dormant-excluded=109 wrecked-blocks=1 overflow-before-Z=1 typed-mismatch=1\n");
     }

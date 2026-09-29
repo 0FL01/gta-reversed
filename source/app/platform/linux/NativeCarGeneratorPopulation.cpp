@@ -153,10 +153,58 @@ bool NativeCarGeneratorPopulation::Select(NativeScriptPosition player, std::uint
     bool weekend, std::span<const NativeZonePopulationEntry> zoneStates,
     std::span<const NativeCarLoadedModel> orderedLoadedModels, NativeSourceRngRef rng,
     NativeCarPopulationSelection& out, std::string& error) const {
+    if (rng.Readiness() != NativeSourceRngStatus::Ready) {
+        error = "missing source RNG authority";
+        return false;
+    }
+    NativeCarPopulationSelection result;
+    if (!PreviewAppropriate(player, hour, weekend, zoneStates, orderedLoadedModels,
+        result, error)) return false;
+    const auto& eligible = result.AppropriateLoadedCars;
+    std::uint32_t weightSum = result.WeightSum;
+    if (eligible.empty() || !weightSum) {
+        out = std::move(result);
+        error.clear();
+        return true; // CLoadedCarGroup::PickRandomCar returns MODEL_INVALID.
+    }
+    for (std::uint8_t tries = 0; tries < 10; ++tries) {
+        const auto draw = rng.NextRand15();
+        if (draw.Status != NativeSourceRngStatus::Ready || !draw.Value) {
+            error = "shared source RNG draw failed";
+            return false;
+        }
+        ++result.Draws;
+        // CGeneral::GetRandomNumberInRange(0, sum) maps rand15 into
+        // [0,sum-1] using source float lerp/truncation, not modulo.
+        const float fraction = float(*draw.Value) * (1.0f / 32767.0f);
+        auto weight = std::uint32_t(float(weightSum - 1) * fraction);
+        for (const auto id : eligible) {
+            const auto found = std::ranges::find(m_Models, id, &Model::Id);
+            if (found->Frequency >= weight) { result.ModelId = id; break; }
+            weight -= found->Frequency;
+        }
+        if (result.ModelId < 0) { error = "source weighted choice had no member"; return false; }
+        const auto selected = std::ranges::find(orderedLoadedModels, result.ModelId, &NativeCarLoadedModel::ModelId);
+        if (selected == orderedLoadedModels.end()) { error = "loaded car vanished from roster"; return false; }
+        if (selected->ScriptSuppressed || selected->ScriptBlocked ||
+            selected->StreamingPhaseOut || selected->RefCount > 2) {
+            result.ModelId = -1;
+            continue;
+        }
+        break;
+    }
+    out = std::move(result);
+    error.clear();
+    return true;
+}
+
+bool NativeCarGeneratorPopulation::PreviewAppropriate(NativeScriptPosition player,
+    std::uint8_t hour, bool weekend, std::span<const NativeZonePopulationEntry> zoneStates,
+    std::span<const NativeCarLoadedModel> orderedLoadedModels,
+    NativeCarPopulationSelection& out, std::string& error) const {
     if (!m_Loaded || hour >= 24 || !std::isfinite(player.X) || !std::isfinite(player.Y) ||
-        !std::isfinite(player.Z) || zoneStates.size() != m_Zones.zones.size() ||
-        rng.Readiness() != NativeSourceRngStatus::Ready) {
-        error = "missing source population/zone/RNG authority";
+        !std::isfinite(player.Z) || zoneStates.size() != m_Zones.zones.size()) {
+        error = "missing source population/zone authority";
         return false;
     }
     for (std::size_t i = 0; i < zoneStates.size(); ++i) {
@@ -208,37 +256,6 @@ bool NativeCarGeneratorPopulation::Select(NativeScriptPosition player, std::uint
         eligible.push_back(id);
     }
     NativeCarPopulationSelection result{zone.Label, zone.PopulationType, eligible, -1, weightSum, 0};
-    if (eligible.empty() || !weightSum) {
-        out = std::move(result);
-        error.clear();
-        return true; // CLoadedCarGroup::PickRandomCar returns MODEL_INVALID.
-    }
-    for (std::uint8_t tries = 0; tries < 10; ++tries) {
-        const auto draw = rng.NextRand15();
-        if (draw.Status != NativeSourceRngStatus::Ready || !draw.Value) {
-            error = "shared source RNG draw failed";
-            return false;
-        }
-        ++result.Draws;
-        // CGeneral::GetRandomNumberInRange(0, sum) maps rand15 into
-        // [0,sum-1] using source float lerp/truncation, not modulo.
-        const float fraction = float(*draw.Value) * (1.0f / 32767.0f);
-        auto weight = std::uint32_t(float(weightSum - 1) * fraction);
-        for (const auto id : eligible) {
-            const auto found = std::ranges::find(m_Models, id, &Model::Id);
-            if (found->Frequency >= weight) { result.ModelId = id; break; }
-            weight -= found->Frequency;
-        }
-        if (result.ModelId < 0) { error = "source weighted choice had no member"; return false; }
-        const auto selected = std::ranges::find(orderedLoadedModels, result.ModelId, &NativeCarLoadedModel::ModelId);
-        if (selected == orderedLoadedModels.end()) { error = "loaded car vanished from roster"; return false; }
-        if (selected->ScriptSuppressed || selected->ScriptBlocked ||
-            selected->StreamingPhaseOut || selected->RefCount > 2) {
-            result.ModelId = -1;
-            continue;
-        }
-        break;
-    }
     out = std::move(result);
     error.clear();
     return true;

@@ -38,14 +38,16 @@ bool EqualNoCase(std::string_view a, std::string_view b) {
         return std::tolower(x) == std::tolower(y);
     });
 }
-NativeScriptServiceIdentity WorldIdentity(const NativeScriptSceneRequest& request, bool requireGround) {
+NativeScriptServiceIdentity WorldIdentity(const NativeScriptSceneRequest& request,
+    std::uint16_t opcode, float direction) {
     NativeScriptServiceIdentity identity;
     identity.Id = request.Id;
-    identity.Opcode = requireGround ? 0x03CB : 0x04E4;
-    identity.ArgumentCount = requireGround ? 3 : 2;
+    identity.Opcode = opcode;
+    identity.ArgumentCount = opcode == 0x04E4 ? 2 : opcode == 0x03CB ? 3 : 4;
     identity.Arguments[0] = std::bit_cast<std::uint32_t>(request.Position.X);
     identity.Arguments[1] = std::bit_cast<std::uint32_t>(request.Position.Y);
-    if (requireGround) identity.Arguments[2] = std::bit_cast<std::uint32_t>(request.Position.Z);
+    if (identity.ArgumentCount >= 3) identity.Arguments[2] = std::bit_cast<std::uint32_t>(request.Position.Z);
+    if (identity.ArgumentCount == 4) identity.Arguments[3] = std::bit_cast<std::uint32_t>(direction);
     return identity;
 }
 }
@@ -287,7 +289,7 @@ std::optional<NativeScriptPosition> RealtimeScriptHost::ScriptPlayerPosition() c
         const auto& position = vehicle->State.Matrix.Position;
         return NativeScriptPosition{position[0], position[1], position[2]};
     }
-    if (!m_ScriptPlayerPosition) return std::nullopt;
+    if (!ResolvePed(PedRef())) return std::nullopt;
     const auto& position = m_Gameplay.State().PedRoot;
     return NativeScriptPosition{position.X, position.Y, position.Z};
 }
@@ -1479,11 +1481,66 @@ bool RealtimeScriptHost::FulfillPendingModel(const NativeScriptRequestId& id,
         error = "script model completion does not match pending request";
         return false;
     }
+    if (m_PendingModel->Vehicle && !AdoptLoadedPopulationVehicle(m_PendingModel->Model,
+        m_PendingModel->Name, m_PendingModel->Texture, scene, collision, error)) return false;
     m_ScriptModels[m_PendingModel->Model] = std::move(scene);
     if (collision) m_ScriptModelCollisions[m_PendingModel->Model] = std::move(collision);
     m_PendingModel.reset();
     error.clear();
     return true;
+}
+
+bool RealtimeScriptHost::AdoptLoadedPopulationVehicle(std::int32_t model,
+    std::string_view name, std::string_view texture,
+    std::shared_ptr<const WorldShotScene> scene,
+    std::shared_ptr<const NativeCollisionModel> collision, std::string& error) {
+    const auto* definition = m_CarGenerators.FindModel(model);
+    std::string sourceName, sourceTexture;
+    if (!m_Initialized || !definition || !scene || !scene->stats.atomics ||
+        !scene->stats.triangles || !collision ||
+        (collision->Faces.empty() && collision->Boxes.empty() && collision->Spheres.empty()) ||
+        !StreamPager_KnownModelIdentity(model, sourceName, sourceTexture) ||
+        sourceName != name || sourceTexture != texture ||
+        sourceName != definition->ModelName || sourceTexture != definition->TextureName) {
+        error = "completed population vehicle lacks exact parser/IDE/COL ownership";
+        return false;
+    }
+    // Build all publication values first; a rejected completion leaves the
+    // previous scene/roster/order untouched. The general vehicle streamer has
+    // not yet adopted CStreaming's source load/eject schedule.
+    auto scenes = m_LoadedCarScenes;
+    auto collisions = m_LoadedCarCollisions;
+    auto order = m_LoadedCarOrder;
+    scenes[model] = std::move(scene);
+    collisions[model] = std::move(collision);
+    if (std::ranges::find(order, model) == order.end()) order.push_back(model);
+    m_LoadedCarScenes.swap(scenes);
+    m_LoadedCarCollisions.swap(collisions);
+    m_LoadedCarOrder.swap(order);
+    error.clear();
+    return true;
+}
+
+std::vector<NativeCarLoadedModel> RealtimeScriptHost::LoadedVehicleModels() const {
+    std::vector<NativeCarLoadedModel> result;
+    result.reserve(m_LoadedCarOrder.size());
+    for (const auto model : m_LoadedCarOrder) {
+        if (!m_LoadedCarScenes.contains(model)) continue;
+        NativeCarLoadedModel entry;
+        entry.ModelId = model;
+        for (std::size_t slot = 0; slot < NativeVehiclePool::Capacity; ++slot) {
+            if (const auto* vehicle = m_Vehicles.AtSlot(slot); vehicle &&
+                vehicle->State.InWorld && vehicle->State.ModelId == model) ++entry.RefCount;
+        }
+        result.push_back(entry);
+    }
+    return result;
+}
+
+std::shared_ptr<const NativeCollisionModel> RealtimeScriptHost::LoadedVehicleCollision(
+    std::int32_t model) const {
+    const auto it = m_LoadedCarCollisions.find(model);
+    return it == m_LoadedCarCollisions.end() ? nullptr : it->second;
 }
 NativeScriptBooleanResult RealtimeScriptHost::QueryPlayerState(const NativeScriptPlayerStateQueryRequest& request) {
     NativeScriptBooleanResult result;
@@ -2531,7 +2588,8 @@ void RealtimeScriptHost::Commit(RealtimeScriptHostEvent event) {
     m_Events.push_back(std::move(event));
 }
 
-NativeScriptServiceResult RealtimeScriptHost::PublishWorld(const NativeScriptSceneRequest& request, bool requireGround) {
+NativeScriptServiceResult RealtimeScriptHost::PublishWorld(const NativeScriptSceneRequest& request,
+    std::uint16_t opcode, float direction) {
     if (!m_Initialized) return Error("world service requires initialized host");
     if (!Finite(request.Position)) return Error("nonfinite world request");
     if (m_InWorldService) return Error("world service callback reentry rejected");
@@ -2540,7 +2598,9 @@ NativeScriptServiceResult RealtimeScriptHost::PublishWorld(const NativeScriptSce
         bool& Value;
         ~ResetCallGuard() { Value = false; }
     } resetCall{m_InWorldService};
-    const auto identity = WorldIdentity(request, requireGround);
+    if ((opcode != 0x04E4 && opcode != 0x03CB && opcode != 0x0A0B) || !std::isfinite(direction))
+        return Error("invalid world service identity");
+    const auto identity = WorldIdentity(request, opcode, direction);
     NativeScriptServiceTicket ticket;
     const auto admission = m_WorldTransaction.Begin(identity, ticket);
     if (admission == NativeScriptServiceTransactionStatus::Conflict)
@@ -2624,10 +2684,6 @@ NativeScriptServiceResult RealtimeScriptHost::PublishWorld(const NativeScriptSce
     }
     if (!world->TriangleCount() && !world->SphereCount() && !world->BoxCount())
         return releaseFailure("loaded region has no source COL primitives", bool(m_Loader));
-    float ground;
-    const auto p = request.Position;
-    if (requireGround && !world->Ground(p.X, p.Y, p.Z + 1.0f, p.Z - 150.0f, ground))
-        return releaseFailure("LOAD_SCENE has no actual resident ground at requested position", bool(m_Loader));
     publication.Collision = world;
     const auto publicationGeneration = publication.Generation ? publication.Generation : m_WorldRevision + 1;
     if (publicationGeneration <= m_WorldRevision)
@@ -2657,7 +2713,7 @@ NativeScriptServiceResult RealtimeScriptHost::RequestCollision(const NativeScrip
     if (auto result = Replay(event)) return *result;
     // 04E4 has XY only. Pager residency is XY based; Z is not a ground result.
     const NativeScriptPosition region{request.X, request.Y, 0};
-    auto result = PublishWorld({request.Id, region});
+    auto result = PublishWorld({request.Id, region}, 0x04E4);
     if (result.Status == NativeScriptServiceStatus::Ready) { m_CollisionRegion = region; Commit(event); }
     return result;
 }
@@ -2671,7 +2727,7 @@ NativeScriptServiceResult RealtimeScriptHost::LoadScene(const NativeScriptSceneR
     // do not turn the preceding request center into an invented equality rule.
     // Source LOAD_SCENE only requests/loads the scene; it does not perform a
     // ground probe at the supplied Z coordinate.
-    auto result = PublishWorld(request);
+    auto result = PublishWorld(request, 0x03CB);
     if (result.Status != NativeScriptServiceStatus::Ready) return result;
     m_LoadedScene = p; Commit(event); return Ready();
 }
@@ -2680,7 +2736,7 @@ NativeScriptServiceResult RealtimeScriptHost::LoadSceneInDirection(const NativeS
     if(!std::isfinite(request.Direction))return Error("directional scene load requires finite heading");
     RealtimeScriptHostEvent event{.Id=request.Id,.Opcode=0x0A0B,.Arguments={p.X,p.Y,p.Z,request.Direction}};
     if(auto result=Replay(event))return *result;
-    auto result=PublishWorld({request.Id,p});
+    auto result=PublishWorld({request.Id,p}, 0x0A0B, request.Direction);
     if(result.Status!=NativeScriptServiceStatus::Ready)return result;
     m_LoadedScene=p;Commit(event);return Ready();
 }

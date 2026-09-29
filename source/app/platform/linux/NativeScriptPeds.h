@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 enum class NativeScriptPedStatus : std::uint8_t {
     Ok,
@@ -62,6 +63,7 @@ public:
 
     const NativeScriptPedState* Resolve(NativeScriptPedRef) const noexcept;
     const NativeScriptVehicleOccupancy* Occupancy(NativeScriptVehicleRef) const noexcept;
+    std::vector<NativeScriptPedState> Active() const;
     NativeScriptVehicleRef VehicleForPed(NativeScriptPedRef) const noexcept;
     std::size_t Alive() const noexcept;
     std::uint64_t Revision() const noexcept { return m_Revision; }

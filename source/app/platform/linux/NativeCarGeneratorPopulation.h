@@ -47,6 +47,12 @@ public:
         std::span<const NativeZonePopulationEntry> zoneStates,
         std::span<const NativeCarLoadedModel> orderedLoadedModels, NativeSourceRngRef rng,
         NativeCarPopulationSelection& out, std::string& error) const;
+    // Source membership has no RNG side effect. Use it for the CStreaming
+    // appropriate-car <3 gate before committing any shared random draw.
+    bool PreviewAppropriate(NativeScriptPosition player, std::uint8_t hour, bool weekend,
+        std::span<const NativeZonePopulationEntry> zoneStates,
+        std::span<const NativeCarLoadedModel> orderedLoadedModels,
+        NativeCarPopulationSelection& out, std::string& error) const;
     // Streaming.cpp::StreamOneNewCar (no cheat/boat override) and
     // CarCtrl.cpp::ChooseCarModelToLoad. This selects a REQUEST, not a loaded
     // model; only a matching parser-worker completion can enter the roster.
