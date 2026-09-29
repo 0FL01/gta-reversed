@@ -90,6 +90,7 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
         app/platform/linux/NativeGangPedChoice.cpp
         app/platform/linux/NativePedModelPolicies.cpp
         app/platform/linux/NativePedModelMetadata.cpp
+        app/platform/linux/NativePedStreaming.cpp
         app/platform/linux/NativeSourceEventFlow.cpp
         app/platform/linux/NativePopulationRuntime.cpp
         app/platform/linux/NativeAmbientPedPolicy.cpp
@@ -153,6 +154,7 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
             app/platform/linux/NativeGangPedChoice.cpp
             app/platform/linux/NativePedModelPolicies.cpp
             app/platform/linux/NativePedModelMetadata.cpp
+            app/platform/linux/NativePedStreaming.cpp
             app/platform/linux/NativeSourceGround.cpp
             PROPERTIES COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-Wall;-Wextra;-Wpedantic"
         )

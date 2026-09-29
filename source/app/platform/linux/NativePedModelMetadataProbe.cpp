@@ -1,4 +1,5 @@
 #include "NativePedModelMetadata.h"
+#include "NativePedStreaming.h"
 
 #include <bit>
 #include <cstdio>
@@ -103,6 +104,34 @@ int main(int argc, char** argv) {
     Check(metadata.LoadBeforeWorker(argv[1], names, error), error.c_str());
     Check(metadata.Models().size() == 276 && metadata.AnimationGroups().size() > 118,
         "actual whole ped namespace and appended animation groups");
+    std::array<NativePedStreamGroup, 18> streamingGroups;
+    Check(NativeQualifyPedStreamingGroups(metadata, 3, streamingGroups) == NativePedStreamStatus::InvalidInput,
+        "world zone cannot be guessed outside the source three regions");
+    for (std::uint32_t worldZone = 0; worldZone < 3; ++worldZone) {
+        Check(NativeQualifyPedStreamingGroups(metadata, worldZone, streamingGroups) ==
+            NativePedStreamStatus::QualifiedGroups, "real group identities qualify for each source world zone");
+        for (std::size_t group = 0; group < streamingGroups.size(); ++group) {
+            const auto& source = metadata.Groups()[NativePedGroupTranslation[group][worldZone]];
+            const auto& bound = streamingGroups[group];
+            Check(bound.Known && bound.Count == source.Count, "actual translated group count");
+            for (std::size_t slot = 0; slot < source.Count; ++slot)
+                Check(bound.Models[slot].Model == source.Models[slot] && bound.Models[slot].RaceKnown &&
+                    bound.Models[slot].Race == metadata.Find(source.Models[slot])->Race,
+                    "actual source ordered model and race bound without loaded assumption");
+        }
+        NativePedStreamInput input;
+        input.ZoneKnown = input.SlotsKnown = true;
+        input.RaceMask = 15;
+        input.Groups = streamingGroups;
+        input.Percentages.fill(6); // Explicit clock/zone fixture, not actual runtime percentages.
+        NativeSourceRng rng;
+        Check(rng.SeedOnce(worldZone) == NativeSourceRngStatus::Ready, "one source RNG for actual-data adapter fixture");
+        NativePedStreamState state;
+        NativePedStreamChoice choice;
+        Check(NativePickPedModelToStream(input, rng.Reference(), state, choice) == NativePedStreamStatus::Selected &&
+            metadata.Find(choice.Model) && choice.Draws == rng.Inspect().Value->DrawCount,
+            "original picker consumes real model groups and explicit requested-slot observations");
+    }
     NativePedMetadataPolicies policies(metadata, NativePedZonePolicy{true, false, 15});
     NativePedMetadataPolicies unknownZone(metadata, std::nullopt);
     bool accepted = true;

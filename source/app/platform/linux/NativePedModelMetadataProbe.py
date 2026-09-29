@@ -142,7 +142,7 @@ def main():
                 '-ffunction-sections', '-fdata-sections']
             objects = []
             for name in ('NativePedModelMetadata', 'NativePedModelMetadataProbe', 'NativeWorldEntityInfo',
-                         'NativeCivilianOccupation', 'NativePedModelPolicies'):
+                         'NativeCivilianOccupation', 'NativePedModelPolicies', 'NativePedStreaming', 'NativeSourceRng'):
                 obj = OUT / (stem + '-' + name + '.o')
                 subprocess.run(flags + ['-c', str(SOURCE / 'app/platform/linux' / (name + '.cpp')), '-o', str(obj)],
                     cwd=ROOT / 'build', check=True, stdout=log, stderr=subprocess.STDOUT)
