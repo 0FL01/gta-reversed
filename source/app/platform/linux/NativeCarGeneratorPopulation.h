@@ -36,6 +36,16 @@ struct NativeCarStreamChoice {
     std::uint8_t Draws = 0;
 };
 
+struct NativePopulationCycleObservation {
+    bool Known = false;
+    NativeZonePopulationEntry Zone;
+    // Exact already-rescaled authored row: maxima, dealer/gang/cop/other and
+    // eighteen ordinary group percentages. No live density/actor state implied.
+    std::array<std::uint8_t, 24> Row{};
+    std::uint16_t RowIndex = 0;
+    bool operator==(const NativePopulationCycleObservation&) const = default;
+};
+
 // Read-only source membership/weight calculation. The caller supplies the
 // streaming owner's *ordered* loaded roster and its one shared RNG reference.
 // No independent model loader, source RNG seed, or fallback car is created.
@@ -43,6 +53,12 @@ class NativeCarGeneratorPopulation {
 public:
     bool LoadBeforeWorker(const char* gameDir,
         std::span<const NativeCarGeneratorModelDefinition> definitions, std::string& error);
+    // Shared source cycle/zone observation for car and ped consumers. Uses the
+    // existing reader and live SCM-mutated zone entries, no IO or RNG draw.
+    // Missing/changed authority retains out and is never an invented no-zone.
+    bool ObserveCycle(NativeScriptPosition player, std::uint8_t hour, bool weekend,
+        std::span<const NativeZonePopulationEntry> zoneStates,
+        NativePopulationCycleObservation& out, std::string& error) const;
     bool Select(NativeScriptPosition player, std::uint8_t hour, bool weekend,
         std::span<const NativeZonePopulationEntry> zoneStates,
         std::span<const NativeCarLoadedModel> orderedLoadedModels, NativeSourceRngRef rng,

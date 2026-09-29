@@ -1,4 +1,5 @@
 #include "app/platform/linux/NativeCarGeneratorPopulation.h"
+#include "app/platform/linux/NativePedStreaming.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -14,7 +15,8 @@ void Check(bool valid, const char* message) {
 } // namespace
 
 int main(int argc, char** argv) {
-    Check(argc == 2, "game directory argument");
+    Check(argc == 2 || (argc == 3 && std::string(argv[2]) == "--cycle-rows"), "game directory argument");
+    const bool rows = argc == 3;
     std::string error;
     NativeCarGenerators generators;
     Check(generators.LoadBeforeWorker(argv[1], 0, error), "vehicles.ide definitions");
@@ -107,6 +109,83 @@ int main(int argc, char** argv) {
         duplicate, 0, streamRng.Reference(), stream, error) &&
         streamRng.Inspect().Value->DrawCount == streamDraws,
         "duplicate loaded roster rejects before shared RNG draw");
+    NativeWorldEntityInfo names;
+    NativePedModelMetadata metadata;
+    Check(names.LoadBeforeWorker(argv[1], {}, error) && metadata.LoadBeforeWorker(argv[1], names, error),
+        "same complete IDE and ped metadata authority for cycle binding");
+    auto cycleZones = std::vector<NativeZonePopulationEntry>(zones.Entries().begin(), zones.Entries().end());
+    auto cycleZone = std::ranges::find(cycleZones, prior.Zone, &NativeZonePopulationEntry::Label);
+    Check(cycleZone != cycleZones.end(), "qualified source zone identity");
+    for (std::uint32_t type = 0; type < 20; ++type) {
+        for (std::uint32_t weekend = 0; weekend < 2; ++weekend) {
+            for (std::uint32_t hour = 0; hour < 24; ++hour) {
+                cycleZone->PopulationType = std::uint8_t(type);
+                cycleZone->Races = std::uint8_t((type + weekend + hour) % 16);
+                cycleZone->DealerStrength = std::uint8_t(type * 3);
+                cycleZone->NoCops = hour % 2 != 0;
+                for (std::size_t gang = 0; gang < cycleZone->GangStrength.size(); ++gang)
+                    cycleZone->GangStrength[gang] = std::uint8_t((type + gang) % 101);
+                NativePopulationCycleObservation observed;
+                Check(owner.ObserveCycle({2369, -1263, 23}, std::uint8_t(hour), weekend != 0,
+                    cycleZones, observed, error) && observed.Known && observed.Zone == *cycleZone &&
+                    observed.RowIndex == (type * 2 + weekend) * 12 + hour / 2,
+                    "all real source rows bind explicit clock/week and current zone settings");
+                for (std::uint32_t region = 0; region < 3; ++region) {
+                    NativePedStreamInput input;
+                    Check(NativeQualifyPedCycleSelection(metadata, region, observed, input) ==
+                        NativePedStreamStatus::QualifiedCycleInput && input.ZoneKnown &&
+                        input.RaceMask == observed.Zone.Races && !input.SlotsKnown &&
+                        std::equal(input.Percentages.begin(), input.Percentages.end(), observed.Row.begin() + 6),
+                        "actual cycle percentages/race/group binding cannot invent requested or loaded slots");
+                }
+                if (rows && hour % 2 == 0) {
+                    std::printf("CYCLE %u %u %u %u %s %u %u %d", type, weekend, hour,
+                        observed.RowIndex, observed.Zone.Label.c_str(), observed.Zone.Races,
+                        observed.Zone.DealerStrength, int(observed.Zone.NoCops));
+                    for (const auto gang : observed.Zone.GangStrength) std::printf(" %u", unsigned(gang));
+                    for (const auto value : observed.Row) std::printf(" %u", unsigned(value));
+                    std::printf("\n");
+                }
+            }
+        }
+    }
+    NativePopulationCycleObservation observed;
+    observed.Zone.Label = "retain";
+    const auto retained = observed;
+    Check(!owner.ObserveCycle({2369, -1263, 23}, 24, false, cycleZones, observed, error) && observed == retained,
+        "invalid cycle hour retains prior observation");
+    Check(!owner.ObserveCycle({0, 0, 9999}, 12, false, cycleZones, observed, error) && observed == retained,
+        "unqualified player is not a verified absent zone");
+    Check(!owner.ObserveCycle({2369, -1263, 23}, 12, false, altered, observed, error) && observed == retained,
+        "changed zone identities reject without publishing a cycle");
+    cycleZone->PopulationType = 20;
+    Check(!owner.ObserveCycle({2369, -1263, 23}, 12, false, cycleZones, observed, error) && observed == retained,
+        "population type outside the actual 480 rows cannot get a default row");
+    NativePedStreamInput qualified;
+    qualified.RaceMask = 77;
+    Check(NativeQualifyPedCycleSelection(metadata, 0, observed, qualified) == NativePedStreamStatus::UnknownZone &&
+        qualified.RaceMask == 77, "unknown cycle cannot authorize ped selection");
+    observed.Known = true;
+    observed.Zone.PopulationType = 1;
+    observed.RowIndex = 0;
+    Check(NativeQualifyPedCycleSelection(metadata, 0, observed, qualified) == NativePedStreamStatus::InvalidInput &&
+        qualified.RaceMask == 77, "mismatched cycle/zone identity cannot publish a selection input");
+    observed.RowIndex = 24;
+    Check(NativeQualifyPedCycleSelection(metadata, 3, observed, qualified) == NativePedStreamStatus::InvalidInput &&
+        qualified.RaceMask == 77, "cycle population type cannot invent current world-region authority");
+    NativePedModelMetadata unavailable;
+    Check(NativeQualifyPedCycleSelection(unavailable, 0, observed, qualified) == NativePedStreamStatus::UnknownModel &&
+        qualified.RaceMask == 77, "actual cycle cannot supply missing ped model authority");
+    cycleZone->PopulationType = 19;
+    Check(owner.ObserveCycle({2369, -1263, 23}, 12, false, cycleZones, observed, error) &&
+        NativeQualifyPedCycleSelection(metadata, 0, observed, qualified) == NativePedStreamStatus::QualifiedCycleInput,
+        "qualified actual cycle can be prepared without a requested-slot owner");
+    NativePedStreamState selectionState;
+    NativePedStreamChoice selectionChoice;
+    Check(NativePickPedModelToStream(qualified, streamRng.Reference(), selectionState, selectionChoice) ==
+        NativePedStreamStatus::UnknownSlots && selectionChoice.Model == -1,
+        "cycle binding is not permission to execute selection using fake empty slots");
+    Check(streamRng.Inspect().Value->DrawCount == streamDraws, "all cycle observations and group bindings are RNG-free");
     std::printf("native-loaded-cars-ok checks=%d groups=%zu cycle=%zu zone=%s eligible=%zu selected=%d suppressed=ten-draw-no-model next-stream=%d group=%d draws=%u\n",
         s_Checks, owner.CarGroups(), owner.CycleRows(), prior.Zone.c_str(),
         prior.AppropriateLoadedCars.size(), prior.ModelId, postTaxi.ModelId, postTaxi.Group, postTaxi.Draws);

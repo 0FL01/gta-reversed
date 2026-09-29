@@ -1,4 +1,5 @@
 #include "NativePedStreaming.h"
+#include "NativeCarGeneratorPopulation.h"
 
 #include <algorithm>
 #include <cassert>
@@ -105,6 +106,22 @@ NativePedStreamStatus NativePickPedModelToStream(const NativePedStreamInput& inp
         }
     }
     return NativePedStreamStatus::NoSelection;
+}
+
+NativePedStreamStatus NativeQualifyPedCycleSelection(const NativePedModelMetadata& metadata,
+    std::uint32_t worldZone, const NativePopulationCycleObservation& observed, NativePedStreamInput& out) {
+    if (!observed.Known) return NativePedStreamStatus::UnknownZone;
+    if (observed.Zone.PopulationType >= 20 || observed.RowIndex >= 480 ||
+        observed.RowIndex / 24 != observed.Zone.PopulationType)
+        return NativePedStreamStatus::InvalidInput;
+    NativePedStreamInput candidate;
+    const auto status = NativeQualifyPedStreamingGroups(metadata, worldZone, candidate.Groups);
+    if (status != NativePedStreamStatus::QualifiedGroups) return status;
+    candidate.ZoneKnown = true;
+    candidate.RaceMask = observed.Zone.Races & 15u;
+    std::copy_n(observed.Row.begin() + 6, candidate.Percentages.size(), candidate.Percentages.begin());
+    out = candidate;
+    return NativePedStreamStatus::QualifiedCycleInput;
 }
 
 NativePedStreamStatus NativeAdvancePedZoneRequests(const NativePedZoneStreamInput& input,

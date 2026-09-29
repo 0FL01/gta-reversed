@@ -4,6 +4,8 @@
 #include "NativePedModelMetadata.h"
 #include "NativeSourceRng.h"
 
+struct NativePopulationCycleObservation;
+
 struct NativePedStreamModel {
     std::int32_t Model = -1;
     bool RaceKnown = false;
@@ -40,7 +42,7 @@ struct NativePedStreamChoice {
 enum class NativePedStreamStatus {
     Selected, NoSelection, UnknownZone, UnknownSlots, UnknownGroup,
     UnknownModel, UnknownRng, InvalidInput, InvalidDistribution, QualifiedGroups, PlannedSlots,
-    ZonePhaseComplete, UnknownCheat, UnknownReferences
+    ZonePhaseComplete, UnknownCheat, UnknownReferences, QualifiedCycleInput
 };
 
 struct NativePedRequestedSlots {
@@ -86,6 +88,12 @@ inline constexpr std::array<std::array<std::uint8_t, 3>, 33> NativePedGroupTrans
 // Memory-only actual metadata adapter; world zone must come from its owner.
 NativePedStreamStatus NativeQualifyPedStreamingGroups(const NativePedModelMetadata&,
     std::uint32_t worldZone, std::array<NativePedStreamGroup, 18>& out);
+
+// Bind the shared cycle reader's actual row and live race setting to actual
+// translated ped groups. Requested slots, references and world-region authority
+// remain separate observations; success never sets SlotsKnown or implies loaded.
+NativePedStreamStatus NativeQualifyPedCycleSelection(const NativePedModelMetadata&,
+    std::uint32_t worldZone, const NativePopulationCycleObservation&, NativePedStreamInput& out);
 
 // Exact ten attempts, strict percentage boundary, pre-increment cursor and all
 // eight requested-slot duplicate exclusions. Cursors/RNG consumed before an

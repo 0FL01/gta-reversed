@@ -198,10 +198,9 @@ bool NativeCarGeneratorPopulation::Select(NativeScriptPosition player, std::uint
     return true;
 }
 
-bool NativeCarGeneratorPopulation::PreviewAppropriate(NativeScriptPosition player,
+bool NativeCarGeneratorPopulation::ObserveCycle(NativeScriptPosition player,
     std::uint8_t hour, bool weekend, std::span<const NativeZonePopulationEntry> zoneStates,
-    std::span<const NativeCarLoadedModel> orderedLoadedModels,
-    NativeCarPopulationSelection& out, std::string& error) const {
+    NativePopulationCycleObservation& out, std::string& error) const {
     if (!m_Loaded || hour >= 24 || !std::isfinite(player.X) || !std::isfinite(player.Y) ||
         !std::isfinite(player.Z) || zoneStates.size() != m_Zones.zones.size()) {
         error = "missing source population/zone authority";
@@ -225,7 +224,21 @@ bool NativeCarGeneratorPopulation::PreviewAppropriate(NativeScriptPosition playe
     if (selected < 0) { error = "player has no verified 3D population zone"; return false; }
     const auto& zone = zoneStates[std::size_t(selected)];
     if (zone.PopulationType >= 20) { error = "zone population type outside source rows"; return false; }
-    const auto& row = m_Rows[(std::size_t(zone.PopulationType) * 2 + (weekend ? 1 : 0)) * 12 + hour / 2];
+    const auto rowIndex = (std::size_t(zone.PopulationType) * 2 + (weekend ? 1 : 0)) * 12 + hour / 2;
+    NativePopulationCycleObservation candidate{true, zone, m_Rows[rowIndex], std::uint16_t(rowIndex)};
+    out = std::move(candidate);
+    error.clear();
+    return true;
+}
+
+bool NativeCarGeneratorPopulation::PreviewAppropriate(NativeScriptPosition player,
+    std::uint8_t hour, bool weekend, std::span<const NativeZonePopulationEntry> zoneStates,
+    std::span<const NativeCarLoadedModel> orderedLoadedModels,
+    NativeCarPopulationSelection& out, std::string& error) const {
+    NativePopulationCycleObservation observed;
+    if (!ObserveCycle(player, hour, weekend, zoneStates, observed, error)) return false;
+    const auto& zone = observed.Zone;
+    const auto& row = observed.Row;
     std::vector<std::int32_t> eligible;
     std::vector<std::int32_t> seen;
     std::uint32_t weightSum = 0;
@@ -286,19 +299,10 @@ bool NativeCarGeneratorPopulation::ChooseModelToStream(NativeScriptPosition play
             return false;
         }
     }
-    int selected = -1;
-    float size = std::numeric_limits<float>::infinity();
-    for (std::size_t i = 0; i < m_Zones.zones.size(); ++i) {
-        const auto& z = m_Zones.zones[i];
-        if (player.X < z.x1 || player.X > z.x2 || player.Y < z.y1 || player.Y > z.y2 ||
-            player.Z < z.z1 || player.Z > z.z2) continue;
-        const float area = (z.x2 - z.x1) + (z.y2 - z.y1);
-        if (area < size) { size = area; selected = int(i); }
-    }
-    if (selected < 0) { error = "player has no verified source 3D streaming zone"; return false; }
-    const auto& zone = zoneStates[std::size_t(selected)];
-    if (zone.PopulationType >= 20) { error = "streaming population type outside source rows"; return false; }
-    const auto& row = m_Rows[(std::size_t(zone.PopulationType) * 2 + (weekend ? 1 : 0)) * 12 + hour / 2];
+    NativePopulationCycleObservation observed;
+    if (!ObserveCycle(player, hour, weekend, zoneStates, observed, error)) return false;
+    const auto& zone = observed.Zone;
+    const auto& row = observed.Row;
     const auto loaded = [&](std::int32_t model) {
         return std::ranges::find(orderedLoadedModels, model, &NativeCarLoadedModel::ModelId) !=
             orderedLoadedModels.end();
