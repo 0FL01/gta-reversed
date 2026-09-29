@@ -97,6 +97,8 @@ bool NativePathGraph::LoadBeforeWorker(const char* gameDir, std::string& error) 
             node.Water = (p[24] & 0x80u) != 0;
             node.SwitchedOff = (p[24] & 0x20u) != 0;
             node.Vehicle = nodeId < area.Metadata.VehicleNodes;
+            node.Width = p[22];
+            node.PedDensity = p[26] & 0x0Fu;
             area.Nodes.push_back(node);
         }
         const std::size_t addressOffset = nodesOffset + std::size_t(area.Metadata.Nodes) * 0x1C +
@@ -110,6 +112,8 @@ bool NativePathGraph::LoadBeforeWorker(const char* gameDir, std::string& error) 
             std::size_t(area.Metadata.Addresses) * 2;
         area.Lengths.assign(bytes.begin() + std::ptrdiff_t(lengthsOffset),
             bytes.begin() + std::ptrdiff_t(lengthsOffset + extended));
+        area.Intersections.assign(bytes.begin() + std::ptrdiff_t(lengthsOffset + extended),
+            bytes.begin() + std::ptrdiff_t(lengthsOffset + extended * 2));
         for (const auto& node : area.Nodes) {
             if (std::size_t(node.BaseLink) + node.Links > area.Links.size()) {
                 error = "path graph node links exceed payload";
@@ -150,6 +154,17 @@ const NativePathGraphNode* NativePathGraph::Resolve(NativePathAddress address) c
     if (address.Area >= m_Areas.size() || !m_Areas[address.Area].Active ||
         address.Node >= m_Areas[address.Area].Nodes.size()) return nullptr;
     return &m_Areas[address.Area].Nodes[address.Node];
+}
+
+bool NativePathGraph::Link(NativePathAddress origin, std::uint8_t offset,
+    NativePathGraphLink& out) const noexcept {
+    const auto* node = Resolve(origin);
+    if (!node || offset >= node->Links) return false;
+    const auto& area = m_Areas[origin.Area];
+    const auto index = std::size_t(node->BaseLink) + offset;
+    if (index >= area.Links.size() || index >= area.Intersections.size()) return false;
+    out = {area.Links[index], (area.Intersections[index] & 1u) != 0};
+    return true;
 }
 
 std::span<const NativePathGraphNode> NativePathGraph::Nodes(std::uint8_t area) const {

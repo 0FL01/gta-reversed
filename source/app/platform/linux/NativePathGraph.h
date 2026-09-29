@@ -22,6 +22,13 @@ struct NativePathGraphNode {
     bool Vehicle = false;
     bool Water = false;
     bool SwitchedOff = false;
+    std::uint8_t Width = 0; // Source byte22, fixed-point width /16.
+    std::uint8_t PedDensity = 0; // Source low nibble of byte26.
+};
+
+struct NativePathGraphLink {
+    NativePathAddress Address;
+    bool CrossesRoad = false; // Source CPathIntersectionInfo bit0.
 };
 
 struct NativePathRoute {
@@ -49,6 +56,7 @@ public:
     NativePathGraphStatus Search(NativePathAddress start, NativePathAddress end,
         bool vehicle, NativePathRoute& out, std::string& error) const;
     const NativePathGraphNode* Resolve(NativePathAddress) const noexcept;
+    bool Link(NativePathAddress origin, std::uint8_t offset, NativePathGraphLink& out) const noexcept;
     std::span<const NativePathGraphNode> Nodes(std::uint8_t area) const;
     const NativePathAreaResidency* Metadata(std::uint8_t area) const noexcept;
     std::uint64_t Generation() const noexcept { return m_Generation; }
@@ -60,6 +68,7 @@ private:
         std::vector<NativePathGraphNode> Nodes;
         std::vector<NativePathAddress> Links;
         std::vector<std::uint8_t> Lengths;
+        std::vector<std::uint8_t> Intersections;
         bool Active = false;
     };
     std::array<Area, 64> m_Areas;

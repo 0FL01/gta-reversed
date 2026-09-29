@@ -84,6 +84,7 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
         app/platform/linux/NativeVehicleFamilyControl.cpp
         app/platform/linux/NativeVehicleFamilyLifecycle.cpp
         app/platform/linux/NativePathGraph.cpp
+        app/platform/linux/NativePedCreationCoordinates.cpp
         app/platform/linux/NativeSourceEventFlow.cpp
         app/platform/linux/NativePopulationRuntime.cpp
         app/platform/linux/NativeAmbientPedPolicy.cpp
@@ -141,6 +142,7 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
             app/platform/linux/NativeWorldGround.cpp
             app/platform/linux/NativeDynamicSectorLists.cpp
             app/platform/linux/NativeAmbientPedPolicy.cpp
+            app/platform/linux/NativePedCreationCoordinates.cpp
             app/platform/linux/NativeSourceGround.cpp
             PROPERTIES COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-Wall;-Wextra;-Wpedantic"
         )
