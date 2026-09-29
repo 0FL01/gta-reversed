@@ -6,6 +6,51 @@
 #include <cmath>
 #include <limits>
 
+void NativeInitializePedGangWar(NativePedGangWarControlState& state) {
+    state.Known = true;
+    state.OffensiveState = 0;
+    state.SpecificZoneCount = 0;
+    state.Provocation = 0.0f;
+    state.Active = false;
+    state.PlayerOnMission = false;
+    state.War.StateKnown = true;
+    state.War.AttackState = 0;
+}
+
+void NativeResetPedStreamingRequests(NativePedZoneStreamState& state, std::uint16_t& requestedGangPeds) {
+    state.Slots.Known = true;
+    state.Slots.Models.fill(-1);
+    state.Slots.Count = 0;
+    state.Selection.NextPedToLoad.fill(0);
+    state.CurrentZoneType = -1;
+    requestedGangPeds = 0;
+}
+
+NativePedStreamStatus NativePlanPedGangWarUpdate(const NativePedGangWarControlState& state,
+    const NativePedGangWarUpdateInput& input, NativePedGangWarUpdatePlan& out) {
+    if (!state.Known) return NativePedStreamStatus::UnknownGangWar;
+    if (!input.MissionKnown) return NativePedStreamStatus::UnknownMission;
+    if (state.SpecificZoneCount < 0 || state.SpecificZoneCount > 6) return NativePedStreamStatus::InvalidInput;
+    NativePedGangWarUpdatePlan candidate;
+    candidate.PlayerOnMission = input.PlayerOnMission;
+    if (input.PlayerOnMission && !state.PlayerOnMission && !state.SpecificZoneCount)
+        candidate.Effects[candidate.Count++] = NativePedGangWarUpdateEffectKind::EndGangWarForMission;
+    candidate.Effects[candidate.Count++] = NativePedGangWarUpdateEffectKind::PublishMissionState;
+    if (!input.CutsceneKnown) return NativePedStreamStatus::UnknownCutscene;
+    if (!input.CutsceneProcessing) {
+        if (!input.FrameCounterKnown) return NativePedStreamStatus::UnknownFrameCounter;
+        if (std::uint8_t(input.FrameCounter) == 56)
+            candidate.Effects[candidate.Count++] = NativePedGangWarUpdateEffectKind::UpdateTerritoryPercentage;
+        if (state.Active) {
+            if (!input.CoopKnown) return NativePedStreamStatus::UnknownCoop;
+            if (!input.Coop)
+                candidate.Effects[candidate.Count++] = NativePedGangWarUpdateEffectKind::ActiveControllerUpdate;
+        }
+    }
+    out = candidate;
+    return NativePedStreamStatus::PlannedGangWarUpdate;
+}
+
 NativePedStreamStatus NativeObservePedGangDemand(const NativePedGangDemandInput& input,
     NativePedGangDemand& out) {
     if (!input.ZoneKnown) return NativePedStreamStatus::UnknownZone;

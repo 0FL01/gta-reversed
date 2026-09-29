@@ -53,6 +53,13 @@ count_hash = hashlib.sha256(pe.get_data(0x62f660 - 0x400000, 0x13)).hexdigest()
 assert count_hash == 'ceeb1af1a1f9de70fe643654ad33bf7af354e533ded599fa518c7f587da0e814'
 war_hash = hashlib.sha256(pe.get_data(0x446c00 - 0x400000, 0x76)).hexdigest()
 assert war_hash == 'fee5d80169ea5e16192146be6982222db3d6ae9e2c05a744be5a396b072c53cb'
+startup_ranges = ((0x446780, 0x24, '82bac8089a0819c0c3a3029fe2027924f61f55eec360fff78581873ec149ea00'),
+    (0x5d3989, 0x99, '55aca3278c7cf6d070770472e13d609652cbb05b0d34db0b11fb8cf91d599b92'),
+    (0x5d3a49, 0x22, 'e4dc76ff3bcd153c4edde78047fee8d0ba6f8bba3ab4261ca43c8b641811ebff'))
+for address, length, expected_hash in startup_ranges:
+    assert hashlib.sha256(pe.get_data(address - 0x400000, length)).hexdigest() == expected_hash
+update_prefix_hash = hashlib.sha256(pe.get_data(0x449510 - 0x400000, 0x6e)).hexdigest()
+assert update_prefix_hash == '85873e89aa4ac267d73b9cc099b424ee27a1a973d4efaf0832c8fbecb70f277b'
 translation = pe.get_data(0x945cc0 - 0x400000, 33 * 3 * 4)
 assert hashlib.sha256(translation).hexdigest() == 'd4649a51706637c3136cf70d24b1a00d68a766f5958b3f6d0d6c0ac755e55900'
 # Compare authored native ordinals, not a duplicate handwritten reference table.
@@ -90,6 +97,25 @@ def random_draw(machine, address, size, _):
         state['value'] = (state['value'] * 214013 + 2531011) & 0xffffffff
         state['draws'] += 1
         machine.reg_write(UC_X86_REG_EAX, (state['value'] >> 16) & 32767)
+    elif state.get('war_update_mode'):
+        if address == 0x469de0:
+            machine.reg_write(UC_X86_REG_EAX, int(state['mission']))
+            state['mission_calls'] += 1
+        elif address == 0x4493d0:
+            stack = machine.reg_read(UC_X86_REG_ESP)
+            assert struct.unpack('<I', machine.mem_read(stack + 4, 4))[0] == 1
+            state['events'].append(0)
+        elif address == 0x446ce0:
+            state['events'].append(1)
+        elif address == 0x444000:
+            machine.reg_write(UC_X86_REG_EAX, int(state['coop']))
+            state['coop_calls'] += 1
+        elif address == 0x449546:
+            state['events'].append(3)
+        elif address in (0x44957e, 0x449e29):
+            if address == 0x44957e:
+                state['events'].append(2)
+            machine.emu_stop()
     elif state.get('demand_mode'):
         if address == 0x560ce0:
             # Player position is an explicit owner observation, not an actor
@@ -467,14 +493,104 @@ for line in native.stdout.splitlines():
     assert state['value'] == 1792 and state['draws'] == 0, 'demand has no RNG'
     demand_checks += 1
 assert demand_checks == 6625
+startup_checks = 0
+for line in native.stdout.splitlines():
+    fields = line.split()
+    if not fields or fields[0] != 'STARTUP':
+        continue
+    (seed, timer, count, zone, timer_after, peds, offensive, attack_state, zones, provocation,
+        active, mission, ax, ay, gang) = map(int, fields[1:])
+    write(0x95c79c, 'I', seed % 9)
+    write(0x95c7e8, '8i', *[10 + seed] * 8)
+    write(0x95c7a0, '18i', *[21 + seed] * 18)
+    write(0x95c808, 'i', seed % 32)
+    write(0x95c798, 'H', seed * 1023 & 0xffff)
+    cars_before, gang_timer, member = seed * 7757 & 0xffff, 17 + seed, seed % 21
+    write(0x95c794, 'H', cars_before)
+    write(0x9dd0a8, '3i', timer, gang_timer, member)
+    write(0x9e2604, 'i', 1 + seed % 7)
+    write(0x9e25ec, 'i', 1 + seed % 2)
+    write(0x9e2634, 'i', 6)
+    write(0x9e25fc, 'f', seed + 1)
+    write(0x9e2630, 'B', 1)
+    write(0x9e2640, 'B', 1)
+    write(0x9e2654, '2I', ax, ay)
+    write(0x9e2624, 'i', gang)
+    state = dict(value=1792, draws=0)
+    for start, end in ((0x5d3989, 0x5d3a22), (0x5d3a49, 0x5d3a6b), (0x446780, 0x30e0000)):
+        stack = 0x3080000
+        write(stack, 'I', 0x30e0000)
+        uc.reg_write(UC_X86_REG_ESP, stack)
+        uc.reg_write(UC_X86_REG_EBP, stack + 0x100)
+        # Second reset range follows unrelated allocation/CDirectory effects;
+        # initialized ESI=-1, EDI=0 are the first range's actual live registers.
+        uc.reg_write(UC_X86_REG_ESI, 0xffffffff)
+        uc.reg_write(UC_X86_REG_EDI, 0)
+        uc.reg_write(UC_X86_REG_FPCW, 0x37f)
+        uc.emu_start(start, end, count=10000)
+        assert uc.reg_read(UC_X86_REG_EIP) == end, ('startup range cap', fields)
+    actual = (struct.unpack('<I', uc.mem_read(0x95c79c, 4))[0],
+        struct.unpack('<i', uc.mem_read(0x95c808, 4))[0],
+        struct.unpack('<i', uc.mem_read(0x9dd0a8, 4))[0],
+        struct.unpack('<H', uc.mem_read(0x95c798, 2))[0],
+        struct.unpack('<i', uc.mem_read(0x9e2604, 4))[0],
+        struct.unpack('<i', uc.mem_read(0x9e25ec, 4))[0],
+        struct.unpack('<i', uc.mem_read(0x9e2634, 4))[0],
+        struct.unpack('<I', uc.mem_read(0x9e25fc, 4))[0],
+        uc.mem_read(0x9e2630, 1)[0], uc.mem_read(0x9e2640, 1)[0],
+        *struct.unpack('<2I', uc.mem_read(0x9e2654, 8)),
+        struct.unpack('<i', uc.mem_read(0x9e2624, 4))[0])
+    assert actual == (count, zone, timer_after, peds, offensive, attack_state, zones,
+        provocation, active, mission, ax, ay, gang), ('startup owned writes/preserved observations', fields, actual)
+    assert struct.unpack('<8i', uc.mem_read(0x95c7e8, 32)) == (-1,) * 8
+    assert struct.unpack('<18i', uc.mem_read(0x95c7a0, 72)) == (0,) * 18
+    assert struct.unpack('<H', uc.mem_read(0x95c794, 2))[0] == cars_before
+    assert struct.unpack('<2i', uc.mem_read(0x9dd0ac, 8)) == (gang_timer, member)
+    assert state['value'] == 1792 and state['draws'] == 0
+    startup_checks += 1
+assert startup_checks == 64
+update_checks = 0
+# These dependencies are explicit observed/intended effects, not implementations
+# of EndGangWar, territory ownership or the active war/controller body. Execute
+# the actual admission prefix and stop before an unowned active update.
+for address in (0x469de0, 0x4493d0, 0x446ce0, 0x444000):
+    uc.mem_write(address, b'\xc3')
+    uc.ctl_remove_cache(address, address + 1)
+for line in native.stdout.splitlines():
+    fields = line.split()
+    if not fields or fields[0] != 'WAR_UPDATE':
+        continue
+    bits, frame, mission_after, effect_count, *effects = map(int, fields[1:])
+    assert len(effects) == effect_count
+    write(0x9e2640, 'B', bool(bits & 1))
+    write(0x9e2634, 'i', 6 if bits & 2 else 0)
+    write(0x9e2630, 'B', bool(bits & 4))
+    write(0xbd6f3e, 'B', bool(bits & 16))
+    write(0xc0fd40, 'I', frame)
+    state = dict(war_update_mode=True, mission=bool(bits & 8), coop=bool(bits & 32),
+        mission_calls=0, coop_calls=0, events=[], value=1792, draws=0)
+    stack = 0x3080000
+    write(stack, 'I', 0x30e0000)
+    uc.reg_write(UC_X86_REG_ESP, stack)
+    uc.reg_write(UC_X86_REG_FPCW, 0x37f)
+    uc.emu_start(0x449510, 0x30e0000, count=10000)
+    assert uc.reg_read(UC_X86_REG_EIP) in (0x44957e, 0x449e29), ('update admission cap', fields)
+    assert state['events'] == effects, ('source update admission/order/low-byte frame counter', fields, state)
+    assert uc.mem_read(0x9e2640, 1)[0] == mission_after
+    assert state['mission_calls'] == 2 and state['coop_calls'] == int(bool(bits & 4) and not bits & 16)
+    assert state['value'] == 1792 and state['draws'] == 0
+    update_checks += 1
+assert update_checks == 512
 print('ped-streaming-retail-oracle-ok checks=' + str(checks),
       'group-boundary=strict-less fraction=rand/32768 cursors=preincrement translation=99',
       'slot-plans=' + str(slot_checks), 'zone-phases=' + str(zone_checks),
       'zone-change-timer=299 replacement-timer=300 gang-phases=' + str(gang_checks),
       'gang-masks=' + str(mask_checks), 'gang-demands=' + str(demand_checks),
+      'startup-resets=' + str(startup_checks), 'streaming-reset=ped-fields-only',
+      'war-update-plans=' + str(update_checks), 'territory-frame=low-byte-56',
       'loaded-gang-car-guard=skip-nonempty demand=source-war-helper observations=explicit',
       'slots=requested-fixtures census=incomplete', 'function-sha256=' + function_hash,
       'slot-function-sha256=' + slot_hash, 'zone-function-sha256=' + zone_hash,
       'mask-function-sha256=' + mask_hash, 'car-count-function-sha256=' + count_hash,
-      'war-function-sha256=' + war_hash)
+      'war-function-sha256=' + war_hash, 'war-update-prefix-sha256=' + update_prefix_hash)
 print(native.stdout.splitlines()[-1])

@@ -46,7 +46,8 @@ enum class NativePedStreamStatus {
     ZonePhaseComplete, UnknownCheat, UnknownReferences, QualifiedCycleInput,
     GangPhaseComplete, UnknownRequestedGangs, GangMaskPhaseComplete,
     UnknownGangDemand, UnknownGangCars, UnknownStreaming, UnknownGangMember,
-    QualifiedGangDemand, UnknownGangWar, UnknownPlayerPosition, UnknownAttackPosition
+    QualifiedGangDemand, UnknownGangWar, UnknownPlayerPosition, UnknownAttackPosition,
+    PlannedGangWarUpdate, UnknownMission, UnknownCutscene, UnknownFrameCounter, UnknownCoop
 };
 
 struct NativePedRequestedSlots {
@@ -247,6 +248,50 @@ struct NativePedGangWarObservation {
     bool GangKnown = false;
     std::int32_t Gang = 0;
 };
+struct NativePedGangWarControlState {
+    bool Known = false;
+    std::int32_t OffensiveState = 0, SpecificZoneCount = 0;
+    float Provocation = 0;
+    bool Active = false, PlayerOnMission = false;
+    NativePedGangWarObservation War;
+};
+
+// Exact fields written by InitAtStartOfGame. Coordinates/gang observations are
+// retained, not fabricated by initialization. This establishes startup state,
+// NOT ongoing Update/save/script/attack-wave authority.
+void NativeInitializePedGangWar(NativePedGangWarControlState&);
+
+// Only CStreaming::Initialise's requested-ped fields. Timers, gang rotation and
+// requested CARS are NOT reset there. The caller owns the requested-ped mask
+// separately from car-mask readiness; initializing one cannot qualify the other.
+// Does not initialize model/TXD flags, loaded assets, references or actor pools.
+void NativeResetPedStreamingRequests(NativePedZoneStreamState&, std::uint16_t& requestedGangPeds);
+
+struct NativePedGangWarUpdateInput {
+    bool MissionKnown = false, PlayerOnMission = false;
+    bool CutsceneKnown = false, CutsceneProcessing = false;
+    bool FrameCounterKnown = false;
+    std::uint32_t FrameCounter = 0;
+    bool CoopKnown = false, Coop = false;
+};
+enum class NativePedGangWarUpdateEffectKind {
+    EndGangWarForMission, UpdateTerritoryPercentage, ActiveControllerUpdate, PublishMissionState
+};
+struct NativePedGangWarUpdatePlan {
+    bool PlayerOnMission = false;
+    std::array<NativePedGangWarUpdateEffectKind, 4> Effects{};
+    std::uint8_t Count = 0;
+};
+// Update's source admission/order only. Original territory test uses the LOW
+// BYTE of frameCounter (56 modulo 256), not an equality on the full counter.
+// Execute effects in order: EndGangWar, PublishMissionState with the plan's
+// PlayerOnMission value, then territory/controller. No later effect may observe
+// the old mission flag. This plan cannot authorize no attack after an unfulfilled
+// producer, and does not itself mutate the control state.
+// Unknown observations retain out; later early guards need no irrelevant facts.
+NativePedStreamStatus NativePlanPedGangWarUpdate(const NativePedGangWarControlState&,
+    const NativePedGangWarUpdateInput&, NativePedGangWarUpdatePlan& out);
+
 struct NativePedGangDemandInput {
     bool ZoneKnown = false, HasZone = false;
     std::array<std::uint8_t, 10> GangStrength{};

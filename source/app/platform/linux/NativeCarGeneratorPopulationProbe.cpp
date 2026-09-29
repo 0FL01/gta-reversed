@@ -240,6 +240,38 @@ int main(int argc, char** argv) {
         NativePedStreamStatus::UnknownSlots && selectionChoice.Model == -1,
         "cycle binding is not permission to execute selection using fake empty slots");
     Check(streamRng.Inspect().Value->DrawCount == streamDraws, "all cycle observations and group bindings are RNG-free");
+    NativePedGangWarControlState initializedWar;
+    NativeInitializePedGangWar(initializedWar);
+    Check(NativeQualifyPedGangDemand(observed, true, false, initializedWar.War, demand) ==
+        NativePedStreamStatus::QualifiedGangDemand && !demand.Wanted && !initializedWar.War.GangKnown &&
+        !initializedWar.War.AttackPositionKnown, "source initialized no-attack binds actual zone without guessed gang/coordinates");
+    cycleZone->PopulationType = 5;
+    Check(owner.ObserveCycle({2369, -1263, 23}, 12, false, cycleZones, observed, error) &&
+        NativeQualifyPedCycleSelection(metadata, 0, observed, qualified) == NativePedStreamStatus::QualifiedCycleInput,
+        "source initialized requests consume the same actual cycle/group owner");
+    NativePedZoneStreamState initializedRequests;
+    std::uint16_t requestedGangs = 0x3ff;
+    NativeResetPedStreamingRequests(initializedRequests, requestedGangs);
+    NativePedZoneStreamInput initialZone;
+    initialZone.ZoneKnown = initialZone.HasZone = initialZone.CheatKnown = true;
+    initialZone.PopulationType = observed.Zone.PopulationType;
+    initialZone.Selection = qualified;
+    NativePedZoneStreamEffects initialEffects;
+    NativeSourceRng initialRng;
+    Check(initialRng.SeedOnce(0) == NativeSourceRngStatus::Ready, "explicit new-game source RNG owner");
+    Check(NativeAdvancePedZoneRequests(initialZone, initialRng.Reference(), initializedRequests, initialEffects) ==
+        NativePedStreamStatus::ZonePhaseComplete && initializedRequests.Slots.Known &&
+        initializedRequests.Slots.Count == 4 && initializedRequests.TimeBeforeNextLoad == 299 && initialEffects.Count == 8,
+        "actual cycle first source zone requests four peds, not parser-completed assets");
+    for (const auto model : initializedRequests.Slots.Models) {
+        if (model < 0) continue;
+        Check(metadata.Find(model) != nullptr, "source initial requested identity exists in actual complete IDE metadata");
+        NativeCivilianLoadedPed asset;
+        asset.Model = 777;
+        Check(metadata.QualifyCivilianSlot(model, false, false, 0, asset) ==
+            NativePedMetadataStatus::UnknownStreaming && asset.Model == 777,
+            "source requested identity still cannot authorize loaded assets or reference counts");
+    }
     std::printf("native-loaded-cars-ok checks=%d groups=%zu cycle=%zu zone=%s eligible=%zu selected=%d suppressed=ten-draw-no-model next-stream=%d group=%d draws=%u\n",
         s_Checks, owner.CarGroups(), owner.CycleRows(), prior.Zone.c_str(),
         prior.AppropriateLoadedCars.size(), prior.ModelId, postTaxi.ModelId, postTaxi.Group, postTaxi.Draws);

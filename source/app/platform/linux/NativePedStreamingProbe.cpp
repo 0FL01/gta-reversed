@@ -575,6 +575,123 @@ void GangDemands() {
     Check(NativeObservePedGangDemand(input, out) == NativePedStreamStatus::InvalidInput && out == before,
         "invalid position retains mask");
 }
+
+void StartupRequests() {
+    for (std::uint32_t seed = 0; seed < 64; ++seed) {
+        NativePedZoneStreamState state;
+        state.Slots.Known = seed % 2;
+        state.Slots.Count = seed % 9;
+        state.Slots.Models.fill(10 + seed);
+        state.Selection.NextPedToLoad.fill(21 + seed);
+        state.CurrentZoneType = seed % 32;
+        const std::array<std::int32_t, 4> timers{-1, 0, 300, std::numeric_limits<std::int32_t>::min()};
+        state.TimeBeforeNextLoad = timers[seed % timers.size()];
+        const auto timer = state.TimeBeforeNextLoad;
+        std::uint16_t requestedPeds = std::uint16_t(seed * 1023);
+        NativeResetPedStreamingRequests(state, requestedPeds);
+        Check(state.Slots.Known && !state.Slots.Count && state.CurrentZoneType == -1 && !requestedPeds,
+            "only source initialized requested-ped fields become known");
+        for (const auto model : state.Slots.Models) Check(model == -1, "source requested slots reset invalid");
+        for (const auto cursor : state.Selection.NextPedToLoad) Check(!cursor, "source eighteen cursors reset zero");
+        Check(state.TimeBeforeNextLoad == timer, "source static timer is not reset by streaming Initialise");
+        NativePedGangWarControlState war;
+        war.Known = seed % 2;
+        war.OffensiveState = 1 + seed % 7;
+        war.SpecificZoneCount = 6;
+        war.Provocation = float(seed + 1);
+        war.Active = true;
+        war.PlayerOnMission = true;
+        war.War = {bool(seed % 2), 1 + std::int32_t(seed % 2), bool(seed % 2), true,
+            {float(seed), -float(seed)}, {100, -100}, bool(seed % 2), std::int32_t(seed % 10)};
+        const auto observed = war.War;
+        NativeInitializePedGangWar(war);
+        Check(war.Known && !war.OffensiveState && !war.SpecificZoneCount &&
+            std::bit_cast<std::uint32_t>(war.Provocation) == 0 && !war.Active && !war.PlayerOnMission &&
+            war.War.StateKnown && !war.War.AttackState, "source gang-war startup six writes, positive zero");
+        Check(war.War.AttackPositionKnown == observed.AttackPositionKnown &&
+            war.War.PlayerPositionKnown == observed.PlayerPositionKnown && war.War.GangKnown == observed.GangKnown &&
+            war.War.AttackPosition == observed.AttackPosition && war.War.PlayerPosition == observed.PlayerPosition &&
+            war.War.Gang == observed.Gang, "startup does not invent positions or select a gang");
+        NativePedGangDemandInput demand;
+        demand.ZoneKnown = demand.HasZone = demand.CheatKnown = true;
+        demand.War = war.War;
+        NativePedGangDemand wanted{true, 777};
+        Check(NativeObservePedGangDemand(demand, wanted) == NativePedStreamStatus::QualifiedGangDemand && !wanted.Wanted,
+            "owned startup no-attack is qualified without coordinates, not a guessed unknown default");
+        std::printf("STARTUP %u %d %u %d %d %u %d %d %d %u %d %d %u %u %d\n", seed, timer,
+            state.Slots.Count, state.CurrentZoneType, state.TimeBeforeNextLoad, unsigned(requestedPeds),
+            war.OffensiveState, war.War.AttackState, war.SpecificZoneCount,
+            std::bit_cast<std::uint32_t>(war.Provocation), int(war.Active), int(war.PlayerOnMission),
+            std::bit_cast<std::uint32_t>(war.War.AttackPosition[0]),
+            std::bit_cast<std::uint32_t>(war.War.AttackPosition[1]), war.War.Gang);
+    }
+}
+
+void GangWarUpdatePlans() {
+    constexpr std::array<std::uint32_t, 8> frames{0, 56, 255, 256, 312, 512, 568, 65592};
+    for (std::uint32_t bits = 0; bits < 64; ++bits) {
+        NativePedGangWarControlState state;
+        NativeInitializePedGangWar(state);
+        state.PlayerOnMission = bits & 1;
+        state.SpecificZoneCount = bits & 2 ? 6 : 0;
+        state.Active = bits & 4;
+        NativePedGangWarUpdateInput input;
+        input.MissionKnown = input.CutsceneKnown = input.FrameCounterKnown = input.CoopKnown = true;
+        input.PlayerOnMission = bits & 8;
+        input.CutsceneProcessing = bits & 16;
+        input.Coop = bits & 32;
+        for (const auto frame : frames) {
+            input.FrameCounter = frame;
+            NativePedGangWarUpdatePlan plan;
+            Check(NativePlanPedGangWarUpdate(state, input, plan) == NativePedStreamStatus::PlannedGangWarUpdate,
+                "source observed admission plan");
+            Check(plan.PlayerOnMission == input.PlayerOnMission && plan.Count <= 4 &&
+                state.PlayerOnMission == bool(bits & 1) && !state.War.AttackState,
+                "plan neither publishes mission transition nor executes a war producer");
+            std::printf("WAR_UPDATE %u %u %d %u", bits, frame, int(plan.PlayerOnMission), unsigned(plan.Count));
+            for (std::size_t i = 0; i < plan.Count; ++i) std::printf(" %d", int(plan.Effects[i]));
+            std::printf("\n");
+        }
+    }
+    NativePedGangWarControlState state;
+    NativePedGangWarUpdateInput input;
+    NativePedGangWarUpdatePlan plan{true, {NativePedGangWarUpdateEffectKind::ActiveControllerUpdate}, 1};
+    const auto retained = [&] { return plan.PlayerOnMission && plan.Count == 1 &&
+        plan.Effects[0] == NativePedGangWarUpdateEffectKind::ActiveControllerUpdate; };
+    Check(NativePlanPedGangWarUpdate(state, input, plan) == NativePedStreamStatus::UnknownGangWar && retained(),
+        "uninitialized controller not disabled by default");
+    NativeInitializePedGangWar(state);
+    Check(NativePlanPedGangWarUpdate(state, input, plan) == NativePedStreamStatus::UnknownMission && retained(),
+        "mission observation unknown, not false");
+    input.MissionKnown = true;
+    Check(NativePlanPedGangWarUpdate(state, input, plan) == NativePedStreamStatus::UnknownCutscene && retained(),
+        "cutscene admission unknown preserves plan");
+    input.CutsceneKnown = true;
+    Check(NativePlanPedGangWarUpdate(state, input, plan) == NativePedStreamStatus::UnknownFrameCounter && retained(),
+        "territory branch needs source counter even while controller disabled");
+    input.FrameCounterKnown = true;
+    state.Active = true;
+    Check(NativePlanPedGangWarUpdate(state, input, plan) == NativePedStreamStatus::UnknownCoop && retained(),
+        "active controller cannot assume single player");
+    state.Active = false;
+    Check(NativePlanPedGangWarUpdate(state, input, plan) == NativePedStreamStatus::PlannedGangWarUpdate &&
+        plan.Count == 1 && plan.Effects[0] == NativePedGangWarUpdateEffectKind::PublishMissionState,
+        "actual disabled guard needs no coop observation");
+    state.Active = true;
+    input.CutsceneProcessing = true;
+    input.FrameCounterKnown = false;
+    Check(NativePlanPedGangWarUpdate(state, input, plan) == NativePedStreamStatus::PlannedGangWarUpdate &&
+        plan.Count == 1 && plan.Effects[0] == NativePedGangWarUpdateEffectKind::PublishMissionState,
+        "cutscene return needs neither counter nor coop");
+    input.PlayerOnMission = true;
+    Check(NativePlanPedGangWarUpdate(state, input, plan) == NativePedStreamStatus::PlannedGangWarUpdate &&
+        plan.Count == 2 && plan.Effects[0] == NativePedGangWarUpdateEffectKind::EndGangWarForMission &&
+        plan.Effects[1] == NativePedGangWarUpdateEffectKind::PublishMissionState,
+        "mission-end-war producer precedes cutscene return, never silently skipped");
+    state.SpecificZoneCount = 7;
+    Check(NativePlanPedGangWarUpdate(state, input, plan) == NativePedStreamStatus::InvalidInput,
+        "invalid specific-zone capacity is not admitted");
+}
 }
 
 int main() {
@@ -585,5 +702,7 @@ int main() {
     GangPhases();
     GangMasks();
     GangDemands();
-    std::printf("native-ped-streaming-ok checks=%zu cases=3072 slot-plans=256 zone-phases=2048 gang-phases=4328 gang-masks=6481 gang-demands=6625 attempts=10 slots=requested-only gang-state=requested-fixtures census=incomplete\n", s_Checks);
+    StartupRequests();
+    GangWarUpdatePlans();
+    std::printf("native-ped-streaming-ok checks=%zu cases=3072 slot-plans=256 zone-phases=2048 gang-phases=4328 gang-masks=6481 gang-demands=6625 startup-resets=64 war-update-plans=512 attempts=10 slots=requested-only gang-state=requested-fixtures census=incomplete\n", s_Checks);
 }
