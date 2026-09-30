@@ -1,6 +1,7 @@
 #include "NativePedAssets.h"
 #include "NativePedModelMetadata.h"
 #include "NativePedSkinSetup.h"
+#include "NativePedHitCollision.h"
 #include "RealtimeStreaming.h"
 
 #include <bit>
@@ -24,6 +25,8 @@ void Matrix(const NativePlayerMatrix& value) {
 void Rows(const NativePedAssets& packet) {
     std::printf("PED_ASSET %d %s %s %zu %zu\n", packet.Model.ModelId, packet.Model.Name.c_str(),
         packet.Model.TxdName.c_str(), packet.Geometries.size(), packet.Images.size());
+    std::printf("CLUMP_ROOT %d %u", packet.Model.ModelId, packet.ClumpRootLocalFlags);
+    Matrix(packet.ClumpRootLocal); std::puts("");
     for (std::size_t g = 0; g < packet.Geometries.size(); ++g) {
         const auto& mesh = packet.Geometries[g];
         std::printf("GEOM %d %zu %u %zu %zu %zu %zu %u\n", packet.Model.ModelId, g, mesh.Flags,
@@ -64,6 +67,21 @@ void Rows(const NativePedAssets& packet) {
         std::printf("IMG %d %zu %s %d %d %zu\n", packet.Model.ModelId, i, image.name, image.w, image.h, image.rgba.size());
     }
 }
+void HitFixture(const NativePedAssets& packet) {
+    std::vector<NativePedHitBone> bones;
+    for (const auto& bone : packet.Geometries.front().Bones)
+        bones.push_back({bone.Tag, true, {bone.World, bone.WorldMatrixFlags}});
+    NativePedHitCollision hit;
+    // Explicit frame-LTM fixture, NOT a claim that source hierarchy Update has
+    // executed or that these matrices are a current live animation array.
+    NativePedHitCollisionInput input{true, true, {packet.ClumpRootLocal, packet.ClumpRootLocalFlags}, bones};
+    Check(NativeConstructPedHitCollision(input, hit) == NativePedHitCollisionStatus::Constructed &&
+        hit.Spheres.size() == 12 && hit.Spheres[0].Material == 62, "owned frame fixture feeds hit COL, not Loaded");
+    input.HierarchyKnown = false;
+    const auto previous = hit;
+    Check(NativeConstructPedHitCollision(input, hit) == NativePedHitCollisionStatus::UnknownHierarchy && hit == previous,
+        "parsed frames do not implicitly authorize source hierarchy matrices");
+}
 std::optional<realtime_streaming::PedAssetCompletion> Take(realtime_streaming::Worker& worker, std::uint64_t ticket) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
     while (std::chrono::steady_clock::now() < deadline) {
@@ -99,6 +117,7 @@ int main(int argc, char** argv) {
             Check(completed && completed->Packet && completed->Error.empty(),
                 completed ? completed->Error.c_str() : "ped timeout");
             retained.push_back(completed->Packet);
+            HitFixture(*completed->Packet);
             const auto& first = completed->Packet->Geometries.front();
             NativePedSkinSetupPlan skin;
             Check(NativePlanPedSkinSetup({true, false, first.MorphRadius, first.HierarchyFlags, first.Vertices}, skin) ==
@@ -126,6 +145,7 @@ int main(int argc, char** argv) {
                 Check(bool(result->Packet) == result->Error.empty(), "catalog completion is packet or error");
                 if (result->Packet) {
                     ++parsed;
+                    HitFixture(*result->Packet);
                     const auto& first = result->Packet->Geometries.front();
                     NativePedSkinSetupPlan skin;
                     Check(NativePlanPedSkinSetup({true, false, first.MorphRadius, first.HierarchyFlags, first.Vertices}, skin) ==

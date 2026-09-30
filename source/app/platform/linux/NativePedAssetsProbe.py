@@ -125,7 +125,7 @@ def verify(log, game):
     rows = {}
     for line in log.splitlines():
         fields = line.split()
-        if fields and fields[0] in ('PED_ASSET', 'GEOM', 'GEOM_SETUP', 'BONE', 'VERT', 'TRI', 'MAT', 'IMG'):
+        if fields and fields[0] in ('PED_ASSET', 'CLUMP_ROOT', 'GEOM', 'GEOM_SETUP', 'BONE', 'VERT', 'TRI', 'MAT', 'IMG'):
             rows.setdefault(fields[0], []).append(fields[1:])
     path = game / 'models/gta3.img'
     entries = archive(path)
@@ -139,6 +139,10 @@ def verify(log, game):
         frame_data = child(frames, 1)
         frame_count = u32(frame_data)
         assert len(frame_data) == 4 + frame_count * 56
+        roots = [f for f in range(frame_count) if struct.unpack_from('<i', frame_data, 4 + f * 56 + 48)[0] == -1]
+        assert len(roots) == 1
+        root_row = next(row for row in rows['CLUMP_ROOT'] if int(row[0]) == model_id)
+        assert list(map(int, root_row[2:])) == words(frame_data[4 + roots[0] * 56:4 + roots[0] * 56 + 48])
         extensions = [payload for kind, payload, _ in chunks(frames) if kind == 3]
         assert len(extensions) == frame_count
         frames_by_tag = {}
@@ -235,7 +239,7 @@ def main():
         commands = subprocess.check_output(['ninja', '-C', str(build), '-t', 'commands', 'sa_ped_assets_probe'], text=True).splitlines()
         objects = []
         with (OUTPUT / ('NativePedAssetsProbe' + suffix + '.build.log')).open('w') as log:
-            for name in ('NativePedAssetsProbe', 'NativeScriptEntities', 'MenuShot', 'NativePedSkinSetup'):
+            for name in ('NativePedAssetsProbe', 'NativeScriptEntities', 'MenuShot', 'NativePedSkinSetup', 'NativePedHitCollision'):
                 original = shlex.split(next(line for line in commands if '-c ' in line and '/' + name + '.cpp' in line))
                 command, i = [], 0
                 while i < len(original):

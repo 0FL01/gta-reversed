@@ -93,6 +93,7 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
         app/platform/linux/NativePedStreaming.cpp
         app/platform/linux/NativeModelStreaming.cpp
         app/platform/linux/NativePedSkinSetup.cpp
+        app/platform/linux/NativePedHitCollision.cpp
         app/platform/linux/NativeSourceEventFlow.cpp
         app/platform/linux/NativePopulationRuntime.cpp
         app/platform/linux/NativeAmbientPedPolicy.cpp
@@ -159,6 +160,7 @@ if(NOT ${RE_PROJECT}_BUILD_LEGACY)
             app/platform/linux/NativePedStreaming.cpp
             app/platform/linux/NativeModelStreaming.cpp
             app/platform/linux/NativePedSkinSetup.cpp
+            app/platform/linux/NativePedHitCollision.cpp
             app/platform/linux/NativeSourceGround.cpp
             PROPERTIES COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-Wall;-Wextra;-Wpedantic"
         )

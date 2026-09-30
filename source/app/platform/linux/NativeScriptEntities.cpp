@@ -374,6 +374,9 @@ bool NativePedAssets_Load(const char* gameDir, const NativeWorldPedModelInfo& mo
                 for (float v : axis) Require(std::isfinite(v), "nonfinite ped matrix");
             return owned;
         };
+        Require(clump.Value.clump->getFrame(), "missing ped clump root frame");
+        candidate.ClumpRootLocal = matrix(clump.Value.clump->getFrame()->matrix);
+        candidate.ClumpRootLocalFlags = uint32(clump.Value.clump->getFrame()->matrix.flags);
         FORLIST(link, clump.Value.clump->atomics) {
             const auto* atomic = rw::Atomic::fromClump(link);
             Require(atomic && atomic->geometry && atomic->getFrame(), "ped atomic geometry/frame");
@@ -407,7 +410,7 @@ bool NativePedAssets_Load(const char* gameDir, const NativeWorldPedModelInfo& mo
                 if (parent >= 0) Require(node.frame->getParent() == hierarchy->nodeInfo[parent].frame,
                     "ped frame/HAnim parent mismatch");
                 mesh.Bones.push_back({node.id, parent, uint32(node.flags), matrix(node.frame->matrix),
-                    matrix(*node.frame->getLTM())});
+                    matrix(*node.frame->getLTM()), uint32(node.frame->getLTM()->flags)});
                 rw::Matrix inverse;
                 static_assert(sizeof(inverse) == 16 * sizeof(float));
                 std::memcpy(&inverse, skin->inverseMatrices + b * 16, sizeof(inverse));

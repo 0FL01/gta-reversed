@@ -9,6 +9,7 @@ struct NativePedAssetBone {
     std::int32_t Tag = -1, Parent = -1;
     std::uint32_t Flags = 0;
     NativePlayerMatrix Local, World;
+    std::uint32_t WorldMatrixFlags = 0; // Frame LTM flags, not hierarchy readiness.
 };
 struct NativePedAssetVertex {
     std::array<float, 3> Position{}, Normal{};
@@ -35,6 +36,8 @@ struct NativePedAssetGeometry {
 };
 struct NativePedAssets {
     NativeWorldPedModelInfo Model;
+    NativePlayerMatrix ClumpRootLocal{};
+    std::uint32_t ClumpRootLocalFlags = 0;
     std::vector<NativePedAssetGeometry> Geometries;
     std::vector<WorldShotImage> Images;
 };
