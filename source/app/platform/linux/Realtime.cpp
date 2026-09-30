@@ -481,6 +481,10 @@ struct LiveWorld {
                 NativeScriptTextureDictionaryPacket& packet, std::string& error) {
                 return NativeScriptEntities_LoadTextureDictionary(
                     request.GameDir.c_str(), request.Name, packet, error);
+            },
+            [](const realtime_streaming::PedAssetRequest& request,
+                NativePedAssets& packet, std::string& error) {
+                return NativePedAssets_Load(request.GameDir.c_str(), request.Model, packet, error);
             });
     }
 

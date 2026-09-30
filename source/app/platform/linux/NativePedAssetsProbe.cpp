@@ -1,0 +1,178 @@
+#include "NativePedAssets.h"
+#include "NativePedModelMetadata.h"
+#include "RealtimeStreaming.h"
+
+#include <bit>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <future>
+#include <stdexcept>
+#include <thread>
+
+namespace {
+int g_Checks = 0;
+void Check(bool value, const char* message) {
+    ++g_Checks;
+    if (!value) { std::fprintf(stderr, "ped-assets-fail: %s\n", message); std::exit(1); }
+}
+void Bits(float value) { std::printf(" %u", std::bit_cast<std::uint32_t>(value)); }
+void Matrix(const NativePlayerMatrix& value) {
+    for (const auto& row : {value.Right, value.Up, value.At, value.Pos}) for (float v : row) Bits(v);
+}
+void Rows(const NativePedAssets& packet) {
+    std::printf("PED_ASSET %d %s %s %zu %zu\n", packet.Model.ModelId, packet.Model.Name.c_str(),
+        packet.Model.TxdName.c_str(), packet.Geometries.size(), packet.Images.size());
+    for (std::size_t g = 0; g < packet.Geometries.size(); ++g) {
+        const auto& mesh = packet.Geometries[g];
+        std::printf("GEOM %d %zu %u %zu %zu %zu %zu %u\n", packet.Model.ModelId, g, mesh.Flags,
+            mesh.Bones.size(), mesh.Vertices.size(), mesh.Triangles.size(), mesh.Materials.size(), unsigned(mesh.AtomicFlags));
+        for (std::size_t b = 0; b < mesh.Bones.size(); ++b) {
+            const auto& bone = mesh.Bones[b];
+            std::printf("BONE %d %zu %zu %d %d %u", packet.Model.ModelId, g, b, bone.Tag, bone.Parent, bone.Flags);
+            Matrix(bone.Local); Matrix(mesh.InverseBind[b]); std::puts("");
+        }
+        for (std::size_t m = 0; m < mesh.Materials.size(); ++m) {
+            const auto& material = mesh.Materials[m];
+            std::printf("MAT %d %zu %zu %d", packet.Model.ModelId, g, m, material.Image);
+            for (float f : material.Surface.color) Bits(f);
+            Bits(material.Surface.ambient); Bits(material.Specular); Bits(material.Surface.diffuse);
+            std::puts("");
+        }
+        for (std::size_t v = 0; v < mesh.Vertices.size(); ++v) {
+            const auto& vertex = mesh.Vertices[v];
+            std::printf("VERT %d %zu %zu", packet.Model.ModelId, g, v);
+            for (float f : vertex.Position) Bits(f);
+            for (float f : vertex.Normal) Bits(f);
+            for (float f : vertex.UV) Bits(f);
+            for (auto c : vertex.Color) std::printf(" %u", unsigned(c));
+            for (auto b : vertex.Bones) std::printf(" %u", unsigned(b));
+            for (float f : vertex.Weights) Bits(f);
+            std::puts("");
+        }
+        for (std::size_t t = 0; t < mesh.Triangles.size(); ++t) {
+            const auto& tri = mesh.Triangles[t];
+            std::printf("TRI %d %zu %zu %u %u %u %u\n", packet.Model.ModelId, g, t,
+                tri.Vertices[0], tri.Vertices[1], tri.Vertices[2], tri.Material);
+        }
+    }
+    for (std::size_t i = 0; i < packet.Images.size(); ++i) {
+        const auto& image = packet.Images[i];
+        std::printf("IMG %d %zu %s %d %d %zu\n", packet.Model.ModelId, i, image.name, image.w, image.h, image.rgba.size());
+    }
+}
+std::optional<realtime_streaming::PedAssetCompletion> Take(realtime_streaming::Worker& worker, std::uint64_t ticket) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (auto result = worker.TakePedAsset(ticket)) return result;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    return {};
+}
+}
+int main(int argc, char** argv) {
+    Check(argc == 2 || (argc == 3 && (std::string_view(argv[2]) == "--rows" || std::string_view(argv[2]) == "--catalog")),
+        "usage GAME_DIR [--rows|--catalog]");
+    NativeWorldEntityInfo namespaceInfo;
+    NativePedModelMetadata metadata;
+    std::string error;
+    Check(namespaceInfo.LoadBeforeWorker(argv[1], {}, error), error.c_str());
+    Check(metadata.LoadBeforeWorker(argv[1], namespaceInfo, error), error.c_str());
+    E2ELoadInfo info{};
+    char parserError[512]{};
+    Check(StreamPager_Init(argv[1], info, parserError, sizeof(parserError)), parserError);
+    std::vector<std::shared_ptr<const NativePedAssets>> retained;
+    {
+        realtime_streaming::Worker worker(false, {}, {}, 1, {}, {}, {},
+            [](const realtime_streaming::PedAssetRequest& request, NativePedAssets& out, std::string& error) {
+                return NativePedAssets_Load(request.GameDir.c_str(), request.Model, out, error);
+            });
+        std::uint64_t ticket = 1;
+        for (int id : {7, 105, 280}) {
+            const auto* model = metadata.Find(id);
+            Check(model, "actual qualified ped model");
+            Check(worker.RequestPedAsset({ticket, argv[1], model->Source}), "real ped request admitted");
+            const auto completed = Take(worker, ticket);
+            Check(completed && completed->Packet && completed->Error.empty(),
+                completed ? completed->Error.c_str() : "ped timeout");
+            retained.push_back(completed->Packet);
+            Check(!worker.TakePedAsset(ticket), "single consumption");
+            NativeCivilianLoadedPed slot; slot.Model = 777;
+            Check(metadata.QualifyCivilianSlot(id, false, false, 0, slot) == NativePedMetadataStatus::UnknownStreaming &&
+                slot.Model == 777, "parser completion does not invent source Loaded/refcount");
+            if (argc == 3 && std::string_view(argv[2]) == "--rows") Rows(*completed->Packet);
+            ++ticket;
+        }
+        auto missing = metadata.Find(7)->Source; missing.Name = "missing_owned_ped";
+        Check(worker.RequestPedAsset({ticket, argv[1], missing}), "missing asset request admitted");
+        const auto failed = Take(worker, ticket);
+        Check(failed && !failed->Packet && !failed->Error.empty(), "missing DFF has no fallback packet");
+        if (argc == 3 && std::string_view(argv[2]) == "--catalog") {
+            unsigned parsed = 0, missing = 0;
+            for (const auto& [id, model] : metadata.Models()) {
+                if (id == 0) continue; // The separate, source modular CJ constructor owns model0.
+                ++ticket;
+                Check(worker.RequestPedAsset({ticket, argv[1], model.Source}), "catalog request admission");
+                const auto result = Take(worker, ticket);
+                Check(result.has_value(), "catalog completion");
+                Check(bool(result->Packet) == result->Error.empty(), "catalog completion is packet or error");
+                if (result->Packet) ++parsed; else ++missing;
+                std::printf("PED_CATALOG %d %s %s %d %s\n", id, model.Source.Name.c_str(), model.Source.TxdName.c_str(),
+                    result->Packet ? 1 : 0, result->Error.c_str());
+            }
+            std::printf("native-ped-assets-catalog-ok declarations=%u parsed=%u unavailable=%u modular-player=separate\n",
+                parsed + missing, parsed, missing);
+        }
+        worker.Stop({}, {});
+        Check(!worker.RequestPedAsset({99, argv[1], metadata.Find(7)->Source}), "stopped admission rejected");
+        Check(!worker.TakePedAsset(ticket), "stopped completion cannot publish moved-from packet");
+    }
+    NativePedAssets output = *retained.front();
+    const auto original = output.Geometries.front().Vertices.front().Position;
+    auto invalid = metadata.Find(7)->Source;
+    invalid.TxdName = "../male01";
+    Check(!NativePedAssets_Load(argv[1], invalid, output, error) && output.Model.ModelId == 7 &&
+        output.Geometries.front().Vertices.front().Position == original, "invalid name preserves owned output");
+    invalid = metadata.Find(7)->Source; invalid.TxdName = "fam1";
+    Check(!NativePedAssets_Load(argv[1], invalid, output, error) && output.Model.TxdName == retained.front()->Model.TxdName,
+        "wrong declared TXD does not infer model-stem texture");
+    invalid = metadata.Find(7)->Source; invalid.ModelId = 0;
+    Check(!NativePedAssets_Load(argv[1], invalid, output, error) && output.Model.ModelId == 7,
+        "modular player is not silently substituted with an ordinary ped");
+    std::promise<void> entered, release;
+    const auto released = release.get_future().share();
+    {
+        realtime_streaming::Worker barrier(false, {}, {}, 1, {}, {}, {},
+            [&](const realtime_streaming::PedAssetRequest&, NativePedAssets&, std::string&) -> bool {
+                entered.set_value(); released.wait(); throw std::runtime_error("intentional ped parser exception");
+            });
+        const realtime_streaming::PedAssetRequest request{101, argv[1], metadata.Find(7)->Source};
+        Check(barrier.RequestPedAsset(request), "barrier admission");
+        Check(entered.get_future().wait_for(std::chrono::seconds(5)) == std::future_status::ready, "parser barrier");
+        auto other = request; other.Ticket = 102;
+        Check(!barrier.RequestPedAsset(other) && barrier.RequestPedAsset(request), "in-flight ticket protection");
+        other = request; other.Model = metadata.Find(105)->Source;
+        Check(!barrier.RequestPedAsset(other), "same ticket cannot switch the declared ped identity");
+        release.set_value();
+        const auto failed = Take(barrier, 101);
+        Check(failed && !failed->Packet && failed->Error.find("intentional ped parser exception") != std::string::npos &&
+            !barrier.TakePedAsset(102), "exception remains exact-ticket error completion");
+        barrier.Stop({}, {});
+    }
+    {
+        realtime_streaming::Worker empty(false, {}, {}, 1, {}, {}, {},
+            [](const realtime_streaming::PedAssetRequest&, NativePedAssets&, std::string&) { return true; });
+        Check(empty.RequestPedAsset({201, argv[1], metadata.Find(7)->Source}), "empty parser admission");
+        const auto failed = Take(empty, 201);
+        Check(failed && !failed->Packet && !failed->Error.empty(), "empty success is an error, not parser-ready");
+        empty.Stop({}, {});
+    }
+    StreamPager_Shutdown();
+    for (const auto& packet : retained) {
+        Check(!packet->Geometries.empty() && !packet->Images.empty(), "owned data survives RW shutdown");
+        for (const auto& mesh : packet->Geometries) Check(!mesh.Bones.empty() && mesh.InverseBind.size() == mesh.Bones.size() &&
+            !mesh.Vertices.empty() && !mesh.Triangles.empty(), "retained skeleton/mesh payload");
+    }
+    std::printf("native-ped-assets-ok checks=%d models=3 worker=sole skeleton=owned textures=declared "
+        "loaded-state=unowned actor-birth=unowned census=incomplete\n", g_Checks);
+}

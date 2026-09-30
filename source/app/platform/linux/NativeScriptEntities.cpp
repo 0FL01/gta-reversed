@@ -3,6 +3,7 @@
 #include "app/platform/linux/GxtText.h"
 #include "app/platform/linux/MenuShot.h"
 #include "app/platform/linux/NativeCollisionAssets.h"
+#include "app/platform/linux/NativePedAssets.h"
 #include <cassert>
 #include <algorithm>
 #include <bit>
@@ -334,6 +335,158 @@ bool NativeScriptEntities_LoadStaticModel(const char* gameDir, const std::string
         scene = std::move(prepared); error.clear(); return true;
     } catch (const std::exception& e) { error = e.what(); return false; }
 }
+bool NativePedAssets_Load(const char* gameDir, const NativeWorldPedModelInfo& model,
+    NativePedAssets& out, std::string& error) {
+    try {
+        const auto stem = [](const std::string& name) {
+            return !name.empty() && name.size() <= 19 && std::all_of(name.begin(), name.end(), [](char c) {
+                return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                    (c >= '0' && c <= '9') || c == '_';
+            });
+        };
+        Require(gameDir && *gameDir && model.ModelId > 0 && model.ModelId < 20000 &&
+            stem(model.Name) && stem(model.TxdName), "invalid ped asset identity");
+        const auto lower = [](std::string name) {
+            for (char& c : name) if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+            return name;
+        };
+        RwScope scope;
+        OS_SetFilePathOffset(gameDir);
+        auto txd = ReadEntry(lower(model.TxdName) + ".txd");
+        Dictionary dictionary(txd);
+        auto dff = ReadEntry(lower(model.Name) + ".dff");
+        const auto top = RwChunks(dff);
+        Require(std::count_if(top.begin(), top.end(), [](const auto& c) { return c.Type == rw::ID_CLUMP; }) == 1,
+            "unsupported ped DFF clump count");
+        struct Clump {
+            LinkedClump Value;
+            ~Clump() { TexSample_FreeLinked(Value); }
+        } clump{TexSample_LinkedParse(dff.data(), dff.size(), dictionary.Value, nullptr, 0)};
+        Require(clump.Value.clump, "ped DFF clump parse");
+        NativePedAssets candidate;
+        candidate.Model = model;
+        std::map<std::pair<const rw::Texture*, uint32>, int> images;
+        const auto matrix = [](const rw::Matrix& value) {
+            NativePlayerMatrix owned{{value.right.x, value.right.y, value.right.z},
+                {value.up.x, value.up.y, value.up.z}, {value.at.x, value.at.y, value.at.z},
+                {value.pos.x, value.pos.y, value.pos.z}};
+            for (const auto& axis : {owned.Right, owned.Up, owned.At, owned.Pos})
+                for (float v : axis) Require(std::isfinite(v), "nonfinite ped matrix");
+            return owned;
+        };
+        FORLIST(link, clump.Value.clump->atomics) {
+            const auto* atomic = rw::Atomic::fromClump(link);
+            Require(atomic && atomic->geometry && atomic->getFrame(), "ped atomic geometry/frame");
+            const auto* geometry = atomic->geometry;
+            const auto* skin = rw::Skin::get(geometry);
+            // Static accessories require their own attachment semantics, not a
+            // guessed skin or silently dropped atomic.
+            Require(skin && geometry->numVertices > 0 && geometry->numVertices <= 65536 &&
+                geometry->numTriangles > 0 && geometry->triangles && geometry->morphTargets &&
+                geometry->numMorphTargets == 1 && geometry->numTexCoordSets <= 1 &&
+                geometry->morphTargets[0].vertices && geometry->morphTargets[0].normals &&
+                skin->indices && skin->weights && skin->inverseMatrices, "unsupported ped skin geometry");
+            auto* hierarchy = rw::Skin::getHierarchy(atomic);
+            if (!hierarchy) hierarchy = rw::HAnimHierarchy::find(clump.Value.clump->getFrame());
+            Require(hierarchy && hierarchy->numNodes > 0 && hierarchy->numNodes <= 256 &&
+                hierarchy->numNodes == skin->numBones && hierarchy->nodeInfo, "ped skin hierarchy");
+            hierarchy->attach();
+            NativePedAssetGeometry mesh;
+            mesh.Flags = geometry->flags;
+            mesh.AtomicFlags = std::uint8_t(atomic->getFlags());
+            mesh.AtomicWorld = matrix(*atomic->getFrame()->getLTM());
+            std::map<int, int> tags;
+            std::vector<int> stack;
+            int parent = -1;
+            for (int b = 0; b < hierarchy->numNodes; ++b) {
+                const auto& node = hierarchy->nodeInfo[b];
+                Require(node.frame && tags.emplace(node.id, b).second, "missing/duplicate ped bone");
+                if (parent >= 0) Require(node.frame->getParent() == hierarchy->nodeInfo[parent].frame,
+                    "ped frame/HAnim parent mismatch");
+                mesh.Bones.push_back({node.id, parent, uint32(node.flags), matrix(node.frame->matrix),
+                    matrix(*node.frame->getLTM())});
+                rw::Matrix inverse;
+                static_assert(sizeof(inverse) == 16 * sizeof(float));
+                std::memcpy(&inverse, skin->inverseMatrices + b * 16, sizeof(inverse));
+                mesh.InverseBind.push_back(matrix(inverse));
+                if (node.flags & rw::HAnimHierarchy::PUSH) stack.push_back(parent);
+                parent = b;
+                if (node.flags & rw::HAnimHierarchy::POP) {
+                    Require(!stack.empty() || b == hierarchy->numNodes - 1, "ped HAnim stack underflow");
+                    parent = stack.empty() ? -1 : stack.back();
+                    if (!stack.empty()) stack.pop_back();
+                }
+            }
+            Require(stack.empty(), "ped HAnim stack imbalance");
+            for (int m = 0; m < geometry->matList.numMaterials; ++m) {
+                const auto* material = geometry->matList.materials[m];
+                Require(material, "ped material");
+                NativePedAssetMaterial owned;
+                Require(rw::MatFX::getEffects(material) == 0, "unsupported ped material effect");
+                owned.Surface.color = {material->color.red / 255.f, material->color.green / 255.f,
+                    material->color.blue / 255.f, material->color.alpha / 255.f};
+                owned.Surface.ambient = material->surfaceProps.ambient;
+                owned.Surface.diffuse = material->surfaceProps.diffuse;
+                owned.Specular = material->surfaceProps.specular;
+                Require(std::isfinite(owned.Surface.ambient) && std::isfinite(owned.Surface.diffuse) &&
+                    std::isfinite(owned.Specular),
+                    "nonfinite ped surface");
+                if (material->texture) {
+                    const auto found = clump.Value.resolved.find(material->texture);
+                    Require(found != clump.Value.resolved.end() && found->second.real && geometry->texCoords[0],
+                        "unresolved declared ped texture/UV");
+                    const auto key = std::make_pair(found->second.real, found->second.filter);
+                    auto image = images.find(key);
+                    if (image == images.end()) {
+                        WorldShotImage decoded{};
+                        Require(TexSample_Decode(key.first, decoded) && !decoded.rgba.empty(), "ped texel decode");
+                        decoded.filter = key.second;
+                        const int index = int(candidate.Images.size());
+                        candidate.Images.push_back(std::move(decoded));
+                        image = images.emplace(key, index).first;
+                    }
+                    owned.Image = image->second;
+                }
+                mesh.Materials.push_back(owned);
+            }
+            for (int v = 0; v < geometry->numVertices; ++v) {
+                NativePedAssetVertex owned;
+                const auto p = geometry->morphTargets[0].vertices[v], n = geometry->morphTargets[0].normals[v];
+                owned.Position = {p.x, p.y, p.z}; owned.Normal = {n.x, n.y, n.z};
+                const auto uv = geometry->texCoords[0] ? geometry->texCoords[0][v] : rw::TexCoords{};
+                owned.UV = {uv.u, uv.v};
+                for (const auto& values : {owned.Position, owned.Normal})
+                    for (float value : values) Require(std::isfinite(value), "nonfinite ped vertex");
+                for (float value : owned.UV) Require(std::isfinite(value), "nonfinite ped UV");
+                if (geometry->colors) {
+                    const auto c = geometry->colors[v]; owned.Color = {c.red, c.green, c.blue, c.alpha};
+                }
+                float sum = 0;
+                for (int k = 0; k < 4; ++k) {
+                    owned.Bones[k] = skin->indices[v * 4 + k];
+                    owned.Weights[k] = skin->weights[v * 4 + k];
+                    Require(std::isfinite(owned.Weights[k]) && owned.Weights[k] >= 0 &&
+                        (owned.Weights[k] == 0 || owned.Bones[k] < hierarchy->numNodes), "invalid ped skin influence");
+                    sum += owned.Weights[k];
+                }
+                Require(std::isfinite(sum) && sum > 0, "empty ped skin influences");
+                mesh.Vertices.push_back(owned);
+            }
+            for (int t = 0; t < geometry->numTriangles; ++t) {
+                const auto& triangle = geometry->triangles[t];
+                Require(triangle.matId < mesh.Materials.size() && triangle.v[0] < mesh.Vertices.size() &&
+                    triangle.v[1] < mesh.Vertices.size() && triangle.v[2] < mesh.Vertices.size(), "ped triangle bounds");
+                mesh.Triangles.push_back({{triangle.v[0], triangle.v[1], triangle.v[2]}, triangle.matId});
+            }
+            candidate.Geometries.push_back(std::move(mesh));
+        }
+        Require(!candidate.Geometries.empty(), "empty ped clump");
+        out = std::move(candidate);
+        error.clear();
+        return true;
+    } catch (const std::exception& e) { error = e.what(); return false; }
+}
+
 bool NativeScriptEntities_LoadTextureDictionary(const char* gameDir, const std::string& name,
     NativeScriptTextureDictionaryPacket& packet, std::string& error) {
     try {

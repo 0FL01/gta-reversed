@@ -5,6 +5,7 @@
 #include "app/platform/linux/RealtimeGameplay.h"
 #include "app/platform/linux/NativeVehicleAssetQueue.h"
 #include "app/platform/linux/NativeScriptEntities.h"
+#include "app/platform/linux/NativePedAssets.h"
 
 #include <cassert>
 #include <chrono>
@@ -50,6 +51,17 @@ struct ScriptTextureCompletion {
 };
 using ScriptTextureLoader = std::function<bool(const ScriptTextureRequest&,
     NativeScriptTextureDictionaryPacket&, std::string&)>;
+struct PedAssetRequest {
+    std::uint64_t Ticket = 0;
+    std::string GameDir;
+    NativeWorldPedModelInfo Model;
+};
+struct PedAssetCompletion {
+    std::uint64_t Ticket = 0;
+    std::shared_ptr<const NativePedAssets> Packet;
+    std::string Error;
+};
+using PedAssetLoader = std::function<bool(const PedAssetRequest&, NativePedAssets&, std::string&)>;
 
 struct CpuWorld {
     Center Position;
@@ -115,10 +127,12 @@ public:
     explicit Worker(bool collision, std::shared_ptr<const NativeCollisionContext> context = {},
                      std::shared_ptr<const NativePlacementOverrides> overrides = {}, uint64_t initialGeneration = 1,
                      std::shared_ptr<const NativeVehicleAssetSource> vehicleSource = {},
-                     StaticModelLoader modelLoader = {}, ScriptTextureLoader textureLoader = {})
+                     StaticModelLoader modelLoader = {}, ScriptTextureLoader textureLoader = {},
+                     PedAssetLoader pedLoader = {})
         : m_Collision(collision), m_Context(std::move(context)), m_Overrides(std::move(overrides)),
           m_Generation(initialGeneration), m_VehicleSource(std::move(vehicleSource)),
            m_StaticModelLoader(std::move(modelLoader)), m_ScriptTextureLoader(std::move(textureLoader)),
+           m_PedAssetLoader(std::move(pedLoader)),
            m_Thread([this] { Run(); }) {}
     ~Worker() { Stop({}, {}); }
     Worker(const Worker&) = delete;
@@ -198,6 +212,36 @@ public:
         return result;
     }
 
+    // One unconsumed ticket, including during parsing. This queue uses the SAME
+    // exclusive parser thread as world, vehicle, static model and texture jobs.
+    bool RequestPedAsset(const PedAssetRequest& request) {
+        std::lock_guard lock(m_Mutex);
+        if (m_Stop || !request.Ticket || request.GameDir.empty() || request.Model.ModelId <= 0 ||
+            request.Model.ModelId >= 20000 || request.Model.Name.empty() || request.Model.TxdName.empty()) return false;
+        if (m_PedAssetAdmitted) {
+            const auto& old = *m_PedAssetAdmitted;
+            const auto identity = [](const NativeWorldPedModelInfo& model) {
+                return std::tie(model.ModelId, model.Name, model.TxdName, model.Ide.Source, model.Ide.Line,
+                    model.PedTypeName, model.StatName, model.AnimationGroupName, model.AnimationFileName,
+                    model.AudioTypeName, model.VoiceMinName, model.VoiceMaxName, model.CarsCanDriveMask,
+                    model.PedFlags, model.Radio1, model.Radio2);
+            };
+            return old.Ticket == request.Ticket && old.GameDir == request.GameDir && identity(old.Model) == identity(request.Model);
+        }
+        m_PedAssetAdmitted = request;
+        m_PedAssetWaiting = request;
+        m_Wake.notify_one();
+        return true;
+    }
+    std::optional<PedAssetCompletion> TakePedAsset(std::uint64_t ticket) {
+        std::lock_guard lock(m_Mutex);
+        if (m_Stop || !m_PedAssetReady || m_PedAssetReady->Ticket != ticket) return std::nullopt;
+        auto result = std::move(m_PedAssetReady);
+        m_PedAssetReady.reset();
+        m_PedAssetAdmitted.reset();
+        return result;
+    }
+
     std::unique_ptr<CpuWorld> TakeReady() {
         std::lock_guard lock(m_Mutex);
         return std::move(m_Ready);
@@ -253,13 +297,15 @@ private:
         std::unique_lock lock(m_Mutex);
         for (;;) {
             m_Wake.wait(lock, [&] { return m_Stop || m_Retired || m_Vehicles.Retiring() ||
-                m_Vehicles.Waiting() || m_StaticModelWaiting || m_ScriptTextureWaiting || (!m_Busy && m_Wanted); });
+                m_Vehicles.Waiting() || m_StaticModelWaiting || m_ScriptTextureWaiting || m_PedAssetWaiting ||
+                (!m_Busy && m_Wanted); });
             if (m_Stop) {
                 auto ready = std::move(m_Ready);
                 auto retired = std::move(m_Retired);
                 auto active = std::move(m_StopActive);
                 auto pending = std::move(m_StopPending);
                 auto vehicle = m_Vehicles.Stop();
+                auto ped = std::move(m_PedAssetReady);
                 lock.unlock();
                 return;
             }
@@ -321,6 +367,32 @@ private:
                 m_ScriptTextureReady = std::move(completion);
                 continue;
             }
+            if (m_PedAssetWaiting && ((!m_Vehicles.Waiting() && (m_Busy || !m_Wanted)) || !m_LastWasPed)) {
+                auto request = std::move(*m_PedAssetWaiting);
+                m_PedAssetWaiting.reset();
+                m_PedAssetInFlight = request.Ticket;
+                m_LastWasPed = true;
+                lock.unlock();
+                PedAssetCompletion completion{.Ticket=request.Ticket,.Packet={},.Error={}};
+                try {
+                    auto packet = std::make_shared<NativePedAssets>();
+                    if (m_PedAssetLoader && m_PedAssetLoader(request, *packet, completion.Error)) {
+                        if (packet->Geometries.empty() || packet->Model.ModelId != request.Model.ModelId ||
+                            packet->Model.Name != request.Model.Name || packet->Model.TxdName != request.Model.TxdName)
+                            completion.Error = "ped parser returned an empty or mismatched packet";
+                        else if (completion.Error.empty()) completion.Packet = std::move(packet);
+                    } else if (!m_PedAssetLoader) completion.Error = "ped asset loader is unavailable";
+                } catch (const std::exception& error) {
+                    completion.Error = request.Model.Name + ": " + error.what();
+                } catch (...) {
+                    completion.Error = request.Model.Name + ": unknown ped parser exception";
+                }
+                if (!completion.Packet && completion.Error.empty()) completion.Error = "ped parser failed without a packet";
+                lock.lock();
+                m_PedAssetInFlight = 0;
+                m_PedAssetReady = std::move(completion);
+                continue;
+            }
             // Alternate eligible parser jobs, without waiting for world GPU
             // upload/retirement. Neither queue can starve the other; world CPU
             // retirement above retains its original priority and memory bound.
@@ -328,6 +400,7 @@ private:
                 const auto ticket = m_Vehicles.Begin();
                 const auto generation = m_Generation;
                 m_LastWasVehicle = true;
+                m_LastWasPed = false;
                 lock.unlock();
                 auto next = std::make_shared<NativeVehicleAssetCompletion>();
                 next->Ticket = ticket;
@@ -356,6 +429,7 @@ private:
                 continue;
             }
             m_LastWasVehicle = false;
+            m_LastWasPed = false;
             const auto center = m_Center;
             m_Wanted = false;
             m_Busy = true;
@@ -387,6 +461,7 @@ private:
     const std::shared_ptr<const NativeVehicleAssetSource> m_VehicleSource;
     StaticModelLoader m_StaticModelLoader;
     ScriptTextureLoader m_ScriptTextureLoader;
+    PedAssetLoader m_PedAssetLoader;
     NativeVehicleAssetQueue m_Vehicles;
     std::optional<StaticModelRequest> m_StaticModelWaiting;
     std::optional<StaticModelCompletion> m_StaticModelReady;
@@ -394,7 +469,12 @@ private:
     std::optional<ScriptTextureRequest> m_ScriptTextureWaiting;
     std::optional<ScriptTextureCompletion> m_ScriptTextureReady;
     std::uint64_t m_ScriptTextureInFlight = 0;
+    std::optional<PedAssetRequest> m_PedAssetWaiting;
+    std::optional<PedAssetRequest> m_PedAssetAdmitted; // Immutable identity through waiting/parsing/ready.
+    std::optional<PedAssetCompletion> m_PedAssetReady;
+    std::uint64_t m_PedAssetInFlight = 0;
     bool m_LastWasVehicle = false;
+    bool m_LastWasPed = false; // Bounded rotation with vehicle and pending world jobs.
     std::unique_ptr<CpuWorld> m_Ready, m_Retired, m_StopActive, m_StopPending;
     // Last: every field above is initialized before Run can observe it.
     std::thread m_Thread;
