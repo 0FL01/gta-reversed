@@ -1,5 +1,6 @@
 #include "NativePedAssets.h"
 #include "NativePedModelMetadata.h"
+#include "NativePedSkinSetup.h"
 #include "RealtimeStreaming.h"
 
 #include <bit>
@@ -27,6 +28,8 @@ void Rows(const NativePedAssets& packet) {
         const auto& mesh = packet.Geometries[g];
         std::printf("GEOM %d %zu %u %zu %zu %zu %zu %u\n", packet.Model.ModelId, g, mesh.Flags,
             mesh.Bones.size(), mesh.Vertices.size(), mesh.Triangles.size(), mesh.Materials.size(), unsigned(mesh.AtomicFlags));
+        std::printf("GEOM_SETUP %d %zu %u %u\n", packet.Model.ModelId, g,
+            std::bit_cast<std::uint32_t>(mesh.MorphRadius), mesh.HierarchyFlags);
         for (std::size_t b = 0; b < mesh.Bones.size(); ++b) {
             const auto& bone = mesh.Bones[b];
             std::printf("BONE %d %zu %zu %d %d %u", packet.Model.ModelId, g, b, bone.Tag, bone.Parent, bone.Flags);
@@ -96,6 +99,11 @@ int main(int argc, char** argv) {
             Check(completed && completed->Packet && completed->Error.empty(),
                 completed ? completed->Error.c_str() : "ped timeout");
             retained.push_back(completed->Packet);
+            const auto& first = completed->Packet->Geometries.front();
+            NativePedSkinSetupPlan skin;
+            Check(NativePlanPedSkinSetup({true, false, first.MorphRadius, first.HierarchyFlags, first.Vertices}, skin) ==
+                NativePedSkinSetupStatus::Planned && skin.Weights.size() == first.Vertices.size(),
+                "actual packet feeds explicit simple-hierarchy fixture, not Loaded");
             Check(!worker.TakePedAsset(ticket), "single consumption");
             NativeCivilianLoadedPed slot; slot.Model = 777;
             Check(metadata.QualifyCivilianSlot(id, false, false, 0, slot) == NativePedMetadataStatus::UnknownStreaming &&
@@ -116,7 +124,14 @@ int main(int argc, char** argv) {
                 const auto result = Take(worker, ticket);
                 Check(result.has_value(), "catalog completion");
                 Check(bool(result->Packet) == result->Error.empty(), "catalog completion is packet or error");
-                if (result->Packet) ++parsed; else ++missing;
+                if (result->Packet) {
+                    ++parsed;
+                    const auto& first = result->Packet->Geometries.front();
+                    NativePedSkinSetupPlan skin;
+                    Check(NativePlanPedSkinSetup({true, false, first.MorphRadius, first.HierarchyFlags, first.Vertices}, skin) ==
+                        NativePedSkinSetupStatus::Planned && skin.Weights.size() == first.Vertices.size(),
+                        "catalog source-normalization plan retains parser authored weights");
+                } else ++missing;
                 std::printf("PED_CATALOG %d %s %s %d %s\n", id, model.Source.Name.c_str(), model.Source.TxdName.c_str(),
                     result->Packet ? 1 : 0, result->Error.c_str());
             }

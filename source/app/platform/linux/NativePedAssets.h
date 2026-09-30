@@ -24,6 +24,8 @@ struct NativePedAssetMaterial {
 struct NativePedAssetGeometry {
     std::uint32_t Flags = 0;
     std::uint8_t AtomicFlags = 0;
+    float MorphRadius = 0;
+    std::uint32_t HierarchyFlags = 0;
     NativePlayerMatrix AtomicWorld;
     std::vector<NativePedAssetBone> Bones;
     std::vector<NativePlayerMatrix> InverseBind;

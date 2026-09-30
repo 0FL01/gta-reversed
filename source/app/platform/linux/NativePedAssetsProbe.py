@@ -80,6 +80,7 @@ def geometry(data):
         b, a, material, c = struct.unpack_from('<4H', raw, offset + t * 8)
         tris.append([a, b, c, material])
     offset += triangles * 8
+    radius = u32(raw, offset + 12)
     has_positions, has_normals = struct.unpack_from('<2I', raw, offset + 16)
     assert has_positions and has_normals
     offset += 24
@@ -117,14 +118,14 @@ def geometry(data):
             texture_name = names[0].split(b'\0')[0].decode('ascii').lower()
         authored_materials.append((rgba + surface, texture_name))
     assert len(authored_materials) == material_count
-    return flags & 0xff00ffff, bones, positions, normals, uv, colors, indices, weights, inverse, tris, authored_materials
+    return flags & 0xff00ffff, bones, positions, normals, uv, colors, indices, weights, inverse, tris, authored_materials, radius
 
 
 def verify(log, game):
     rows = {}
     for line in log.splitlines():
         fields = line.split()
-        if fields and fields[0] in ('PED_ASSET', 'GEOM', 'BONE', 'VERT', 'TRI', 'MAT', 'IMG'):
+        if fields and fields[0] in ('PED_ASSET', 'GEOM', 'GEOM_SETUP', 'BONE', 'VERT', 'TRI', 'MAT', 'IMG'):
             rows.setdefault(fields[0], []).append(fields[1:])
     path = game / 'models/gta3.img'
     entries = archive(path)
@@ -142,6 +143,7 @@ def verify(log, game):
         assert len(extensions) == frame_count
         frames_by_tag = {}
         nodes = None
+        hierarchy_flags = None
         for f, extension in enumerate(extensions):
             for kind, payload, _ in chunks(extension):
                 if kind != 0x11e:
@@ -151,6 +153,7 @@ def verify(log, game):
                 frames_by_tag[tag] = words(frame_data[4 + f * 56:4 + f * 56 + 48])
                 if count:
                     assert nodes is None
+                    hierarchy_flags = u32(payload, 12)
                     nodes = [struct.unpack_from('<3i', payload, 20 + n * 12) for n in range(count)]
         assert nodes
         geometries = [payload for kind, payload, _ in chunks(child(clump, 0x1a)) if kind == 0xf]
@@ -158,9 +161,11 @@ def verify(log, game):
         assert len(atomics) == int(mesh_count)
         for g, atomic in enumerate(atomics):
             _, index, atomic_flags, _ = struct.unpack('<4i', child(atomic, 1))
-            flags, bones, positions, normals, uv, colors, indices, weights, inverse, tris, materials = geometry(geometries[index])
+            flags, bones, positions, normals, uv, colors, indices, weights, inverse, tris, materials, radius = geometry(geometries[index])
             header = next(row for row in rows['GEOM'] if list(map(int, row[:2])) == [model_id, g])
             assert list(map(int, header[2:])) == [flags, bones, len(positions), len(tris), len(materials), atomic_flags & 255]
+            setup = next(row for row in rows['GEOM_SETUP'] if list(map(int, row[:2])) == [model_id, g])
+            assert list(map(int, setup[2:])) == [radius, hierarchy_flags], ('setup', model_id, g, setup, radius, hierarchy_flags)
             for m, (values, texture_name) in enumerate(materials):
                 row = next(row for row in rows['MAT'] if list(map(int, row[:3])) == [model_id, g, m])
                 assert list(map(int, row[4:])) == values, ('material', model_id, g, m)
@@ -230,7 +235,7 @@ def main():
         commands = subprocess.check_output(['ninja', '-C', str(build), '-t', 'commands', 'sa_ped_assets_probe'], text=True).splitlines()
         objects = []
         with (OUTPUT / ('NativePedAssetsProbe' + suffix + '.build.log')).open('w') as log:
-            for name in ('NativePedAssetsProbe', 'NativeScriptEntities', 'MenuShot'):
+            for name in ('NativePedAssetsProbe', 'NativeScriptEntities', 'MenuShot', 'NativePedSkinSetup'):
                 original = shlex.split(next(line for line in commands if '-c ' in line and '/' + name + '.cpp' in line))
                 command, i = [], 0
                 while i < len(original):

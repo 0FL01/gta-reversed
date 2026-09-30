@@ -394,6 +394,9 @@ bool NativePedAssets_Load(const char* gameDir, const NativeWorldPedModelInfo& mo
             NativePedAssetGeometry mesh;
             mesh.Flags = geometry->flags;
             mesh.AtomicFlags = std::uint8_t(atomic->getFlags());
+            mesh.MorphRadius = geometry->morphTargets[0].boundingSphere.radius;
+            mesh.HierarchyFlags = uint32(hierarchy->flags);
+            Require(std::isfinite(mesh.MorphRadius) && mesh.MorphRadius >= 0, "invalid ped morph radius");
             mesh.AtomicWorld = matrix(*atomic->getFrame()->getLTM());
             std::map<int, int> tags;
             std::vector<int> stack;
