@@ -119,3 +119,56 @@ NativePedHitCollisionStatus NativeConstructPedHitCollision(const NativePedHitCol
     out = candidate;
     return S::Constructed;
 }
+
+NativePedHitCollisionStatus NativeAnimatePedHitCollision(const NativePedHitCollisionInput& input,
+    NativePedHitCollisionSpace space, NativePedHitCollisionState& state) {
+    using S = NativePedHitCollisionStatus;
+    if (!state.Known) return S::UnknownHitModel;
+    if (space != NativePedHitCollisionSpace::Local && space != NativePedHitCollisionSpace::World) return S::InvalidInput;
+    auto candidate = state;
+    if (!candidate.Present) {
+        const auto result = NativeConstructPedHitCollision(input, candidate.Value);
+        if (result != S::Constructed) return result;
+        candidate.Present = true;
+        if (space == NativePedHitCollisionSpace::Local) {
+            state = candidate;
+            return S::Constructed;
+        }
+    }
+    if (!input.HierarchyKnown) return S::UnknownHierarchy;
+    if (input.Bones.empty() || input.Bones.size() > 256) return S::InvalidInput;
+    const bool local = space == NativePedHitCollisionSpace::Local;
+    M inverse;
+    if (local) {
+        if (!input.RootKnown) return S::UnknownRoot;
+        if (!Finite(input.RootLocal)) return S::InvalidInput;
+        inverse = Inverse(input.RootLocal);
+        if (!Finite(inverse)) return S::InvalidInput;
+    }
+    const auto transform = [&](std::int32_t tag, float x, V& out) {
+        const auto bone = std::find_if(input.Bones.begin(), input.Bones.end(), [&](const auto& b) { return b.Tag == tag; });
+        if (bone == input.Bones.end() || !bone->MatrixKnown) return S::UnknownBoneMatrix;
+        if (!Finite(bone->Matrix)) return S::InvalidInput;
+        const auto matrix = local ? PreConcat(inverse, bone->Matrix) : bone->Matrix;
+        if (!Finite(matrix)) return S::InvalidInput;
+        out = Center(x, matrix);
+        return Finite(out) ? S::Updated : S::InvalidInput;
+    };
+    for (std::size_t i = 0; i < Nodes.size(); ++i) {
+        auto& sphere = candidate.Value.Spheres[i];
+        if (!std::isfinite(sphere.Radius) || sphere.Radius < 0) return S::InvalidInput;
+        const auto result = transform(Nodes[i].Tag, Nodes[i].X, sphere.Center);
+        if (result != S::Updated) return result;
+    }
+    auto& collision = candidate.Value;
+    const auto result = transform(3, 0.0F, collision.BoundCenter); // BONE_SPINE1
+    if (result != S::Updated) return result;
+    collision.BoundRadius = 1.5F;
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        collision.BoxMin[axis] = static_cast<float>(static_cast<long double>(collision.BoundCenter[axis]) - 1.2F);
+        collision.BoxMax[axis] = static_cast<float>(static_cast<long double>(collision.BoundCenter[axis]) + 1.2F);
+    }
+    if (!Finite(collision.BoxMin) || !Finite(collision.BoxMax)) return S::InvalidInput;
+    state = candidate;
+    return S::Updated;
+}

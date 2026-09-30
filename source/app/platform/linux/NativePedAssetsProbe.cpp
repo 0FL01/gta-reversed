@@ -77,10 +77,22 @@ void HitFixture(const NativePedAssets& packet) {
     NativePedHitCollisionInput input{true, true, {packet.ClumpRootLocal, packet.ClumpRootLocalFlags}, bones};
     Check(NativeConstructPedHitCollision(input, hit) == NativePedHitCollisionStatus::Constructed &&
         hit.Spheres.size() == 12 && hit.Spheres[0].Material == 62, "owned frame fixture feeds hit COL, not Loaded");
+    NativePedHitCollisionState pose;
+    pose.Known = true;
+    Check(NativeAnimatePedHitCollision(input, NativePedHitCollisionSpace::Local, pose) == NativePedHitCollisionStatus::Constructed &&
+        pose.Value == hit, "local first use returns construction without animated bounds");
+    Check(NativeAnimatePedHitCollision(input, NativePedHitCollisionSpace::Local, pose) == NativePedHitCollisionStatus::Updated &&
+        pose.Value.Spheres == hit.Spheres, "local fixture updates bounds without changing node radii/materials");
+    pose.Present = false;
+    Check(NativeAnimatePedHitCollision(input, NativePedHitCollisionSpace::World, pose) == NativePedHitCollisionStatus::Updated &&
+        pose.Present && pose.Value.BoundRadius == 1.5F, "world first use constructs then updates current pose");
     input.HierarchyKnown = false;
     const auto previous = hit;
     Check(NativeConstructPedHitCollision(input, hit) == NativePedHitCollisionStatus::UnknownHierarchy && hit == previous,
         "parsed frames do not implicitly authorize source hierarchy matrices");
+    const auto previousPose = pose;
+    Check(NativeAnimatePedHitCollision(input, NativePedHitCollisionSpace::World, pose) == NativePedHitCollisionStatus::UnknownHierarchy &&
+        pose == previousPose, "pose fixture cannot publish without a current hierarchy observation");
 }
 std::optional<realtime_streaming::PedAssetCompletion> Take(realtime_streaming::Worker& worker, std::uint64_t ticket) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);

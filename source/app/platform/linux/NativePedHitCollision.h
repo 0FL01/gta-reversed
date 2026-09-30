@@ -33,9 +33,26 @@ struct NativePedHitCollision {
     bool operator==(const NativePedHitCollision&) const = default;
 };
 enum class NativePedHitCollisionStatus {
-    Constructed, UnknownRoot, UnknownHierarchy, UnknownBoneMatrix, InvalidInput
+    Constructed, UnknownRoot, UnknownHierarchy, UnknownBoneMatrix, InvalidInput,
+    Updated, UnknownHitModel
 };
 // Atomic output, no resource/actor publication or procedural bone fallback.
 // Uses the initialized RW default identity optimization mask (0x20000).
 NativePedHitCollisionStatus NativeConstructPedHitCollision(
     const NativePedHitCollisionInput& input, NativePedHitCollision& out);
+
+enum class NativePedHitCollisionSpace { Local, World };
+struct NativePedHitCollisionState {
+    bool Known = false, Present = false;
+    NativePedHitCollision Value;
+    bool operator==(const NativePedHitCollisionState&) const = default;
+};
+// Source AnimatePedColModelSkinned[World]. Known absence is distinct from an
+// unknown model pointer. Local first use constructs and returns immediately;
+// world first use constructs, then applies the current world-space pose.
+// Existing world-space updates do not read the root-local matrix. Only centers
+// and bounds change; sphere radii/material/pieces and COL slot remain owned by
+// the prior model. Failure preserves the entire state, never publishes a prefix.
+NativePedHitCollisionStatus NativeAnimatePedHitCollision(
+    const NativePedHitCollisionInput& input, NativePedHitCollisionSpace space,
+    NativePedHitCollisionState& state);

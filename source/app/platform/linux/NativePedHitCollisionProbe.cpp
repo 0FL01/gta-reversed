@@ -34,6 +34,11 @@ void Print(const NativePedHitCollision& c) {
         std::printf(" %u %u %u", std::bit_cast<std::uint32_t>(sphere.Radius), sphere.Material, sphere.Piece);
     }
 }
+void PrintBounds(const NativePedHitCollision& c) {
+    for (const auto& v : {c.BoxMin, c.BoxMax, c.BoundCenter})
+        for (float f : v) std::printf(" %u", std::bit_cast<std::uint32_t>(f));
+    std::printf(" %u %u", std::bit_cast<std::uint32_t>(c.BoundRadius), c.ColSlot);
+}
 }
 int main() {
     using S = NativePedHitCollisionStatus;
@@ -66,6 +71,30 @@ int main() {
         for (const auto& bone : bones) { std::printf(" %d", bone.Tag); Print(bone.Matrix); }
         Print(out);
         std::puts("");
+        for (int mode = 0; mode < 4; ++mode) {
+            NativePedHitCollisionState state;
+            state.Known = true;
+            state.Present = (mode & 1) != 0;
+            for (std::size_t j = 0; j < state.Value.Spheres.size(); ++j)
+                state.Value.Spheres[j] = {{777, 888, 999}, static_cast<float>(j + 1) / 8.0F,
+                    static_cast<std::uint8_t>(100 + j), static_cast<std::uint8_t>(200 + j)};
+            state.Value.ColSlot = 77;
+            const auto space = mode < 2 ? NativePedHitCollisionSpace::Local : NativePedHitCollisionSpace::World;
+            Check(NativeAnimatePedHitCollision(input, space, state) == (mode == 0 ? S::Constructed : S::Updated));
+            Check(state.Known && state.Present);
+            if (mode & 1) {
+                Check(state.Value.ColSlot == 77 && state.Value.Spheres[11].Material == 111 &&
+                    state.Value.Spheres[11].Piece == 211 && state.Value.Spheres[11].Radius == 1.5F);
+            } else {
+                Check(state.Value.ColSlot == 0 && state.Value.Spheres[11].Material == 62);
+            }
+            std::printf("HIT_POSE %u %d", i, mode);
+            Print(input.RootLocal);
+            std::printf(" %zu", bones.size());
+            for (const auto& bone : bones) { std::printf(" %d", bone.Tag); Print(bone.Matrix); }
+            Print(state.Value); PrintBounds(state.Value);
+            std::puts("");
+        }
     }
     const auto previous = out;
     input.RootKnown = false;
@@ -82,5 +111,30 @@ int main() {
     input.RootLocal.Value.Pos[0] = 0;
     input.Bones = {};
     Check(NativeConstructPedHitCollision(input, out) == S::InvalidInput && out == previous);
-    std::printf("native-ped-hit-col-ok checks=%zu cases=4112 matrices=explicit loaded-state=unowned census=incomplete\n", Checks);
+    NativePedHitCollisionState pose;
+    pose.Value = previous;
+    auto saved = pose;
+    Check(NativeAnimatePedHitCollision(input, NativePedHitCollisionSpace::Local, pose) == S::UnknownHitModel && pose == saved);
+    pose.Known = pose.Present = true; saved = pose;
+    input.Bones = bones; bones[27].Matrix.Value.Pos[1] = 0;
+    input.HierarchyKnown = false;
+    Check(NativeAnimatePedHitCollision(input, NativePedHitCollisionSpace::World, pose) == S::UnknownHierarchy && pose == saved);
+    input.HierarchyKnown = true; input.RootKnown = false;
+    Check(NativeAnimatePedHitCollision(input, NativePedHitCollisionSpace::Local, pose) == S::UnknownRoot && pose == saved);
+    Check(NativeAnimatePedHitCollision(input, NativePedHitCollisionSpace::World, pose) == S::Updated);
+    pose.Present = false; saved = pose;
+    Check(NativeAnimatePedHitCollision(input, NativePedHitCollisionSpace::World, pose) == S::UnknownRoot && pose == saved);
+    input.RootKnown = true; pose.Present = true; saved = pose;
+    bones[27].MatrixKnown = false;
+    Check(NativeAnimatePedHitCollision(input, NativePedHitCollisionSpace::World, pose) == S::UnknownBoneMatrix && pose == saved);
+    bones[27].MatrixKnown = true; bones[27].Matrix.Value.Pos[2] = std::numeric_limits<float>::infinity();
+    Check(NativeAnimatePedHitCollision(input, NativePedHitCollisionSpace::World, pose) == S::InvalidInput && pose == saved);
+    Check(NativeAnimatePedHitCollision(input, static_cast<NativePedHitCollisionSpace>(2), pose) == S::InvalidInput && pose == saved);
+    bones[27].Matrix.Value.Pos[2] = 0;
+    pose.Value.Spheres[11].Radius = -1; saved = pose;
+    Check(NativeAnimatePedHitCollision(input, NativePedHitCollisionSpace::World, pose) == S::InvalidInput && pose == saved);
+    pose.Value.Spheres[11].Radius = 0.16F; saved = pose;
+    input.Bones = {};
+    Check(NativeAnimatePedHitCollision(input, NativePedHitCollisionSpace::World, pose) == S::InvalidInput && pose == saved);
+    std::printf("native-ped-hit-col-ok checks=%zu cases=4112 poses=16448 matrices=explicit loaded-state=unowned census=incomplete\n", Checks);
 }

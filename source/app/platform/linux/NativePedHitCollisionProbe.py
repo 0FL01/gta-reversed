@@ -43,6 +43,8 @@ pe = pefile.PE(str(game))
 assert pe.OPTIONAL_HEADER.ImageBase == 0x400000
 ranges = (
     (0x4d1040, 0x1ad, '098eaff273af1aef22e1091afad9fe0e26cc3d4bf7d6f4f060f8fefdb63e004f'),
+    (0x4d11f0, 0x1bb, '729d05c6e4da8d73f2010243981fac07175caf2c6bb8e1ea30b56160b3378422'),
+    (0x4d13b0, 0x160, 'da1a19ad0341d9c573ec6d2b141828716e0c52acf762ddd1f70e506de9462089'),
     (0x826890, 0x250, 'ddbfe0ae8695520fe4e951e2e54d747b65c5775f09b032f00bcd69179d290530'),
     (0x826dc0, 0x170, '58eea36da49f69f1cf48270b81a62bffdcc034b681dc03741cbd521b8726a87a'),
     (0x825b00, 0x1b0, '6988fcb800e040af65e7ca1e5751813d286119575e9edad7fe25f66184438c74'),
@@ -95,15 +97,25 @@ def code(machine, address, size, _):
         write(data + 8, 'I', spheres)
 uc.hook_add(UC_HOOK_CODE, code)
 cases = 0
+poses = 0
 for line in native.stdout.splitlines():
-    if not line.startswith('HIT_COL '):
+    pose = line.startswith('HIT_POSE ')
+    if not pose and not line.startswith('HIT_COL '):
         if line.startswith('native-ped-hit-col-ok '): print(line)
         continue
     fields = list(map(int, line.split()[1:]))
+    mode = fields.pop(1) if pose else -1
     index, root_matrix, count = fields[0], fields[1:14], fields[14]
     bone_fields, expected = fields[15:15 + count * 14], fields[15 + count * 14:]
-    assert len(expected) == 72
+    assert len(expected) == (83 if pose else 72)
     uc.mem_write(cm, bytes(0x30)); uc.mem_write(spheres, bytes(12 * 20))
+    write(model + 0x34, 'I', cm if pose and mode & 1 else 0)
+    if pose and mode & 1:
+        write(cm + 0x2c, 'I', data)
+        write(data + 8, 'I', spheres)
+        write(cm + 0x28, 'B', 77)
+        for j in range(12):
+            write(spheres + j * 20, '4f2B', 777, 888, 999, (j + 1) / 8, 100 + j, 200 + j)
     matrix(frame + 0x10, root_matrix)
     write(clump + 4, 'I', frame)
     write(hierarchy + 4, 'II', count, matrices)
@@ -117,18 +129,25 @@ for line in native.stdout.splitlines():
     uc.reg_write(UC_X86_REG_ESP, stack)
     uc.reg_write(UC_X86_REG_ECX, model)
     uc.reg_write(UC_X86_REG_FPCW, 0x37f)
-    uc.emu_start(0x4d1040, 0x30e0000, count=100000)
+    entry = 0x4d1040 if not pose else 0x4d11f0 if mode < 2 else 0x4d13b0
+    uc.emu_start(entry, 0x30e0000, count=100000)
     assert uc.reg_read(UC_X86_REG_ESP) == stack + 8
     observed = []
     for j in range(12):
         observed += list(read(spheres + j * 20, '4I2B'))
+    if pose:
+        observed += list(read(cm, '10I')) + list(read(cm + 0x28, 'B'))
     assert observed == expected, ('hit-col mismatch', index, [(j, a, b) for j, (a, b) in enumerate(zip(observed, expected)) if a != b])
     assert read(model + 0x34, 'I')[0] == cm
-    assert read(cm, '6f') == (-0.5, -0.5, struct.unpack('<f', struct.pack('<f', -1.2))[0],
-                             0.5, 0.5, struct.unpack('<f', struct.pack('<f', 1.2))[0])
-    assert read(cm + 0x18, '4f') == (0.0, 0.0, 0.0, 1.5)
-    assert read(cm + 0x28, 'B')[0] == 0
-    cases += 1
-assert cases == 4112
-print('ped-hit-col-source-oracle-ok cases=4112 nodes=12 matrix-math=original '
+    if not pose:
+        assert read(cm, '6f') == (-0.5, -0.5, struct.unpack('<f', struct.pack('<f', -1.2))[0],
+                                 0.5, 0.5, struct.unpack('<f', struct.pack('<f', 1.2))[0])
+        assert read(cm + 0x18, '4f') == (0.0, 0.0, 0.0, 1.5)
+        assert read(cm + 0x28, 'B')[0] == 0
+        cases += 1
+    else:
+        assert uc.reg_read(UC_X86_REG_EAX) == cm
+        poses += 1
+assert cases == 4112 and poses == 16448
+print('ped-hit-col-source-oracle-ok cases=4112 poses=16448 nodes=12 matrix-math=original '
       'hierarchy=explicit loaded-state=unowned census=incomplete')
