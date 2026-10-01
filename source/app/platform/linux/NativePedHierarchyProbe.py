@@ -55,6 +55,10 @@ for address, size, digest in (
     (0x4e0270, 0x20, '1112b331d32b2a162ff3cda0b819fcd36bbbf7d4dfc3cd48fa1f0ad4fa3546d8'),
     (0x4e0310, 0x9c, 'bb67c59479d09648673076b84cf2e062f3d08062b2533a7cb1a70a0ecf617032'),
     (0x4d9430, 0x100, '747f15ce4710d2aa7f6886dc6b42e280f3a26c42834c5b766090ed519ac0c705'),
+    (0x4dce50, 0x213, '5b542d166aa7b8de4e9f04e99565d1a21247805d76396ea8b85971fc5d8f7461'),
+    (0x4dd0a0, 0x1f5, '76eca28bff81d5908f8dea5d97977db0f9e714a301eec3e68cd32a20b8d316b5'),
+    (0x4dbc80, 0x7f, '1d7d501736d411a75de5127524a1bcb63afab89502dc1666364dfc4ef46553fc'),
+    (0x853d40, 0x80, 'a67f7e6c2675d8be9ffb2c5c1f1581acabcb0fb7653052d2340f8c90ed6f921b'),
 ):
     assert hashlib.sha256(pe.get_data(address - 0x400000, size)).hexdigest() == digest
 image = pe.get_memory_mapped_image()
@@ -71,6 +75,11 @@ bind_skin, bind_geometry, bind_atomic, bind_clump = 0x30a8000, 0x30a9000, 0x30a9
 bind_count = 0
 blend_data, blend_frames = 0x30a9400, 0x30c9000
 initializing = False
+producing = False
+production_context, production_fd, production_frame, production_clump = 0x30a9800, 0x30a9900, 0x30a9a00, 0x30a9b00
+production_nodes, production_sequences, production_associations = 0x30b8000, 0x30b9000, 0x30ba000
+production_samples, production_calls, velocity_calls = [], [], []
+production_scale = 0
 def write(address, fmt, *values):
     uc.mem_write(address, struct.pack('<' + fmt, *values))
 def read(address, fmt):
@@ -94,9 +103,24 @@ for address in (0x824b50, 0x8251a0, 0x825120, callback,
                 0x77e360, 0x7fbd60, 0x7fbff0, 0x7fc020, 0x8535ae, 0x778710,
                 0x7805c0, 0x801550, 0x761690, 0x761890): uc.mem_write(address, b'\xc3')
 updates, applies = [], []
+for address in (0x4dac80, 0x4dae90): uc.mem_write(address, b'\xc2\x0c\x00')
+for address in (0x4dbd20, 0x4dc060, 0x4dc310): uc.mem_write(address, b'\xc3')
 def code(machine, address, size, _):
     stack = machine.reg_read(UC_X86_REG_ESP)
-    if address == 0x7805c0:
+    if producing and address in (0x4dac80, 0x4dae90):
+        index = (machine.reg_read(UC_X86_REG_ECX) - production_nodes) // 0x100
+        destination_t, destination_q, scale = read(stack + 4, '3I')
+        assert scale == production_scale, (index, 'partial scale', scale, production_scale)
+        sample = production_samples[index]
+        assert sample[0]
+        write(destination_q, '4I', *sample[4:8])
+        write(destination_t, '3I', *sample[8:11])
+        production_calls.append(index)
+    elif producing and address in (0x4dbd20, 0x4dc060, 0x4dc310):
+        assert machine.reg_read(UC_X86_REG_EAX) == production_context
+        assert read(stack + 4, 'I')[0] == production_fd
+        velocity_calls.append(address)
+    elif address == 0x7805c0:
         assert read(stack + 4, '5I') == (4, 0x253f2fb, 0x4e00e0, 0x4e02d0, 0x4e0140)
         machine.reg_write(UC_X86_REG_EAX, 0x40)
     elif address == 0x801550:
@@ -154,7 +178,56 @@ uc.reg_write(UC_X86_REG_ESP, stack)
 uc.reg_write(UC_X86_REG_FPCW, 0x37f)
 uc.emu_start(0x4e0270, 0x30e0000, count=1000)
 assert read(interpolator + 0x4c, '7I') == (0, 0, 0, 0x3f800000, 0, 0, 0)
+production_cases = 0
 for line in native.stdout.splitlines():
+    if line.startswith('BLEND_PRODUCTION '):
+        fields = list(map(int, line.split()[1:]))
+        index, mode, count, flags, include = fields[:5]
+        rest, authored = fields[5:8], fields[8:8 + count * 11]
+        expected = fields[8 + count * 11:]
+        production_scale, advance, has_q = expected[:3]
+        offset = 3
+        expected_q = expected[offset:offset + 4] if has_q else [0x55555555] * 4
+        offset += 4 if has_q else 0
+        has_t = expected[offset]; offset += 1
+        expected_t = expected[offset:offset + 3] if has_t else [0x55555555] * 3
+        assert offset + (3 if has_t else 0) == len(expected)
+        uc.mem_write(production_context, bytes(52))
+        write(production_context, 'I', include)
+        write(production_fd, 'B', flags)
+        write(production_fd + 4, '3I', *rest)
+        write(production_fd + 16, 'I', production_frame)
+        uc.mem_write(production_frame, b'\x55' * 28)
+        write(0xbc6118, 'I', production_clump)
+        write(production_clump + 12, 'I', 0)
+        production_samples = [authored[j * 11:(j + 1) * 11] for j in range(count)]
+        for j, sample in enumerate(production_samples):
+            node = production_nodes + j * 0x100
+            sequence = production_sequences + j * 0x100
+            association = production_associations + j * 0x100
+            valid, partial, translation, amount = sample[:4]
+            write(node + 16, 'II', sequence if valid else 0, association)
+            write(sequence + 4, 'B', translation << 1)
+            write(association + 24, 'I', amount)
+            write(association + 46, 'B', partial << 4)
+            write(production_context + 4 + j * 4, 'I', node)
+        production_calls.clear()
+        stack = 0x30ff000
+        write(stack, '3I', 0x30e0000, production_fd, production_context)
+        uc.reg_write(UC_X86_REG_ESP, stack)
+        uc.reg_write(UC_X86_REG_FPCW, 0x37f)
+        producing = True
+        uc.emu_start(0x4dd0a0 if mode >= 16 else 0x4dce50, 0x30e0000, count=100000)
+        producing = False
+        observed_q, observed_t = list(read(production_frame, '4I')), list(read(production_frame + 16, '3I'))
+        assert observed_q == expected_q and observed_t == expected_t, (index, mode, count, observed_q, expected_q, observed_t, expected_t)
+        assert production_calls == [j for j, sample in enumerate(production_samples) if sample[0]]
+        assert advance == count and uc.reg_read(UC_X86_REG_ESP) == stack + 4
+        for j in range(count):
+            assert read(production_context + 4 + j * 4, 'I')[0] == production_nodes + j * 0x100 + 24
+        assert read(production_context + 4 + count * 4, 'I')[0] == 0
+        production_cases += 1
+        continue
     if line.startswith('BLEND_INIT '):
         fields = list(map(int, line.split()[1:]))
         index, bind_count, frame_stride = fields[:3]
@@ -305,6 +378,19 @@ for line in native.stdout.splitlines():
     gta_cases += int(gta)
 assert cases == 6144 and default_cases == 2048 and gta_cases == 2048 and interpolation_cases == 8192 and bind_cases == 1280
 assert blend_cases == 8192 and init_cases == 1280
+assert production_cases == 6144
+for compressed, z, expected in ((False, False, 0x4dbd20), (False, True, 0x4dc060), (True, False, 0x4dc310), (True, True, 0x4dc310)):
+    write(production_fd, 'B', 8 | (16 if z else 0))
+    write(production_clump + 12, 'I', 0x30a9c00)
+    uc.mem_write(production_frame, b'\x55' * 28)
+    velocity_calls.clear()
+    stack = 0x30ff000
+    write(stack, '3I', 0x30e0000, production_fd, production_context)
+    uc.reg_write(UC_X86_REG_ESP, stack)
+    producing = True
+    uc.emu_start(0x4dd0a0 if compressed else 0x4dce50, 0x30e0000, count=1000)
+    producing = False
+    assert velocity_calls == [expected] and bytes(uc.mem_read(production_frame, 28)) == b'\x55' * 28
 print('ped-hierarchy-source-oracle-ok cases=6144 interpolation=8192 inline=2048 bind-positions=1280 blend-init=1280 '
-      'blend-application=8192 GTA-callback=2048 matrices=original traversal=original '
+      'blend-application=8192 blend-production=6144 velocity-guards=4 GTA-callback=2048 matrices=original traversal=original '
       'callbacks=explicit,original-default,GTA frame-effects=planned loaded-state=unowned census=incomplete')

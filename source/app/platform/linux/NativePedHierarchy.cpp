@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <limits>
 #include <utility>
@@ -120,6 +121,103 @@ NativePedHierarchyStatus NativeApplyPedInterpolationFrame(const NativePedInterpo
 NativePedHierarchyStatus NativeApplyPedBlendFrame(const NativePedInterpolationFrame& input,
     NativePedHitMatrix& out) {
     return ApplyFrame(input, true, out);
+}
+
+NativePedHierarchyStatus NativeObservePedBlendPartialScale(const NativePedBlendProductionInput& input,
+    float& out) {
+    using S = NativePedHierarchyStatus;
+    static_assert(std::numeric_limits<long double>::digits == 64);
+    if (!input.FrameKnown) return S::UnknownFrame;
+    if (input.Flags & 8U) {
+        if (!input.PedPositionKnown) return S::UnknownPedPosition;
+        if (input.HasPedPosition) return !input.Compressed && (input.Flags & 16U)
+            ? S::Velocity3DRequired : S::Velocity2DRequired;
+    }
+    if (!input.ContextKnown) return S::UnknownBlendContext;
+    if (input.Nodes.empty() || input.Nodes.size() > 11) return S::InvalidInput;
+    float partial = 0;
+    for (const auto& node : input.Nodes) {
+        if (!node.Known) return S::UnknownBlendNode;
+        if (!node.Valid || !input.IncludePartial) continue;
+        if (!node.PartialKnown) return S::UnknownBlendNode;
+        if (node.Partial) {
+            if (!node.BlendKnown) return S::UnknownBlendNode;
+            if (!std::isfinite(node.BlendAmount)) return S::InvalidInput;
+            partial = static_cast<float>(static_cast<long double>(node.BlendAmount) + partial);
+        }
+    }
+    const float candidate = static_cast<float>(1.0L - partial);
+    if (!std::isfinite(candidate)) return S::InvalidInput;
+    out = candidate;
+    return S::Planned;
+}
+
+NativePedHierarchyStatus NativePlanPedBlendProduction(const NativePedBlendProductionInput& input,
+    NativePedBlendProductionPlan& out) {
+    using S = NativePedHierarchyStatus;
+    NativePedBlendProductionPlan candidate;
+    const auto status = NativeObservePedBlendPartialScale(input, candidate.PartialScale);
+    if (status != S::Planned) return status;
+    std::array<float, 4> q{};
+    std::array<float, 3> t{};
+    float blend = 0;
+    for (const auto& node : input.Nodes) {
+        ++candidate.AdvanceNodeArrays;
+        if (!node.Valid) continue;
+        if (!node.UpdateKnown) return S::UnknownNodeUpdate;
+        if (!std::isfinite(node.UpdatedPartialScale) ||
+            std::bit_cast<std::uint32_t>(node.UpdatedPartialScale) !=
+            std::bit_cast<std::uint32_t>(candidate.PartialScale)) return S::InvalidInput;
+        if (!node.TranslationKnown) return S::UnknownBlendNode;
+        for (float value : node.Quaternion) if (!std::isfinite(value)) return S::InvalidInput;
+        if (node.HasTranslation) {
+            if (!node.BlendKnown) return S::UnknownBlendNode;
+            if (!std::isfinite(node.BlendAmount)) return S::InvalidInput;
+            for (std::size_t j = 0; j < t.size(); ++j) {
+                if (!std::isfinite(node.Translation[j])) return S::InvalidInput;
+                t[j] = static_cast<float>(static_cast<long double>(node.Translation[j]) + t[j]);
+                if (!std::isfinite(t[j])) return S::InvalidInput;
+            }
+            blend = static_cast<float>(static_cast<long double>(node.BlendAmount) + blend);
+            if (!std::isfinite(blend)) return S::InvalidInput;
+        }
+        const auto dot = static_cast<float>(((static_cast<long double>(node.Quaternion[0]) * q[0] +
+            static_cast<long double>(node.Quaternion[1]) * q[1]) +
+            static_cast<long double>(node.Quaternion[2]) * q[2]) +
+            static_cast<long double>(node.Quaternion[3]) * q[3]);
+        if (!std::isfinite(dot)) return S::InvalidInput;
+        for (std::size_t j = 0; j < q.size(); ++j) {
+            q[j] = static_cast<float>(dot >= 0 ? static_cast<long double>(node.Quaternion[j]) + q[j]
+                : static_cast<long double>(q[j]) - node.Quaternion[j]);
+            if (!std::isfinite(q[j])) return S::InvalidInput;
+        }
+    }
+    if (!(input.Flags & 2U)) {
+        const auto squared = static_cast<float>(((static_cast<long double>(q[0]) * q[0] +
+            static_cast<long double>(q[1]) * q[1]) + static_cast<long double>(q[2]) * q[2]) +
+            static_cast<long double>(q[3]) * q[3]);
+        if (!std::isfinite(squared)) return S::InvalidInput;
+        if (squared == 0) {
+            q[3] = 1;
+        } else {
+            const float magnitude = std::sqrt(static_cast<long double>(squared));
+            const float reciprocal = 1.0L / magnitude;
+            if (!std::isfinite(reciprocal)) return S::InvalidInput;
+            for (float& value : q) value = static_cast<long double>(value) * reciprocal;
+        }
+        candidate.Quaternion = q;
+    }
+    if (!(input.Flags & 4U)) {
+        for (std::size_t j = 0; j < t.size(); ++j) {
+            if (!std::isfinite(input.RestPosition[j])) return S::InvalidInput;
+            const float weighted = static_cast<long double>(t[j]) * blend;
+            t[j] = static_cast<long double>(input.RestPosition[j]) * (1.0L - blend) + weighted;
+            if (!std::isfinite(t[j])) return S::InvalidInput;
+        }
+        candidate.Translation = t;
+    }
+    out = std::move(candidate);
+    return S::Planned;
 }
 
 NativePedHierarchyStatus NativePlanPedHierarchyUpdate(const NativePedHierarchyInput& input,

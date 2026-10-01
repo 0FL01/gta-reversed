@@ -158,6 +158,35 @@ void HierarchyFixture(const NativePedAssets& packet) {
     nodes.back().AppliedKnown = false;
     Check(NativePlanPedHierarchyUpdate(input, plan) == NativePedHierarchyStatus::UnknownAppliedPose && plan == prior,
         "real DFF data alone cannot authorize interpolation callback results");
+    // Explicit callback fixture: one existing association has no sequence for
+    // this bone. This is NOT an empty association list or a runtime pose claim.
+    NativePedBlendContribution invalidNode;
+    invalidNode.Known = true;
+    NativePedBlendProductionInput production;
+    production.FrameKnown = production.PedPositionKnown = production.ContextKnown = true;
+    production.Nodes = std::span{&invalidNode, 1};
+    NativePedBlendProductionPlan produced;
+    for (std::size_t i = 0; i < nodes.size(); ++i) {
+        production.Flags = bindings[i].Flags;
+        production.RestPosition = bindings[i].RestPosition;
+        Check(NativePlanPedBlendProduction(production, produced) == NativePedHierarchyStatus::Planned &&
+            produced.Quaternion && produced.Translation && produced.AdvanceNodeArrays == 1,
+            "explicit invalid-sequence callback produces rest channels and advances its node array");
+        nodes[i].Interpolation = NativePedInterpolationFrame{true, *produced.Quaternion, *produced.Translation};
+        nodes[i].Application = NativePedFrameApplication::AnimBlend;
+        nodes[i].AppliedKnown = false;
+    }
+    Check(NativePlanPedHierarchyUpdate(input, plan) == NativePedHierarchyStatus::Planned && plan.Nodes.size() == nodes.size(),
+        "source-produced fixture channels feed GTA application and hierarchy intents, not DFF local-frame defaults");
+    matrices.clear();
+    for (const auto& node : plan.Nodes) matrices.push_back({node.Tag, true, *node.Matrix});
+    Check(NativeConstructPedHitCollision({true, true,
+        {packet.ClumpRootLocal, packet.ClumpRootLocalFlags}, matrices}, shape) == NativePedHitCollisionStatus::Constructed,
+        "source production/application fixture reaches hit collision with all effect consumers still separate");
+    const auto previousProduction = produced;
+    invalidNode.Valid = true;
+    Check(NativePlanPedBlendProduction(production, produced) == NativePedHierarchyStatus::UnknownNodeUpdate && produced == previousProduction,
+        "a real valid sequence with unknown Update output cannot become a guessed rest pose");
 }
 std::optional<realtime_streaming::PedAssetCompletion> Take(realtime_streaming::Worker& worker, std::uint64_t ticket) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);

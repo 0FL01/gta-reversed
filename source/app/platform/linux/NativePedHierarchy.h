@@ -66,7 +66,9 @@ struct NativePedHierarchyPlan {
 
 enum class NativePedHierarchyStatus {
     Planned, UnknownHierarchy, UnknownParent, UnknownAppliedPose, UnknownFrame,
-    UnknownRootFrame, InvalidInput, UnknownSkin, UnknownInverseBind, UnknownInterpolator
+    UnknownRootFrame, InvalidInput, UnknownSkin, UnknownInverseBind, UnknownInterpolator,
+    UnknownBlendContext, UnknownBlendNode, UnknownNodeUpdate, UnknownPedPosition,
+    Velocity2DRequired, Velocity3DRequired
 };
 
 struct NativePedBindBone {
@@ -119,6 +121,49 @@ NativePedHierarchyStatus NativeApplyPedBlendFrame(const NativePedInterpolationFr
 // q / zero t. Only an actual callback invocation authorizes these frame values;
 // blend-frame allocation/initialization above never implies it was invoked.
 void NativeResetPedBlendInterpolationFrame(NativePedInterpolationFrame& out);
+
+// Results of genuine Update/UpdateCompressed calls at the supplied partial scale.
+// These are already weighted contributions, not raw IFP keys or invented poses.
+struct NativePedBlendContribution {
+    bool Known = false, Valid = false;
+    bool PartialKnown = false, Partial = false;
+    bool BlendKnown = false;
+    float BlendAmount = 0;
+    bool TranslationKnown = false, HasTranslation = false;
+    bool UpdateKnown = false;
+    float UpdatedPartialScale = 0;
+    std::array<float, 4> Quaternion{};
+    std::array<float, 3> Translation{};
+};
+struct NativePedBlendProductionInput {
+    bool FrameKnown = false;
+    std::uint8_t Flags = 0;
+    std::array<float, 3> RestPosition{};
+    bool PedPositionKnown = false, HasPedPosition = false;
+    bool Compressed = false;
+    bool ContextKnown = false, IncludePartial = false;
+    std::span<const NativePedBlendContribution> Nodes;
+};
+struct NativePedBlendProductionPlan {
+    float PartialScale = 0;
+    std::uint8_t AdvanceNodeArrays = 0;
+    std::optional<std::array<float, 4>> Quaternion;
+    std::optional<std::array<float, 3>> Translation;
+    bool operator==(const NativePedBlendProductionPlan&) const = default;
+};
+// Shared pre-update scale authority. Does not read node Update outputs, so a
+// genuine sampler can obtain the scale without fabricating contributions.
+// Velocity/unknown/invalid observations preserve out.
+NativePedHierarchyStatus NativeObservePedBlendPartialScale(const NativePedBlendProductionInput& input,
+    float& out);
+// Ordinary FrameUpdateCallBack[Compressed]Skinned accumulation. Velocity branches
+// are typed required effects, never treated as ordinary/no movement. Ignored
+// channels remain absent (not known previous values). Each node array advances,
+// including invalid nodes; the caller must fulfill node updates/cursor intents
+// before publishing a pose. No IFP sampling or interpolation-frame binding here.
+// Empty context is not a callback invocation: the source main loop needs a node.
+NativePedHierarchyStatus NativePlanPedBlendProduction(const NativePedBlendProductionInput& input,
+    NativePedBlendProductionPlan& out);
 
 // RpHAnimHierarchyUpdateMatrices: ordered node traversal and matrix/frame
 // writes under RWDEFAULT. The caller must fulfill the root dirty-list intent

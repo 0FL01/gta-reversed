@@ -25,10 +25,122 @@ NativePedHitMatrix Matrix(std::uint32_t& seed, std::uint32_t flags) {
     out.Value.Right[0] += 1.0F; out.Value.Up[1] += 1.0F; out.Value.At[2] += 1.0F;
     return out;
 }
+void ProductionCases() {
+    using S = NativePedHierarchyStatus;
+    const auto bits = [](float value) { return std::bit_cast<std::uint32_t>(value); };
+    for (std::uint32_t index = 0; index < 64; ++index) {
+        for (std::uint32_t mode = 0; mode < 32; ++mode) {
+            for (std::size_t count : {1U, 3U, 11U}) {
+                std::uint32_t seed = index * 0x9E3779B9U + mode + 1;
+                std::vector<NativePedBlendContribution> nodes(count);
+                float partial = 0;
+                for (std::size_t i = 0; i < count; ++i) {
+                    auto& node = nodes[i];
+                    node.Known = node.PartialKnown = node.BlendKnown = node.TranslationKnown = node.UpdateKnown = true;
+                    node.Valid = (index + i) % 5 != 0;
+                    node.Partial = (index + i) % 3 == 0;
+                    node.HasTranslation = (index + i) % 3 != 1;
+                    seed = seed * 1664525U + 1013904223U;
+                    node.BlendAmount = index < 4 ? static_cast<float>((index + i) % 9) / 8.0F
+                        : static_cast<float>(seed >> 8) / 16777216.0F;
+                    if (index & 1U && node.Valid && node.Partial)
+                        partial = static_cast<float>(static_cast<long double>(node.BlendAmount) + partial);
+                    for (float& value : node.Quaternion) {
+                        seed = seed * 1664525U + 1013904223U;
+                        const auto exponent = index < 4 ? 0U : 64U + (seed >> 24) % 107U;
+                        value = index == 0 ? 0.0F : std::bit_cast<float>((seed & 0x807FFFFFU) | exponent << 23);
+                    }
+                    for (float& value : node.Translation) {
+                        seed = seed * 1664525U + 1013904223U;
+                        value = static_cast<float>(static_cast<std::int32_t>(seed >> 8) - 0x800000) / 65536.0F;
+                    }
+                }
+                const float scale = static_cast<float>(1.0L - partial);
+                for (auto& node : nodes) node.UpdatedPartialScale = scale;
+                NativePedBlendProductionInput input;
+                input.FrameKnown = input.PedPositionKnown = input.ContextKnown = true;
+                input.Flags = static_cast<std::uint8_t>((mode % 16) * 2);
+                input.RestPosition = {1.25F, -7.0F, index & 1 ? -0.0F : 0.0F};
+                input.Compressed = mode >= 16;
+                input.IncludePartial = (index & 1U) != 0;
+                input.Nodes = nodes;
+                float observedScale = 777;
+                Check(NativeObservePedBlendPartialScale(input, observedScale) == S::Planned && bits(observedScale) == bits(scale));
+                NativePedBlendProductionPlan out;
+                Check(NativePlanPedBlendProduction(input, out) == S::Planned);
+                Check(out.AdvanceNodeArrays == count && bits(out.PartialScale) == bits(scale));
+                Check(out.Quaternion.has_value() == !(input.Flags & 2U) &&
+                    out.Translation.has_value() == !(input.Flags & 4U));
+                std::cout << "BLEND_PRODUCTION " << index << ' ' << mode << ' ' << count << ' '
+                    << static_cast<unsigned>(input.Flags) << ' ' << input.IncludePartial;
+                for (float value : input.RestPosition) std::cout << ' ' << bits(value);
+                for (const auto& node : nodes) {
+                    std::cout << ' ' << node.Valid << ' ' << node.Partial << ' ' << node.HasTranslation
+                        << ' ' << bits(node.BlendAmount);
+                    for (float value : node.Quaternion) std::cout << ' ' << bits(value);
+                    for (float value : node.Translation) std::cout << ' ' << bits(value);
+                }
+                std::cout << ' ' << bits(out.PartialScale) << ' ' << static_cast<unsigned>(out.AdvanceNodeArrays)
+                    << ' ' << out.Quaternion.has_value();
+                if (out.Quaternion) for (float value : *out.Quaternion) std::cout << ' ' << bits(value);
+                std::cout << ' ' << out.Translation.has_value();
+                if (out.Translation) for (float value : *out.Translation) std::cout << ' ' << bits(value);
+                std::cout << '\n';
+            }
+        }
+    }
+    NativePedBlendContribution node;
+    node.Known = node.Valid = node.PartialKnown = node.BlendKnown = node.TranslationKnown = node.UpdateKnown = true;
+    node.UpdatedPartialScale = 1;
+    NativePedBlendProductionInput input;
+    input.Nodes = std::span{&node, 1};
+    NativePedBlendProductionPlan out{777, 7, std::array<float, 4>{1, 2, 3, 4}, std::array<float, 3>{5, 6, 7}};
+    const auto old = out;
+    const auto guard = [&](S expected) { Check(NativePlanPedBlendProduction(input, out) == expected && out == old); };
+    guard(S::UnknownFrame);
+    input.FrameKnown = true; input.Flags = 8;
+    guard(S::UnknownPedPosition);
+    input.PedPositionKnown = input.HasPedPosition = true;
+    guard(S::Velocity2DRequired);
+    input.Flags = 24;
+    guard(S::Velocity3DRequired);
+    input.Compressed = true;
+    guard(S::Velocity2DRequired);
+    input.HasPedPosition = false;
+    guard(S::UnknownBlendContext);
+    input.ContextKnown = true; node.Known = false;
+    guard(S::UnknownBlendNode);
+    node.Known = true; node.UpdateKnown = false;
+    guard(S::UnknownNodeUpdate);
+    float observedScale = 777;
+    Check(NativeObservePedBlendPartialScale(input, observedScale) == S::Planned && observedScale == 1);
+    node.UpdateKnown = true; node.UpdatedPartialScale = 0;
+    guard(S::InvalidInput);
+    node.UpdatedPartialScale = 1; node.TranslationKnown = false;
+    guard(S::UnknownBlendNode);
+    node.TranslationKnown = true; node.Quaternion[2] = std::numeric_limits<float>::quiet_NaN();
+    guard(S::InvalidInput);
+    node.Quaternion[2] = 0; input.IncludePartial = true; node.PartialKnown = false;
+    guard(S::UnknownBlendNode);
+    node.PartialKnown = true; node.Partial = true; node.BlendKnown = false;
+    guard(S::UnknownBlendNode);
+    node.BlendKnown = true; input.Nodes = {};
+    guard(S::InvalidInput);
+    observedScale = 777;
+    Check(NativeObservePedBlendPartialScale(input, observedScale) == S::InvalidInput && observedScale == 777);
+    input.Nodes = std::span{&node, 1}; input.Flags = 6;
+    input.RestPosition[0] = std::numeric_limits<float>::quiet_NaN();
+    Check(NativePlanPedBlendProduction(input, out) == S::Planned && !out.Quaternion && !out.Translation);
+    input.Flags = 0; input.IncludePartial = false; input.RestPosition = {6, 0, 0};
+    node.HasTranslation = true; node.BlendAmount = 0.5F; node.Translation = {4, 0, 0};
+    Check(NativePlanPedBlendProduction(input, out) == S::Planned && out.Translation &&
+        (*out.Translation)[0] == 5 && out.Quaternion && (*out.Quaternion)[3] == 1);
+}
 }
 
 int main() {
     using S = NativePedHierarchyStatus;
+    ProductionCases();
     std::size_t bindCases = 0;
     for (std::uint32_t index = 0; index < 256; ++index) {
         for (const auto count : {1U, 2U, 8U, 32U, 64U}) {
@@ -290,5 +402,5 @@ int main() {
     Check(NativePlanPedHierarchyUpdate(input, out) == S::InvalidInput && out == noParentPlan);
     std::cout << "native-ped-hierarchy-ok checks=" << Checks << " cases=" << cases
         << " interpolation=8192 blend-application=8192 bind-positions=" << bindCases << " blend-init=" << bindCases
-        << " callbacks=explicit,default,GTA frame-effects=planned loaded-state=unowned census=incomplete\n";
+        << " blend-production=6144 callbacks=explicit,default,GTA frame-effects=planned loaded-state=unowned census=incomplete\n";
 }
