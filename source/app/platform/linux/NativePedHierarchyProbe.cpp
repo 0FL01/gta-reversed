@@ -29,8 +29,32 @@ NativePedHitMatrix Matrix(std::uint32_t& seed, std::uint32_t flags) {
 
 int main() {
     using S = NativePedHierarchyStatus;
+    for (std::uint32_t index = 0; index < 8192; ++index) {
+        NativePedInterpolationFrame frame;
+        frame.Known = true;
+        std::uint32_t seed = index * 0x9E3779B9U + 1;
+        for (auto& value : frame.Quaternion) {
+            seed = seed * 1664525U + 1013904223U;
+            const auto exponent = index < 16 ? 0U : (seed >> 24) % 187U;
+            value = std::bit_cast<float>((seed & 0x807FFFFFU) | (exponent << 23));
+        }
+        for (auto& value : frame.Translation) {
+            seed = seed * 1664525U + 1013904223U;
+            value = std::bit_cast<float>((seed & 0x807FFFFFU) | ((index % 254U) << 23));
+        }
+        if (index < 8) frame.Quaternion = {index & 1U ? -0.0F : 0.0F, 0, 0, index & 2U ? 1.0F : -1.0F};
+        NativePedHitMatrix applied;
+        Check(NativeApplyPedInterpolationFrame(frame, applied) == S::Planned);
+        std::cout << "INTERPOLATION " << index;
+        for (float value : frame.Quaternion) std::cout << ' ' << std::bit_cast<std::uint32_t>(value);
+        for (float value : frame.Translation) std::cout << ' ' << std::bit_cast<std::uint32_t>(value);
+        Emit(applied);
+        std::cout << '\n';
+    }
     std::size_t cases = 0;
-    for (std::uint32_t index = 0; index < 64; ++index) {
+    for (std::uint32_t profile = 0; profile < 128; ++profile) {
+        const auto defaultCallback = profile / 64;
+        const auto index = profile % 64;
         for (std::uint32_t mode = 0; mode < 32; ++mode) {
             std::uint32_t seed = index * 0x9E3779B9U + mode;
             std::array<NativePedHierarchyNode, 8> nodes;
@@ -43,6 +67,17 @@ int main() {
                 node.HasFrame = (index & (1U << j)) != 0;
                 node.FramePrivateFlags = static_cast<std::uint8_t>(index + j);
                 node.Applied = Matrix(seed, (index + j) % 7 == 0 ? 0x20003U : 3U);
+                if (defaultCallback) {
+                    NativePedInterpolationFrame frame;
+                    frame.Known = true;
+                    for (auto& value : frame.Quaternion) {
+                        seed = seed * 1664525U + 1013904223U;
+                        value = static_cast<float>(static_cast<std::int32_t>(seed >> 8) - 0x800000) / 16777216.0F;
+                    }
+                    frame.Translation = node.Applied.Value.Pos;
+                    node.Interpolation = frame;
+                    node.AppliedKnown = false;
+                }
             }
             NativePedHierarchyInput input;
             input.HierarchyKnown = input.ParentKnown = input.SubParentKnown = input.RootFrameKnown = true;
@@ -58,13 +93,17 @@ int main() {
             NativePedHierarchyPlan out;
             Check(NativePlanPedHierarchyUpdate(input, out) == S::Planned);
             Check(out.Nodes.size() == nodes.size());
-            std::cout << "HIERARCHY " << index << ' ' << mode << ' ' << input.Flags << ' ' << input.HasParent
+            std::cout << (defaultCallback ? "HIERARCHY_DEFAULT " : "HIERARCHY ") << index << ' ' << mode << ' ' << input.Flags << ' ' << input.HasParent
                 << ' ' << input.ParentIndex << ' ' << unsigned(input.RootPrivateFlags);
             Emit(input.ParentWorld); Emit(input.SubParent);
             std::cout << ' ' << nodes.size();
             for (const auto& node : nodes) {
                 std::cout << ' ' << node.Tag << ' ' << node.Flags << ' ' << node.HasFrame << ' ' << unsigned(node.FramePrivateFlags);
                 Emit(node.Applied);
+                if (node.Interpolation) {
+                    for (float value : node.Interpolation->Quaternion) std::cout << ' ' << std::bit_cast<std::uint32_t>(value);
+                    for (float value : node.Interpolation->Translation) std::cout << ' ' << std::bit_cast<std::uint32_t>(value);
+                }
             }
             std::cout << ' ' << out.EnqueueRootDirty << ' ' << unsigned(out.RootPrivateFlags);
             for (const auto& node : out.Nodes) {
@@ -126,6 +165,22 @@ int main() {
     for (auto& node : deep) node.Flags = 2;
     input.Flags = 0x4000; input.Nodes = deep;
     Check(NativePlanPedHierarchyUpdate(input, out) == S::InvalidInput && out == noParentPlan);
+    NativePedHitMatrix applied = nodes[0].Applied;
+    const auto priorApplied = applied;
+    NativePedInterpolationFrame frame;
+    Check(NativeApplyPedInterpolationFrame(frame, applied) == S::UnknownAppliedPose && applied == priorApplied);
+    frame.Known = true; frame.Quaternion[0] = std::numeric_limits<float>::quiet_NaN();
+    Check(NativeApplyPedInterpolationFrame(frame, applied) == S::InvalidInput && applied == priorApplied);
+    frame.Quaternion[0] = std::numeric_limits<float>::max();
+    Check(NativeApplyPedInterpolationFrame(frame, applied) == S::InvalidInput && applied == priorApplied);
+    frame.Quaternion = {0, 0, 0, 0}; frame.Translation[2] = std::numeric_limits<float>::infinity();
+    Check(NativeApplyPedInterpolationFrame(frame, applied) == S::InvalidInput && applied == priorApplied);
+    frame.Translation[2] = 0;
+    Check(NativeApplyPedInterpolationFrame(frame, applied) == S::Planned && applied.Flags == 3);
+    input.Nodes = nodes; nodes[1].Interpolation = frame; nodes[1].Interpolation->Known = false;
+    Check(NativePlanPedHierarchyUpdate(input, out) == S::UnknownAppliedPose && out == noParentPlan);
+    nodes[1].Interpolation->Known = true; nodes[1].Interpolation->Quaternion[2] = std::numeric_limits<float>::quiet_NaN();
+    Check(NativePlanPedHierarchyUpdate(input, out) == S::InvalidInput && out == noParentPlan);
     std::cout << "native-ped-hierarchy-ok checks=" << Checks << " cases=" << cases
-        << " callback=explicit frame-effects=planned loaded-state=unowned census=incomplete\n";
+        << " interpolation=8192 callbacks=explicit,default frame-effects=planned loaded-state=unowned census=incomplete\n";
 }

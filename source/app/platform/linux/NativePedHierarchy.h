@@ -6,6 +6,14 @@
 #include <span>
 #include <vector>
 
+// Already interpolated HAnim frame values, not a DFF frame or an IFP key.
+// The source application does not normalize the quaternion.
+struct NativePedInterpolationFrame {
+    bool Known = false;
+    std::array<float, 4> Quaternion{};
+    std::array<float, 3> Translation{};
+};
+
 // A sampled interpolation callback result, not an authored DFF frame LTM.
 // Frame attachment/flags and parent matrices are separate live observations.
 struct NativePedHierarchyNode {
@@ -16,6 +24,9 @@ struct NativePedHierarchyNode {
     bool FrameKnown = false;
     bool HasFrame = false;
     std::uint8_t FramePrivateFlags = 0;
+    // Explicit selection of the original default callback/optimized inline
+    // application. When present, Applied/AppliedKnown are not consulted.
+    std::optional<NativePedInterpolationFrame> Interpolation = std::nullopt;
 };
 
 struct NativePedHierarchyInput {
@@ -55,10 +66,14 @@ enum class NativePedHierarchyStatus {
     UnknownRootFrame, InvalidInput
 };
 
+NativePedHierarchyStatus NativeApplyPedInterpolationFrame(const NativePedInterpolationFrame& input,
+    NativePedHitMatrix& out);
+
 // RpHAnimHierarchyUpdateMatrices: ordered node traversal and matrix/frame
 // writes under RWDEFAULT. The caller must fulfill the root dirty-list intent
-// and frame writes before publishing a live pose. Callback application remains
-// explicitly observed; this does not sample IFP, bind atomics, or grant Loaded.
+// and frame writes before publishing a live pose. Custom callback matrices or
+// default callback interpolation frames must be explicitly observed; this does
+// not produce/interpolate IFP frames, bind atomics, or grant Loaded.
 // Traversal is bounded to 256 nodes/32 saved parents. Terminal POP restoration
 // is unused and may exhaust the stack; a consumed underflow is rejected.
 // Unknown/invalid input preserves the complete previous plan.

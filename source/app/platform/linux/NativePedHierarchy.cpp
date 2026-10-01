@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 #include <utility>
 
 namespace {
@@ -16,6 +17,37 @@ bool Finite(const NativePedHitMatrix& matrix) {
 NativePedHitMatrix Identity() {
     return {{{1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {0, 0, 0}}, 0x20003U};
 }
+}
+
+NativePedHierarchyStatus NativeApplyPedInterpolationFrame(const NativePedInterpolationFrame& input,
+    NativePedHitMatrix& out) {
+    using S = NativePedHierarchyStatus;
+    if (!input.Known) return S::UnknownAppliedPose;
+    for (float value : input.Quaternion) if (!std::isfinite(value)) return S::InvalidInput;
+    for (float value : input.Translation) if (!std::isfinite(value)) return S::InvalidInput;
+    static_assert(std::numeric_limits<long double>::digits == 64);
+    const auto& [xf, yf, zf, wf] = input.Quaternion;
+    const long double x = xf, y = yf, z = zf, w = wf;
+    // The callback and both inline HAnim branches spill these products to
+    // float, but retain w*y and w*z in x87 registers. Preserve that distinction.
+    const float xx = x * x, yy = y * y, zz = z * z;
+    const float zy = z * y, zx = z * x, xy = y * x, wx = w * x;
+    const long double wy = w * y, wz = w * z;
+    NativePedHitMatrix candidate;
+    candidate.Flags = 3;
+    candidate.Value.Right = {static_cast<float>(1.0L - (static_cast<long double>(zz) + yy) * 2.0L),
+        static_cast<float>((static_cast<long double>(xy) + wz) * 2.0L),
+        static_cast<float>((static_cast<long double>(zx) - wy) * 2.0L)};
+    candidate.Value.Up = {static_cast<float>((static_cast<long double>(xy) - wz) * 2.0L),
+        static_cast<float>(1.0L - (static_cast<long double>(zz) + xx) * 2.0L),
+        static_cast<float>((static_cast<long double>(wx) + zy) * 2.0L)};
+    candidate.Value.At = {static_cast<float>((wy + zx) * 2.0L),
+        static_cast<float>((static_cast<long double>(zy) - wx) * 2.0L),
+        static_cast<float>(1.0L - (static_cast<long double>(yy) + xx) * 2.0L)};
+    candidate.Value.Pos = input.Translation;
+    if (!Finite(candidate)) return S::InvalidInput;
+    out = candidate;
+    return S::Planned;
 }
 
 NativePedHierarchyStatus NativePlanPedHierarchyUpdate(const NativePedHierarchyInput& input,
@@ -60,10 +92,14 @@ NativePedHierarchyStatus NativePlanPedHierarchyUpdate(const NativePedHierarchyIn
     std::size_t depth = 0;
     candidate.Nodes.reserve(input.Nodes.size());
     for (const auto& node : input.Nodes) {
-        if (!node.AppliedKnown) return S::UnknownAppliedPose;
+        auto applied = node.Applied;
+        if (node.Interpolation) {
+            const auto status = NativeApplyPedInterpolationFrame(*node.Interpolation, applied);
+            if (status != S::Planned) return status;
+        } else if (!node.AppliedKnown) return S::UnknownAppliedPose;
         if (!node.FrameKnown) return S::UnknownFrame;
-        if (!Finite(node.Applied)) return S::InvalidInput;
-        const auto current = NativeMultiplyPedMatrices(node.Applied, parent);
+        if (!Finite(applied)) return S::InvalidInput;
+        const auto current = NativeMultiplyPedMatrices(applied, parent);
         if (!Finite(current)) return S::InvalidInput;
         NativePedHierarchyNodeUpdate update;
         update.Tag = node.Tag;
@@ -71,7 +107,7 @@ NativePedHierarchyStatus NativePlanPedHierarchyUpdate(const NativePedHierarchyIn
         if (!noMatrices) update.Matrix = current;
         if (node.HasFrame) {
             if (modelling) {
-                update.Modelling = node.Applied;
+                update.Modelling = applied;
                 update.UpdateObjects = !ltms;
             }
             if (ltms) {

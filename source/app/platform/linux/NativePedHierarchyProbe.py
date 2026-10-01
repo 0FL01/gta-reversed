@@ -1,4 +1,4 @@
-"""Original HAnim traversal oracle; callback matrices/attachment are explicit.
+"""Original HAnim application/traversal oracle; sampled frames/attachment are explicit.
 
 Original matrix multiply, parent stack, frame writes and root dirty linking run
 in isolated development memory. No EXE is an application dependency.
@@ -44,6 +44,7 @@ for address, size, digest in (
     (0x7f99d0, 0x9b0, '27467bd2efb933929e18ae487e5f31ae29eb32a25952fa4adf36726f79371139'),
     (0x8260d0, 0x120, 'e746e17a6b7b22c0cc99b2032a62f44500a4121ff987f980cbf7856ad83b64db'),
     (0x825b00, 0x1b0, '6988fcb800e040af65e7ca1e5751813d286119575e9edad7fe25f66184438c74'),
+    (0x7fa380, 0x119, 'ff75eb56594ae64417f8e62a9e26cf679aa5677ba7c853f6434b66b7c31e787f'),
 ):
     assert hashlib.sha256(pe.get_data(address - 0x400000, size)).hexdigest() == digest
 image = pe.get_memory_mapped_image()
@@ -90,15 +91,31 @@ def code(machine, address, size, _):
     elif address == 0x825120:
         updates.append(read(stack + 4, 'I')[0])  # Explicit external object-update intent.
 uc.hook_add(UC_HOOK_CODE, code)
-cases = 0
+cases = interpolation_cases = default_cases = 0
 for line in native.stdout.splitlines():
-    if not line.startswith('HIERARCHY '):
+    if line.startswith('INTERPOLATION '):
+        fields = list(map(int, line.split()[1:]))
+        index, pose, expected = fields[0], fields[1:8], fields[8:]
+        write(interpolator + 0x4c, '9I', 0, 0, *pose)
+        uc.mem_write(matrices, b'\x55' * 64)
+        stack = 0x30ff000
+        write(stack, '3I', 0x30e0000, matrices, interpolator + 0x4c)
+        uc.reg_write(UC_X86_REG_ESP, stack)
+        uc.reg_write(UC_X86_REG_FPCW, 0x37f)
+        uc.emu_start(0x7fa380, 0x30e0000, count=1000)
+        assert uc.reg_read(UC_X86_REG_ESP) == stack + 4
+        assert matrix_values(matrices) == expected, (index, matrix_values(matrices), expected)
+        interpolation_cases += 1
+        continue
+    default = line.startswith('HIERARCHY_DEFAULT ')
+    if not default and not line.startswith('HIERARCHY '):
         if line.startswith('native-ped-hierarchy-ok '): print(line)
         continue
     fields = list(map(int, line.split()[1:]))
     index, mode, flags, has_parent, parent_index, private = fields[:6]
     parent, sub_parent, count = fields[6:19], fields[19:32], fields[32]
-    authored, expected = fields[33:33 + count * 17], fields[33 + count * 17:]
+    stride = 24 if default else 17
+    authored, expected = fields[33:33 + count * stride], fields[33 + count * stride:]
     uc.mem_write(frames, bytes(count * 0x100))
     uc.mem_write(matrices, bytes(count * 64))
     write(hierarchy, 'I', flags)
@@ -115,14 +132,17 @@ for line in native.stdout.splitlines():
     write(root_frame + 8, 'II', sentinel, sentinel)
     write(engine + 0xbc, 'I', sentinel)
     write(sentinel, 'II', engine + 0xbc, engine + 0xbc)
-    write(interpolator + 0x24, 'I', 64)
-    write(interpolator + 0x3c, 'I', callback)
+    write(interpolator + 0x24, 'I', 36 if default else 64)
+    write(interpolator + 0x3c, 'I', 0x7fa380 if default else callback)
     for j in range(count):
-        tag, node_flags, has_frame, frame_private, *applied = authored[j * 17:(j + 1) * 17]
+        tag, node_flags, has_frame, frame_private, *applied = authored[j * stride:(j + 1) * stride]
         frame = frames + j * 0x100
         write(nodes + j * 16, '4I', tag, j, node_flags, frame if has_frame else 0)
         write(frame + 3, 'B', frame_private)
-        matrix(interpolator + 0x4c + j * 64, applied)
+        if default:
+            write(interpolator + 0x4c + j * 36, '9I', 0, 0, *applied[13:])
+        else:
+            matrix(interpolator + 0x4c + j * 64, applied)
         uc.mem_write(frame + 0x10, b'\x55' * 64)
         uc.mem_write(frame + 0x50, b'\x66' * 64)
     updates.clear(); applies.clear()
@@ -133,7 +153,7 @@ for line in native.stdout.splitlines():
     uc.emu_start(0x7f99d0, 0x30e0000, count=100000)
     assert uc.reg_read(UC_X86_REG_ESP) == stack + 4 and uc.reg_read(UC_X86_REG_EAX) == 1
     enqueue, root_private = expected[:2]
-    assert applies == list(range(count)), (index, mode, 'callback order', applies)
+    assert applies == ([] if default else list(range(count))), (index, mode, 'callback order', applies)
     assert read(root_frame + 3, 'B')[0] == (root_private if flags & 0x2000 else private)
     assert read(engine + 0xbc, 'I')[0] == (root_frame + 8 if enqueue else sentinel)
     if enqueue:
@@ -157,6 +177,7 @@ for line in native.stdout.splitlines():
                 assert bytes(uc.mem_read(destination, 64)) == untouched, (index, mode, j, 'unexpected write')
     assert offset == len(expected) and updates == expected_updates
     cases += 1
-assert cases == 2048
-print('ped-hierarchy-source-oracle-ok cases=2048 matrices=original traversal=original '
-      'callback=explicit frame-effects=planned loaded-state=unowned census=incomplete')
+    default_cases += int(default)
+assert cases == 4096 and default_cases == 2048 and interpolation_cases == 8192
+print('ped-hierarchy-source-oracle-ok cases=4096 interpolation=8192 inline=2048 matrices=original traversal=original '
+      'callbacks=explicit,original-default frame-effects=planned loaded-state=unowned census=incomplete')
