@@ -45,6 +45,10 @@ for address, size, digest in (
     (0x8260d0, 0x120, 'e746e17a6b7b22c0cc99b2032a62f44500a4121ff987f980cbf7856ad83b64db'),
     (0x825b00, 0x1b0, '6988fcb800e040af65e7ca1e5751813d286119575e9edad7fe25f66184438c74'),
     (0x7fa380, 0x119, 'ff75eb56594ae64417f8e62a9e26cf679aa5677ba7c853f6434b66b7c31e787f'),
+    (0x7621d0, 0x155, 'd836046f33038a48b6356b3d39b50834ff2618eae42be34c1209319aaf740f1a'),
+    (0x826890, 0x250, 'ddbfe0ae8695520fe4e951e2e54d747b65c5775f09b032f00bcd69179d290530'),
+    (0x821e80, 0xb7, '3539682ed3428299afc7b64d7af87c9aaaeae512be4b313bd4f365dab73fdf69'),
+    (0x8225a0, 0x30, 'e58d2bcb919c084fecd028a2145039b0179e164a2c9877bdb6672b181cdc70d2'),
 ):
     assert hashlib.sha256(pe.get_data(address - 0x400000, size)).hexdigest() == digest
 image = pe.get_memory_mapped_image()
@@ -57,6 +61,8 @@ hierarchy, parent_hierarchy, root_frame, parent_frame, nodes, matrices, sub_matr
     0x30a0000, 0x30a1000, 0x30a2000, 0x30a3000, 0x30a4000, 0x30a5000,
     0x30a6000, 0x30b0000, 0x30c0000, 0x30d0000)
 parent_ltm, callback, sentinel = 0x30a7000, 0x30f0000, 0x30d1000
+bind_skin, bind_geometry, bind_atomic, bind_clump = 0x30a8000, 0x30a9000, 0x30a9100, 0x30a9200
+bind_count = 0
 def write(address, fmt, *values):
     uc.mem_write(address, struct.pack('<' + fmt, *values))
 def read(address, fmt):
@@ -73,11 +79,26 @@ write(0xd23664, 'I', engine)
 write(0xd234fc, 'I', 0x100)
 write(engine + 0x104, 'I', 0x20000)
 write(engine + 0x108, 'I', 0x825b00)
-for address in (0x824b50, 0x8251a0, 0x825120, callback): uc.mem_write(address, b'\xc3')
+write(0xd23474, 'I', 0x200)
+write(engine + 0x20c, 'I', 0x821e80)
+write(bind_atomic + 0x18, 'I', bind_geometry)
+for address in (0x824b50, 0x8251a0, 0x825120, callback,
+                0x77e360, 0x7fbd60, 0x7fbff0, 0x7fc020): uc.mem_write(address, b'\xc3')
 updates, applies = [], []
 def code(machine, address, size, _):
     stack = machine.reg_read(UC_X86_REG_ESP)
-    if address == 0x824b50:
+    if address == 0x77e360:
+        clump, getter, destination = read(stack + 4, '3I')
+        assert clump == bind_clump and getter in (0x761680, 0x761870)
+        write(destination, 'I', bind_atomic if getter == 0x761680 else hierarchy)
+        machine.reg_write(UC_X86_REG_EAX, clump)
+    elif address == 0x7fbd60:
+        assert read(stack + 4, 'I')[0] == bind_geometry
+        machine.reg_write(UC_X86_REG_EAX, bind_skin)
+    elif address in (0x7fbff0, 0x7fc020):
+        assert read(stack + 4, 'I')[0] == bind_skin
+        machine.reg_write(UC_X86_REG_EAX, bind_count if address == 0x7fbff0 else matrices)
+    elif address == 0x824b50:
         assert read(stack + 4, 'I')[0] == parent_frame
         machine.reg_write(UC_X86_REG_EAX, 0)  # Already synchronized parent observation.
     elif address == 0x8251a0:
@@ -91,8 +112,29 @@ def code(machine, address, size, _):
     elif address == 0x825120:
         updates.append(read(stack + 4, 'I')[0])  # Explicit external object-update intent.
 uc.hook_add(UC_HOOK_CODE, code)
-cases = interpolation_cases = default_cases = 0
+cases = interpolation_cases = default_cases = bind_cases = 0
 for line in native.stdout.splitlines():
+    if line.startswith('BIND_POSITION '):
+        fields = list(map(int, line.split()[1:]))
+        index, bind_count = fields[:2]
+        authored, expected = fields[2:2 + bind_count * 14], fields[2 + bind_count * 14:]
+        write(hierarchy + 0x10, 'I', nodes)
+        for j in range(bind_count):
+            node_flags, *values = authored[j * 14:(j + 1) * 14]
+            write(nodes + j * 16, '4I', j, j, node_flags, 0)
+            matrix(matrices + j * 64, values)
+        uc.mem_write(frames, b'\x55' * (bind_count * 12 + 12))
+        stack = 0x30ff000
+        write(stack, '3I', 0x30e0000, bind_clump, frames)
+        uc.reg_write(UC_X86_REG_ESP, stack)
+        uc.reg_write(UC_X86_REG_FPCW, 0x37f)
+        uc.emu_start(0x7621d0, 0x30e0000, count=100000)
+        assert uc.reg_read(UC_X86_REG_ESP) == stack + 4
+        observed = list(read(frames, 'I' * (bind_count * 3)))
+        assert observed == expected, (index, bind_count, observed, expected)
+        assert bytes(uc.mem_read(frames + bind_count * 12, 12)) == b'\x55' * 12
+        bind_cases += 1
+        continue
     if line.startswith('INTERPOLATION '):
         fields = list(map(int, line.split()[1:]))
         index, pose, expected = fields[0], fields[1:8], fields[8:]
@@ -178,6 +220,6 @@ for line in native.stdout.splitlines():
     assert offset == len(expected) and updates == expected_updates
     cases += 1
     default_cases += int(default)
-assert cases == 4096 and default_cases == 2048 and interpolation_cases == 8192
-print('ped-hierarchy-source-oracle-ok cases=4096 interpolation=8192 inline=2048 matrices=original traversal=original '
+assert cases == 4096 and default_cases == 2048 and interpolation_cases == 8192 and bind_cases == 1280
+print('ped-hierarchy-source-oracle-ok cases=4096 interpolation=8192 inline=2048 bind-positions=1280 matrices=original traversal=original '
       'callbacks=explicit,original-default frame-effects=planned loaded-state=unowned census=incomplete')

@@ -415,6 +415,7 @@ bool NativePedAssets_Load(const char* gameDir, const NativeWorldPedModelInfo& mo
                 static_assert(sizeof(inverse) == 16 * sizeof(float));
                 std::memcpy(&inverse, skin->inverseMatrices + b * 16, sizeof(inverse));
                 mesh.InverseBind.push_back(matrix(inverse));
+                mesh.InverseBindFlags.push_back(inverse.flags);
                 if (node.flags & rw::HAnimHierarchy::PUSH) stack.push_back(parent);
                 parent = b;
                 if (node.flags & rw::HAnimHierarchy::POP) {

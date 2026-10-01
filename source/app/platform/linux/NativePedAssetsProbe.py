@@ -97,10 +97,11 @@ def geometry(data):
     offset += vertices * 4
     weights = [words(skin[offset + v * 16:offset + v * 16 + 16]) for v in range(vertices)]
     offset += vertices * 16
-    inverse = []
+    inverse, inverse_flags = [], []
     for b in range(bones):
         values = words(skin[offset + b * 64:offset + b * 64 + 64])
         inverse.append(values[0:3] + values[4:7] + values[8:11] + values[12:15])
+        inverse_flags.append(values[3])
     materials = child(data, 8)
     material_header = child(materials, 1)
     material_count = u32(material_header)
@@ -118,14 +119,14 @@ def geometry(data):
             texture_name = names[0].split(b'\0')[0].decode('ascii').lower()
         authored_materials.append((rgba + surface, texture_name))
     assert len(authored_materials) == material_count
-    return flags & 0xff00ffff, bones, positions, normals, uv, colors, indices, weights, inverse, tris, authored_materials, radius
+    return flags & 0xff00ffff, bones, positions, normals, uv, colors, indices, weights, inverse, tris, authored_materials, radius, inverse_flags
 
 
 def verify(log, game):
     rows = {}
     for line in log.splitlines():
         fields = line.split()
-        if fields and fields[0] in ('PED_ASSET', 'CLUMP_ROOT', 'GEOM', 'GEOM_SETUP', 'BONE', 'VERT', 'TRI', 'MAT', 'IMG'):
+        if fields and fields[0] in ('PED_ASSET', 'CLUMP_ROOT', 'GEOM', 'GEOM_SETUP', 'BONE', 'INVERSE_FLAGS', 'VERT', 'TRI', 'MAT', 'IMG'):
             rows.setdefault(fields[0], []).append(fields[1:])
     path = game / 'models/gta3.img'
     entries = archive(path)
@@ -165,7 +166,7 @@ def verify(log, game):
         assert len(atomics) == int(mesh_count)
         for g, atomic in enumerate(atomics):
             _, index, atomic_flags, _ = struct.unpack('<4i', child(atomic, 1))
-            flags, bones, positions, normals, uv, colors, indices, weights, inverse, tris, materials, radius = geometry(geometries[index])
+            flags, bones, positions, normals, uv, colors, indices, weights, inverse, tris, materials, radius, inverse_flags = geometry(geometries[index])
             header = next(row for row in rows['GEOM'] if list(map(int, row[:2])) == [model_id, g])
             assert list(map(int, header[2:])) == [flags, bones, len(positions), len(tris), len(materials), atomic_flags & 255]
             setup = next(row for row in rows['GEOM_SETUP'] if list(map(int, row[:2])) == [model_id, g])
@@ -187,6 +188,8 @@ def verify(log, game):
                 assert node_index == b
                 expected = [model_id, g, b, tag, parent, node_flags] + frames_by_tag[tag] + inverse[b]
                 actual = next(row for row in rows['BONE'] if list(map(int, row[:3])) == [model_id, g, b])
+                flag_row = next(row for row in rows['INVERSE_FLAGS'] if list(map(int, row[:3])) == [model_id, g, b])
+                assert int(flag_row[3]) == inverse_flags[b], ('skin matrix flags', model_id, g, b)
                 assert list(map(int, actual)) == expected, ('bone', model_id, g, b)
                 if node_flags & 2:
                     stack.append(parent)

@@ -84,21 +84,27 @@ M PreConcat(const M& inverse, const M& bone) {
     out.Flags = bone.Flags & inverse.Flags;
     return out;
 }
-V Center(float x, const M& m) {
+V TransformPoint(const V& point, const M& m) {
+    const auto& [x, y, z] = point;
     const auto& [r, u, a, p] = m.Value;
     // RwV3dTransformPoints spills Y's accumulated coordinate before adding
     // translation, unlike X/Z. Zero terms retain original signed-zero math.
     const auto y0 = static_cast<float>(P(x, r[1]));
     const auto z0 = static_cast<float>(P(x, r[2]));
-    const float y = static_cast<float>((P(u[1], 0.0F) + y0) + P(a[1], 0.0F));
-    return {static_cast<float>(((P(u[0], 0.0F) + P(x, r[0])) + P(a[0], 0.0F)) + p[0]),
-            static_cast<float>(static_cast<long double>(p[1]) + y),
-            static_cast<float>(static_cast<long double>(p[2]) + ((P(u[2], 0.0F) + z0) + P(a[2], 0.0F)))};
+    const float accumulatedY = static_cast<float>((P(u[1], y) + y0) + P(a[1], z));
+    return {static_cast<float>(((P(u[0], y) + P(x, r[0])) + P(a[0], z)) + p[0]),
+            static_cast<float>(static_cast<long double>(p[1]) + accumulatedY),
+            static_cast<float>(static_cast<long double>(p[2]) + ((P(u[2], y) + z0) + P(a[2], z)))};
 }
+V Center(float x, const M& m) { return TransformPoint({x, 0.0F, 0.0F}, m); }
 }
 
 NativePedHitMatrix NativeMultiplyPedMatrices(const NativePedHitMatrix& left, const NativePedHitMatrix& right) {
     return PreConcat(right, left);
+}
+NativePedHitMatrix NativeInvertPedMatrix(const NativePedHitMatrix& matrix) { return Inverse(matrix); }
+std::array<float, 3> NativeTransformPedPoint(const std::array<float, 3>& point, const NativePedHitMatrix& matrix) {
+    return TransformPoint(point, matrix);
 }
 
 NativePedHitCollisionStatus NativeConstructPedHitCollision(const NativePedHitCollisionInput& input, NativePedHitCollision& out) {

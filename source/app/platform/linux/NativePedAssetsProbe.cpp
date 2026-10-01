@@ -38,6 +38,7 @@ void Rows(const NativePedAssets& packet) {
             const auto& bone = mesh.Bones[b];
             std::printf("BONE %d %zu %zu %d %d %u", packet.Model.ModelId, g, b, bone.Tag, bone.Parent, bone.Flags);
             Matrix(bone.Local); Matrix(mesh.InverseBind[b]); std::puts("");
+            std::printf("INVERSE_FLAGS %d %zu %zu %u\n", packet.Model.ModelId, g, b, mesh.InverseBindFlags[b]);
         }
         for (std::size_t m = 0; m < mesh.Materials.size(); ++m) {
             const auto& material = mesh.Materials[m];
@@ -96,6 +97,20 @@ void HitFixture(const NativePedAssets& packet) {
         pose == previousPose, "pose fixture cannot publish without a current hierarchy observation");
 }
 void HierarchyFixture(const NativePedAssets& packet) {
+    const auto& mesh = packet.Geometries.front();
+    Check(mesh.InverseBindFlags.size() == mesh.Bones.size(), "authored skin matrix flags retained with inverse matrices");
+    std::vector<NativePedBindBone> bindBones;
+    for (std::size_t i = 0; i < mesh.Bones.size(); ++i)
+        bindBones.push_back({mesh.Bones[i].Flags, true, {mesh.InverseBind[i], mesh.InverseBindFlags[i]}});
+    std::vector<std::array<float, 3>> restPositions;
+    NativePedBindPositionInput bindInput{true, true, bindBones};
+    Check(NativePlanPedBindPositions(bindInput, restPositions) == NativePedHierarchyStatus::Planned &&
+        restPositions.size() == mesh.Bones.size() && restPositions.front() == std::array<float, 3>{},
+        "real authored skin/node data produces source blend-frame rest translations, not a live keyframe");
+    const auto previousRest = restPositions;
+    bindBones.back().InverseKnown = false;
+    Check(NativePlanPedBindPositions(bindInput, restPositions) == NativePedHierarchyStatus::UnknownInverseBind &&
+        restPositions == previousRest, "missing inverse data cannot default a source bone position");
     std::vector<NativePedHierarchyNode> nodes;
     for (const auto& bone : packet.Geometries.front().Bones) {
         // Authored local frames stand in for the interpolation callback ONLY

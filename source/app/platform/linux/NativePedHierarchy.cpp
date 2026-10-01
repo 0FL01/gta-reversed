@@ -19,6 +19,43 @@ NativePedHitMatrix Identity() {
 }
 }
 
+NativePedHierarchyStatus NativePlanPedBindPositions(const NativePedBindPositionInput& input,
+    std::vector<std::array<float, 3>>& out) {
+    using S = NativePedHierarchyStatus;
+    if (!input.HierarchyKnown) return S::UnknownHierarchy;
+    if (!input.SkinKnown) return S::UnknownSkin;
+    if (input.Bones.empty() || input.Bones.size() > 64) return S::InvalidInput;
+    std::vector<std::array<float, 3>> candidate(input.Bones.size());
+    std::array<std::size_t, 32> stack;
+    std::size_t parent = 0, depth = 0;
+    for (std::size_t i = 1; i < input.Bones.size(); ++i) {
+        const auto& bone = input.Bones[i];
+        const auto& ancestor = input.Bones[parent];
+        if (!bone.InverseKnown || !ancestor.InverseKnown) return S::UnknownInverseBind;
+        if (!Finite(bone.InverseBind) || !Finite(ancestor.InverseBind)) return S::InvalidInput;
+        const auto inverse = NativeInvertPedMatrix(bone.InverseBind);
+        if (!Finite(inverse)) return S::InvalidInput;
+        candidate[i] = NativeTransformPedPoint(inverse.Value.Pos, ancestor.InverseBind);
+        for (float value : candidate[i]) if (!std::isfinite(value)) return S::InvalidInput;
+        if (bone.Flags & 2U) {
+            // Original stack slot zero is uninitialized: PUSH preincrements.
+            if (depth + 1 >= stack.size()) return S::InvalidInput;
+            stack[++depth] = parent;
+        }
+        if (bone.Flags & 1U) {
+            if (!depth) {
+                if (i + 1 != input.Bones.size()) return S::InvalidInput;
+            } else {
+                parent = stack[depth--];
+            }
+        } else {
+            parent = i;
+        }
+    }
+    out = std::move(candidate);
+    return S::Planned;
+}
+
 NativePedHierarchyStatus NativeApplyPedInterpolationFrame(const NativePedInterpolationFrame& input,
     NativePedHitMatrix& out) {
     using S = NativePedHierarchyStatus;

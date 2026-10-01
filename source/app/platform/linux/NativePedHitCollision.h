@@ -18,6 +18,9 @@ struct NativePedHitMatrix {
 // Shared by collision and HAnim consumers; no pose/knownness is inferred here.
 NativePedHitMatrix NativeMultiplyPedMatrices(const NativePedHitMatrix& left,
     const NativePedHitMatrix& right);
+NativePedHitMatrix NativeInvertPedMatrix(const NativePedHitMatrix& matrix);
+std::array<float, 3> NativeTransformPedPoint(const std::array<float, 3>& point,
+    const NativePedHitMatrix& matrix);
 struct NativePedHitBone {
     std::int32_t Tag = -1;
     bool MatrixKnown = false;

@@ -29,6 +29,65 @@ NativePedHitMatrix Matrix(std::uint32_t& seed, std::uint32_t flags) {
 
 int main() {
     using S = NativePedHierarchyStatus;
+    std::size_t bindCases = 0;
+    for (std::uint32_t index = 0; index < 256; ++index) {
+        for (const auto count : {1U, 2U, 8U, 32U, 64U}) {
+            std::uint32_t seed = index * 0x9E3779B9U + count;
+            std::vector<NativePedBindBone> bones(count);
+            constexpr std::array<std::uint32_t, 4> traversal{1, 2, 0, 3};
+            for (std::size_t i = 0; i < bones.size(); ++i) {
+                auto& bone = bones[i];
+                bone.Flags = traversal[i % 4];
+                if (i + 1 == bones.size()) bone.Flags = 1;
+                bone.InverseKnown = true;
+                bone.InverseBind = Matrix(seed, index % 3 == 0 ? 0U : index % 3 == 1 ? 3U : 0x20003U);
+                if (index < 8) {
+                    bone.InverseBind.Value = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1},
+                        {index & 1 ? -0.0F : 0.0F, index & 2 ? -0.0F : 0.0F, index & 4 ? -0.0F : 0.0F}};
+                }
+            }
+            std::vector<std::array<float, 3>> positions;
+            Check(NativePlanPedBindPositions({true, true, bones}, positions) == S::Planned);
+            Check(positions.size() == count && positions.front() == std::array<float, 3>{});
+            std::cout << "BIND_POSITION " << index << ' ' << count;
+            for (const auto& bone : bones) {
+                std::cout << ' ' << bone.Flags;
+                Emit(bone.InverseBind);
+            }
+            for (const auto& point : positions)
+                for (float value : point) std::cout << ' ' << std::bit_cast<std::uint32_t>(value);
+            std::cout << '\n';
+            ++bindCases;
+        }
+    }
+    std::array<NativePedBindBone, 3> bindBones;
+    for (auto& bone : bindBones) {
+        bone.InverseKnown = true;
+        bone.InverseBind = {{{1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {0, 0, 0}}, 3};
+    }
+    NativePedBindPositionInput bindInput{true, true, bindBones};
+    std::vector<std::array<float, 3>> bindOut(1);
+    bindOut.front() = {777, 888, 999};
+    std::vector<std::array<float, 3>> oldBind(1);
+    oldBind.front() = {777, 888, 999};
+    bindInput.HierarchyKnown = false;
+    Check(NativePlanPedBindPositions(bindInput, bindOut) == S::UnknownHierarchy && bindOut == oldBind);
+    bindInput.HierarchyKnown = true; bindInput.SkinKnown = false;
+    Check(NativePlanPedBindPositions(bindInput, bindOut) == S::UnknownSkin && bindOut == oldBind);
+    bindInput.SkinKnown = true; bindBones.back().InverseKnown = false;
+    Check(NativePlanPedBindPositions(bindInput, bindOut) == S::UnknownInverseBind && bindOut == oldBind);
+    bindBones.back().InverseKnown = true; bindBones.back().InverseBind.Value.Pos[1] = std::numeric_limits<float>::quiet_NaN();
+    Check(NativePlanPedBindPositions(bindInput, bindOut) == S::InvalidInput && bindOut == oldBind);
+    bindBones.back().InverseBind.Value.Pos[1] = 0; bindBones[1].Flags = 1;
+    Check(NativePlanPedBindPositions(bindInput, bindOut) == S::InvalidInput && bindOut == oldBind);
+    bindInput.Bones = {};
+    Check(NativePlanPedBindPositions(bindInput, bindOut) == S::InvalidInput && bindOut == oldBind);
+    std::vector<NativePedBindBone> deepBind(34, bindBones[0]);
+    for (auto& bone : deepBind) bone.Flags = 2;
+    bindInput.Bones = deepBind;
+    Check(NativePlanPedBindPositions(bindInput, bindOut) == S::InvalidInput && bindOut == oldBind);
+    bindBones[0].InverseKnown = false; bindInput.Bones = std::span{bindBones}.first(1);
+    Check(NativePlanPedBindPositions(bindInput, bindOut) == S::Planned && bindOut == std::vector<std::array<float, 3>>(1));
     for (std::uint32_t index = 0; index < 8192; ++index) {
         NativePedInterpolationFrame frame;
         frame.Known = true;
@@ -182,5 +241,6 @@ int main() {
     nodes[1].Interpolation->Known = true; nodes[1].Interpolation->Quaternion[2] = std::numeric_limits<float>::quiet_NaN();
     Check(NativePlanPedHierarchyUpdate(input, out) == S::InvalidInput && out == noParentPlan);
     std::cout << "native-ped-hierarchy-ok checks=" << Checks << " cases=" << cases
-        << " interpolation=8192 callbacks=explicit,default frame-effects=planned loaded-state=unowned census=incomplete\n";
+        << " interpolation=8192 bind-positions=" << bindCases
+        << " callbacks=explicit,default frame-effects=planned loaded-state=unowned census=incomplete\n";
 }

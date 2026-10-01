@@ -63,8 +63,27 @@ struct NativePedHierarchyPlan {
 
 enum class NativePedHierarchyStatus {
     Planned, UnknownHierarchy, UnknownParent, UnknownAppliedPose, UnknownFrame,
-    UnknownRootFrame, InvalidInput
+    UnknownRootFrame, InvalidInput, UnknownSkin, UnknownInverseBind
 };
+
+struct NativePedBindBone {
+    std::uint32_t Flags = 0; // Authored HAnim node flags, not matrix flags.
+    bool InverseKnown = false;
+    NativePedHitMatrix InverseBind;
+};
+struct NativePedBindPositionInput {
+    bool HierarchyKnown = false, SkinKnown = false;
+    std::span<const NativePedBindBone> Bones;
+};
+// SkinGetBonePositionsToTable used by RpAnimBlendClumpInitSkinned. These are
+// authored rest translations for blend-frame data, NOT current keyframes or
+// hierarchy matrices. Root translation is the literal source zero; later
+// translations require the actual skin-to-bone matrix and source node order.
+// Bounded to 64 bones and the original 32-slot stack (31 usable saves). A terminal
+// unused POP may exhaust the stack; consumed underflow is never guessed.
+// All failure paths preserve out; no pose, binding, refs or Loaded publication.
+NativePedHierarchyStatus NativePlanPedBindPositions(const NativePedBindPositionInput& input,
+    std::vector<std::array<float, 3>>& out);
 
 NativePedHierarchyStatus NativeApplyPedInterpolationFrame(const NativePedInterpolationFrame& input,
     NativePedHitMatrix& out);

@@ -30,6 +30,7 @@ struct NativePedAssetGeometry {
     NativePlayerMatrix AtomicWorld;
     std::vector<NativePedAssetBone> Bones;
     std::vector<NativePlayerMatrix> InverseBind;
+    std::vector<std::uint32_t> InverseBindFlags; // Authored RW skin matrix flags.
     std::vector<NativePedAssetVertex> Vertices;
     std::vector<NativePlayerTriangle> Triangles;
     std::vector<NativePedAssetMaterial> Materials;
