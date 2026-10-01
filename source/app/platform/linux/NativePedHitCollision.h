@@ -8,7 +8,16 @@
 struct NativePedHitMatrix {
     NativePlayerMatrix Value{};
     std::uint32_t Flags = 0;
+    bool operator==(const NativePedHitMatrix& other) const {
+        return Flags == other.Flags && Value.Right == other.Value.Right && Value.Up == other.Value.Up &&
+            Value.At == other.Value.At && Value.Pos == other.Value.Pos;
+    }
 };
+
+// Source RwMatrixMultiply under the initialized RWDEFAULT configuration.
+// Shared by collision and HAnim consumers; no pose/knownness is inferred here.
+NativePedHitMatrix NativeMultiplyPedMatrices(const NativePedHitMatrix& left,
+    const NativePedHitMatrix& right);
 struct NativePedHitBone {
     std::int32_t Tag = -1;
     bool MatrixKnown = false;

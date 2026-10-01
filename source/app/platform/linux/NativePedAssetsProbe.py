@@ -239,7 +239,7 @@ def main():
         commands = subprocess.check_output(['ninja', '-C', str(build), '-t', 'commands', 'sa_ped_assets_probe'], text=True).splitlines()
         objects = []
         with (OUTPUT / ('NativePedAssetsProbe' + suffix + '.build.log')).open('w') as log:
-            for name in ('NativePedAssetsProbe', 'NativeScriptEntities', 'MenuShot', 'NativePedSkinSetup', 'NativePedHitCollision'):
+            for name in ('NativePedAssetsProbe', 'NativeScriptEntities', 'MenuShot', 'NativePedSkinSetup', 'NativePedHitCollision', 'NativePedHierarchy'):
                 original = shlex.split(next(line for line in commands if '-c ' in line and '/' + name + '.cpp' in line))
                 command, i = [], 0
                 while i < len(original):

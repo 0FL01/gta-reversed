@@ -1,0 +1,131 @@
+#include "NativePedHierarchy.h"
+
+#include <bit>
+#include <cstdlib>
+#include <iostream>
+#include <limits>
+
+namespace {
+std::size_t Checks = 0;
+void Check(bool value) { ++Checks; if (!value) std::abort(); }
+void Emit(const NativePedHitMatrix& matrix) {
+    std::cout << ' ' << matrix.Flags;
+    for (const auto& row : {matrix.Value.Right, matrix.Value.Up, matrix.Value.At, matrix.Value.Pos})
+        for (float value : row) std::cout << ' ' << std::bit_cast<std::uint32_t>(value);
+}
+NativePedHitMatrix Matrix(std::uint32_t& seed, std::uint32_t flags) {
+    NativePedHitMatrix out;
+    out.Flags = flags;
+    for (auto* row : {&out.Value.Right, &out.Value.Up, &out.Value.At, &out.Value.Pos}) {
+        for (auto& value : *row) {
+            seed = seed * 1664525U + 1013904223U;
+            value = static_cast<float>(static_cast<std::int32_t>(seed >> 8) - 0x800000) / 33554432.0F;
+        }
+    }
+    out.Value.Right[0] += 1.0F; out.Value.Up[1] += 1.0F; out.Value.At[2] += 1.0F;
+    return out;
+}
+}
+
+int main() {
+    using S = NativePedHierarchyStatus;
+    std::size_t cases = 0;
+    for (std::uint32_t index = 0; index < 64; ++index) {
+        for (std::uint32_t mode = 0; mode < 32; ++mode) {
+            std::uint32_t seed = index * 0x9E3779B9U + mode;
+            std::array<NativePedHierarchyNode, 8> nodes;
+            constexpr std::array<std::uint32_t, 8> traversal{0, 2, 3, 0, 1, 2, 1, 1};
+            for (std::size_t j = 0; j < nodes.size(); ++j) {
+                auto& node = nodes[j];
+                node.Tag = static_cast<std::int32_t>(j + 1);
+                node.Flags = traversal[j];
+                node.AppliedKnown = node.FrameKnown = true;
+                node.HasFrame = (index & (1U << j)) != 0;
+                node.FramePrivateFlags = static_cast<std::uint8_t>(index + j);
+                node.Applied = Matrix(seed, (index + j) % 7 == 0 ? 0x20003U : 3U);
+            }
+            NativePedHierarchyInput input;
+            input.HierarchyKnown = input.ParentKnown = input.SubParentKnown = input.RootFrameKnown = true;
+            input.HasParent = index % 3 != 0;
+            input.HasRootFrame = true;
+            input.Flags = (mode & 3U) | ((mode & 4U) ? 0x1000U : 0U) |
+                ((mode & 8U) ? 0x2000U : 0U) | ((mode & 16U) ? 0x4000U : 0U);
+            input.ParentIndex = index % 2 ? 0 : -1;
+            input.RootPrivateFlags = static_cast<std::uint8_t>(index % 16);
+            input.ParentWorld = Matrix(seed, index % 7 == 0 ? 0x20003U : 3U);
+            input.SubParent = Matrix(seed, 3U);
+            input.Nodes = nodes;
+            NativePedHierarchyPlan out;
+            Check(NativePlanPedHierarchyUpdate(input, out) == S::Planned);
+            Check(out.Nodes.size() == nodes.size());
+            std::cout << "HIERARCHY " << index << ' ' << mode << ' ' << input.Flags << ' ' << input.HasParent
+                << ' ' << input.ParentIndex << ' ' << unsigned(input.RootPrivateFlags);
+            Emit(input.ParentWorld); Emit(input.SubParent);
+            std::cout << ' ' << nodes.size();
+            for (const auto& node : nodes) {
+                std::cout << ' ' << node.Tag << ' ' << node.Flags << ' ' << node.HasFrame << ' ' << unsigned(node.FramePrivateFlags);
+                Emit(node.Applied);
+            }
+            std::cout << ' ' << out.EnqueueRootDirty << ' ' << unsigned(out.RootPrivateFlags);
+            for (const auto& node : out.Nodes) {
+                std::cout << ' ' << unsigned(node.FramePrivateFlags) << ' ' << node.UpdateObjects;
+                for (const auto* matrix : {&node.Matrix, &node.Modelling, &node.Ltm}) {
+                    std::cout << ' ' << matrix->has_value();
+                    if (*matrix) Emit(**matrix);
+                }
+            }
+            std::cout << '\n';
+            ++cases;
+        }
+    }
+    std::array<NativePedHierarchyNode, 2> nodes;
+    for (auto& node : nodes) {
+        node.AppliedKnown = node.FrameKnown = true;
+        node.Applied = {{{1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {0, 0, 0}}, 3};
+    }
+    NativePedHierarchyInput input;
+    input.HierarchyKnown = input.ParentKnown = true;
+    input.Nodes = nodes;
+    NativePedHierarchyPlan out;
+    Check(NativePlanPedHierarchyUpdate(input, out) == S::Planned);
+    const auto prior = out;
+    input.HierarchyKnown = false;
+    Check(NativePlanPedHierarchyUpdate(input, out) == S::UnknownHierarchy && out == prior);
+    input.HierarchyKnown = true; input.ParentKnown = false;
+    Check(NativePlanPedHierarchyUpdate(input, out) == S::UnknownParent && out == prior);
+    input.ParentKnown = true; nodes[1].AppliedKnown = false;
+    Check(NativePlanPedHierarchyUpdate(input, out) == S::UnknownAppliedPose && out == prior);
+    nodes[1].AppliedKnown = true; nodes[1].FrameKnown = false;
+    Check(NativePlanPedHierarchyUpdate(input, out) == S::UnknownFrame && out == prior);
+    nodes[1].FrameKnown = true; nodes[0].Flags = 1;
+    Check(NativePlanPedHierarchyUpdate(input, out) == S::InvalidInput && out == prior);
+    nodes[0].Flags = 0; nodes[1].Applied.Value.Pos[0] = std::numeric_limits<float>::infinity();
+    Check(NativePlanPedHierarchyUpdate(input, out) == S::InvalidInput && out == prior);
+    nodes[1].Applied.Value.Pos[0] = 0; input.Flags = 0x2000;
+    Check(NativePlanPedHierarchyUpdate(input, out) == S::UnknownRootFrame && out == prior);
+    input.RootFrameKnown = true;
+    Check(NativePlanPedHierarchyUpdate(input, out) == S::InvalidInput && out == prior);
+    input.HasRootFrame = true; input.Flags = 1;
+    Check(NativePlanPedHierarchyUpdate(input, out) == S::UnknownParent && out == prior);
+    input.SubParentKnown = true; input.ParentIndex = 256;
+    Check(NativePlanPedHierarchyUpdate(input, out) == S::InvalidInput && out == prior);
+    input.ParentIndex = -1; input.Flags = 0; input.Nodes = {};
+    Check(NativePlanPedHierarchyUpdate(input, out) == S::InvalidInput && out == prior);
+    input.Nodes = nodes; input.Flags = 0x4000; input.ParentKnown = false;
+    input.ParentWorld.Value.Pos[0] = std::numeric_limits<float>::quiet_NaN();
+    Check(NativePlanPedHierarchyUpdate(input, out) == S::Planned);
+    input.Flags = 1; input.ParentIndex = 0;
+    Check(NativePlanPedHierarchyUpdate(input, out) == S::Planned);
+    const auto noParentPlan = out;
+    input.Flags = 0x6001;
+    Check(NativePlanPedHierarchyUpdate(input, out) == S::UnknownParent && out == noParentPlan);
+    input.Flags = 0x4002;
+    Check(NativePlanPedHierarchyUpdate(input, out) == S::UnknownParent && out == noParentPlan);
+    std::array<NativePedHierarchyNode, 34> deep;
+    deep.fill(nodes[0]);
+    for (auto& node : deep) node.Flags = 2;
+    input.Flags = 0x4000; input.Nodes = deep;
+    Check(NativePlanPedHierarchyUpdate(input, out) == S::InvalidInput && out == noParentPlan);
+    std::cout << "native-ped-hierarchy-ok checks=" << Checks << " cases=" << cases
+        << " callback=explicit frame-effects=planned loaded-state=unowned census=incomplete\n";
+}

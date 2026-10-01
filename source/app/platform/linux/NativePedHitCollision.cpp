@@ -97,6 +97,10 @@ V Center(float x, const M& m) {
 }
 }
 
+NativePedHitMatrix NativeMultiplyPedMatrices(const NativePedHitMatrix& left, const NativePedHitMatrix& right) {
+    return PreConcat(right, left);
+}
+
 NativePedHitCollisionStatus NativeConstructPedHitCollision(const NativePedHitCollisionInput& input, NativePedHitCollision& out) {
     using S = NativePedHitCollisionStatus;
     if (!input.RootKnown) return S::UnknownRoot;

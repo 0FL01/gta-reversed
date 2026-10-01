@@ -2,6 +2,7 @@
 #include "NativePedModelMetadata.h"
 #include "NativePedSkinSetup.h"
 #include "NativePedHitCollision.h"
+#include "NativePedHierarchy.h"
 #include "RealtimeStreaming.h"
 
 #include <bit>
@@ -94,6 +95,38 @@ void HitFixture(const NativePedAssets& packet) {
     Check(NativeAnimatePedHitCollision(input, NativePedHitCollisionSpace::World, pose) == NativePedHitCollisionStatus::UnknownHierarchy &&
         pose == previousPose, "pose fixture cannot publish without a current hierarchy observation");
 }
+void HierarchyFixture(const NativePedAssets& packet) {
+    std::vector<NativePedHierarchyNode> nodes;
+    for (const auto& bone : packet.Geometries.front().Bones) {
+        // Authored local frames stand in for the interpolation callback ONLY
+        // in this explicit bind fixture. The parser never asserts AppliedKnown.
+        nodes.push_back({bone.Tag, bone.Flags, true, {bone.Local, 0}, true, true, 0});
+    }
+    NativePedHierarchyInput input;
+    input.HierarchyKnown = input.ParentKnown = input.RootFrameKnown = true;
+    input.HasParent = input.HasRootFrame = true;
+    input.ParentWorld = {packet.ClumpRootLocal, packet.ClumpRootLocalFlags};
+    input.Flags = 0x3000;
+    input.Nodes = nodes;
+    NativePedHierarchyPlan plan;
+    Check(NativePlanPedHierarchyUpdate(input, plan) == NativePedHierarchyStatus::Planned &&
+        plan.Nodes.size() == nodes.size() && plan.EnqueueRootDirty,
+        "actual node order feeds explicit callback fixture with frame/dirty effects still planned");
+    std::vector<NativePedHitBone> matrices;
+    for (const auto& node : plan.Nodes) {
+        Check(node.Matrix && node.Modelling && node.Ltm && !node.UpdateObjects,
+            "simple source hierarchy plan contains current and attached frame writes");
+        matrices.push_back({node.Tag, true, *node.Matrix});
+    }
+    NativePedHitCollision shape;
+    Check(NativeConstructPedHitCollision({true, true,
+        {packet.ClumpRootLocal, packet.ClumpRootLocalFlags}, matrices}, shape) ==
+        NativePedHitCollisionStatus::Constructed, "planned callback matrix fixture feeds source hit COL");
+    const auto prior = plan;
+    nodes.back().AppliedKnown = false;
+    Check(NativePlanPedHierarchyUpdate(input, plan) == NativePedHierarchyStatus::UnknownAppliedPose && plan == prior,
+        "real DFF data alone cannot authorize interpolation callback results");
+}
 std::optional<realtime_streaming::PedAssetCompletion> Take(realtime_streaming::Worker& worker, std::uint64_t ticket) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
     while (std::chrono::steady_clock::now() < deadline) {
@@ -130,6 +163,7 @@ int main(int argc, char** argv) {
                 completed ? completed->Error.c_str() : "ped timeout");
             retained.push_back(completed->Packet);
             HitFixture(*completed->Packet);
+            HierarchyFixture(*completed->Packet);
             const auto& first = completed->Packet->Geometries.front();
             NativePedSkinSetupPlan skin;
             Check(NativePlanPedSkinSetup({true, false, first.MorphRadius, first.HierarchyFlags, first.Vertices}, skin) ==
@@ -158,6 +192,7 @@ int main(int argc, char** argv) {
                 if (result->Packet) {
                     ++parsed;
                     HitFixture(*result->Packet);
+                    HierarchyFixture(*result->Packet);
                     const auto& first = result->Packet->Geometries.front();
                     NativePedSkinSetupPlan skin;
                     Check(NativePlanPedSkinSetup({true, false, first.MorphRadius, first.HierarchyFlags, first.Vertices}, skin) ==
