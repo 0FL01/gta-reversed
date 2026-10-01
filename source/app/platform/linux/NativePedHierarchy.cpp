@@ -56,8 +56,31 @@ NativePedHierarchyStatus NativePlanPedBindPositions(const NativePedBindPositionI
     return S::Planned;
 }
 
-NativePedHierarchyStatus NativeApplyPedInterpolationFrame(const NativePedInterpolationFrame& input,
-    NativePedHitMatrix& out) {
+NativePedHierarchyStatus NativePlanPedBlendInitialization(const NativePedBlendInitInput& input,
+    std::vector<NativePedBlendFrameBinding>& out) {
+    using S = NativePedHierarchyStatus;
+    std::vector<std::array<float, 3>> positions;
+    const auto status = NativePlanPedBindPositions(input.Bind, positions);
+    if (status != S::Planned) return status;
+    if (!input.InterpolatorKnown) return S::UnknownInterpolator;
+    if (input.Tags.size() != positions.size() || input.InterpolationStride < 28 ||
+        input.InterpolationStride > 256) return S::InvalidInput;
+    std::vector<NativePedBlendFrameBinding> candidate(positions.size());
+    for (std::size_t i = 0; i < positions.size(); ++i) {
+        candidate[i] = {static_cast<std::uint8_t>(i == 0 ? 8 : 0), positions[i], input.Tags[i],
+            static_cast<std::uint32_t>(i), static_cast<std::uint32_t>(i) * input.InterpolationStride};
+    }
+    out = std::move(candidate);
+    return S::Planned;
+}
+
+void NativeResetPedBlendInterpolationFrame(NativePedInterpolationFrame& out) {
+    out = {true, {0, 0, 0, 1}, {0, 0, 0}};
+}
+
+namespace {
+NativePedHierarchyStatus ApplyFrame(const NativePedInterpolationFrame& input,
+    bool blend, NativePedHitMatrix& out) {
     using S = NativePedHierarchyStatus;
     if (!input.Known) return S::UnknownAppliedPose;
     for (float value : input.Quaternion) if (!std::isfinite(value)) return S::InvalidInput;
@@ -65,11 +88,12 @@ NativePedHierarchyStatus NativeApplyPedInterpolationFrame(const NativePedInterpo
     static_assert(std::numeric_limits<long double>::digits == 64);
     const auto& [xf, yf, zf, wf] = input.Quaternion;
     const long double x = xf, y = yf, z = zf, w = wf;
-    // The callback and both inline HAnim branches spill these products to
-    // float, but retain w*y and w*z in x87 registers. Preserve that distinction.
+    // RW's callback/inline paths retain w*y and w*z; GTA's registered callback
+    // spills all products. The two applications must not share a guessed pose.
     const float xx = x * x, yy = y * y, zz = z * z;
     const float zy = z * y, zx = z * x, xy = y * x, wx = w * x;
-    const long double wy = w * y, wz = w * z;
+    const long double wy = blend ? static_cast<float>(w * y) : w * y;
+    const long double wz = blend ? static_cast<float>(w * z) : w * z;
     NativePedHitMatrix candidate;
     candidate.Flags = 3;
     candidate.Value.Right = {static_cast<float>(1.0L - (static_cast<long double>(zz) + yy) * 2.0L),
@@ -85,6 +109,17 @@ NativePedHierarchyStatus NativeApplyPedInterpolationFrame(const NativePedInterpo
     if (!Finite(candidate)) return S::InvalidInput;
     out = candidate;
     return S::Planned;
+}
+}
+
+NativePedHierarchyStatus NativeApplyPedInterpolationFrame(const NativePedInterpolationFrame& input,
+    NativePedHitMatrix& out) {
+    return ApplyFrame(input, false, out);
+}
+
+NativePedHierarchyStatus NativeApplyPedBlendFrame(const NativePedInterpolationFrame& input,
+    NativePedHitMatrix& out) {
+    return ApplyFrame(input, true, out);
 }
 
 NativePedHierarchyStatus NativePlanPedHierarchyUpdate(const NativePedHierarchyInput& input,
@@ -131,7 +166,11 @@ NativePedHierarchyStatus NativePlanPedHierarchyUpdate(const NativePedHierarchyIn
     for (const auto& node : input.Nodes) {
         auto applied = node.Applied;
         if (node.Interpolation) {
-            const auto status = NativeApplyPedInterpolationFrame(*node.Interpolation, applied);
+            if (node.Application != NativePedFrameApplication::HAnimDefault &&
+                node.Application != NativePedFrameApplication::AnimBlend) return S::InvalidInput;
+            const auto status = node.Application == NativePedFrameApplication::AnimBlend
+                ? NativeApplyPedBlendFrame(*node.Interpolation, applied)
+                : NativeApplyPedInterpolationFrame(*node.Interpolation, applied);
             if (status != S::Planned) return status;
         } else if (!node.AppliedKnown) return S::UnknownAppliedPose;
         if (!node.FrameKnown) return S::UnknownFrame;

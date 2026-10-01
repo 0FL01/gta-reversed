@@ -58,6 +58,23 @@ int main() {
                 for (float value : point) std::cout << ' ' << std::bit_cast<std::uint32_t>(value);
             std::cout << '\n';
             ++bindCases;
+            std::vector<std::int32_t> tags(count);
+            for (std::uint32_t i = 0; i < count; ++i) tags[i] = static_cast<std::int32_t>(index * 100 + i);
+            const std::uint32_t stride = index % 3 == 0 ? 28 : index % 3 == 1 ? 36 : 64;
+            std::vector<NativePedBlendFrameBinding> bindings;
+            Check(NativePlanPedBlendInitialization({{true, true, bones}, true, stride, tags}, bindings) == S::Planned);
+            Check(bindings.size() == count && bindings.front().Flags == 8);
+            std::cout << "BLEND_INIT " << index << ' ' << count << ' ' << stride;
+            for (std::size_t i = 0; i < bones.size(); ++i) {
+                std::cout << ' ' << tags[i] << ' ' << bones[i].Flags;
+                Emit(bones[i].InverseBind);
+            }
+            for (const auto& binding : bindings) {
+                std::cout << ' ' << static_cast<unsigned>(binding.Flags) << ' ' << binding.Tag
+                          << ' ' << binding.KeyFrameByteOffset;
+                for (float value : binding.RestPosition) std::cout << ' ' << std::bit_cast<std::uint32_t>(value);
+            }
+            std::cout << '\n';
         }
     }
     std::array<NativePedBindBone, 3> bindBones;
@@ -88,6 +105,25 @@ int main() {
     Check(NativePlanPedBindPositions(bindInput, bindOut) == S::InvalidInput && bindOut == oldBind);
     bindBones[0].InverseKnown = false; bindInput.Bones = std::span{bindBones}.first(1);
     Check(NativePlanPedBindPositions(bindInput, bindOut) == S::Planned && bindOut == std::vector<std::array<float, 3>>(1));
+    std::array<std::int32_t, 1> initTags{0};
+    NativePedBlendInitInput initInput{bindInput, true, 28, initTags};
+    std::vector<NativePedBlendFrameBinding> initOut(1);
+    initOut.front().Tag = 777;
+    const auto oldInit = initOut;
+    initInput.InterpolatorKnown = false;
+    Check(NativePlanPedBlendInitialization(initInput, initOut) == S::UnknownInterpolator && initOut == oldInit);
+    initInput.InterpolatorKnown = true; initInput.InterpolationStride = 27;
+    Check(NativePlanPedBlendInitialization(initInput, initOut) == S::InvalidInput && initOut == oldInit);
+    initInput.InterpolationStride = 257;
+    Check(NativePlanPedBlendInitialization(initInput, initOut) == S::InvalidInput && initOut == oldInit);
+    initInput.InterpolationStride = 28; initInput.Tags = {};
+    Check(NativePlanPedBlendInitialization(initInput, initOut) == S::InvalidInput && initOut == oldInit);
+    NativePedInterpolationFrame resetFrame;
+    resetFrame.Quaternion = {777, 888, 999, 111};
+    resetFrame.Translation = {222, 333, 444};
+    NativeResetPedBlendInterpolationFrame(resetFrame);
+    Check(resetFrame.Known && resetFrame.Quaternion == std::array<float, 4>{0, 0, 0, 1} &&
+          resetFrame.Translation == std::array<float, 3>{});
     for (std::uint32_t index = 0; index < 8192; ++index) {
         NativePedInterpolationFrame frame;
         frame.Known = true;
@@ -109,9 +145,15 @@ int main() {
         for (float value : frame.Translation) std::cout << ' ' << std::bit_cast<std::uint32_t>(value);
         Emit(applied);
         std::cout << '\n';
+        Check(NativeApplyPedBlendFrame(frame, applied) == S::Planned);
+        std::cout << "BLEND_APPLICATION " << index;
+        for (float value : frame.Quaternion) std::cout << ' ' << std::bit_cast<std::uint32_t>(value);
+        for (float value : frame.Translation) std::cout << ' ' << std::bit_cast<std::uint32_t>(value);
+        Emit(applied);
+        std::cout << '\n';
     }
     std::size_t cases = 0;
-    for (std::uint32_t profile = 0; profile < 128; ++profile) {
+    for (std::uint32_t profile = 0; profile < 192; ++profile) {
         const auto defaultCallback = profile / 64;
         const auto index = profile % 64;
         for (std::uint32_t mode = 0; mode < 32; ++mode) {
@@ -135,6 +177,7 @@ int main() {
                     }
                     frame.Translation = node.Applied.Value.Pos;
                     node.Interpolation = frame;
+                    if (defaultCallback == 2) node.Application = NativePedFrameApplication::AnimBlend;
                     node.AppliedKnown = false;
                 }
             }
@@ -152,7 +195,7 @@ int main() {
             NativePedHierarchyPlan out;
             Check(NativePlanPedHierarchyUpdate(input, out) == S::Planned);
             Check(out.Nodes.size() == nodes.size());
-            std::cout << (defaultCallback ? "HIERARCHY_DEFAULT " : "HIERARCHY ") << index << ' ' << mode << ' ' << input.Flags << ' ' << input.HasParent
+            std::cout << (defaultCallback == 2 ? "HIERARCHY_BLEND " : defaultCallback ? "HIERARCHY_DEFAULT " : "HIERARCHY ") << index << ' ' << mode << ' ' << input.Flags << ' ' << input.HasParent
                 << ' ' << input.ParentIndex << ' ' << unsigned(input.RootPrivateFlags);
             Emit(input.ParentWorld); Emit(input.SubParent);
             std::cout << ' ' << nodes.size();
@@ -228,8 +271,10 @@ int main() {
     const auto priorApplied = applied;
     NativePedInterpolationFrame frame;
     Check(NativeApplyPedInterpolationFrame(frame, applied) == S::UnknownAppliedPose && applied == priorApplied);
+    Check(NativeApplyPedBlendFrame(frame, applied) == S::UnknownAppliedPose && applied == priorApplied);
     frame.Known = true; frame.Quaternion[0] = std::numeric_limits<float>::quiet_NaN();
     Check(NativeApplyPedInterpolationFrame(frame, applied) == S::InvalidInput && applied == priorApplied);
+    Check(NativeApplyPedBlendFrame(frame, applied) == S::InvalidInput && applied == priorApplied);
     frame.Quaternion[0] = std::numeric_limits<float>::max();
     Check(NativeApplyPedInterpolationFrame(frame, applied) == S::InvalidInput && applied == priorApplied);
     frame.Quaternion = {0, 0, 0, 0}; frame.Translation[2] = std::numeric_limits<float>::infinity();
@@ -240,7 +285,10 @@ int main() {
     Check(NativePlanPedHierarchyUpdate(input, out) == S::UnknownAppliedPose && out == noParentPlan);
     nodes[1].Interpolation->Known = true; nodes[1].Interpolation->Quaternion[2] = std::numeric_limits<float>::quiet_NaN();
     Check(NativePlanPedHierarchyUpdate(input, out) == S::InvalidInput && out == noParentPlan);
+    nodes[1].Interpolation->Quaternion[2] = 0;
+    nodes[1].Application = static_cast<NativePedFrameApplication>(2);
+    Check(NativePlanPedHierarchyUpdate(input, out) == S::InvalidInput && out == noParentPlan);
     std::cout << "native-ped-hierarchy-ok checks=" << Checks << " cases=" << cases
-        << " interpolation=8192 bind-positions=" << bindCases
-        << " callbacks=explicit,default frame-effects=planned loaded-state=unowned census=incomplete\n";
+        << " interpolation=8192 blend-application=8192 bind-positions=" << bindCases << " blend-init=" << bindCases
+        << " callbacks=explicit,default,GTA frame-effects=planned loaded-state=unowned census=incomplete\n";
 }

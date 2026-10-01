@@ -107,6 +107,23 @@ void HierarchyFixture(const NativePedAssets& packet) {
     Check(NativePlanPedBindPositions(bindInput, restPositions) == NativePedHierarchyStatus::Planned &&
         restPositions.size() == mesh.Bones.size() && restPositions.front() == std::array<float, 3>{},
         "real authored skin/node data produces source blend-frame rest translations, not a live keyframe");
+    std::vector<std::int32_t> tags;
+    for (const auto& bone : mesh.Bones) tags.push_back(bone.Tag);
+    std::vector<NativePedBlendFrameBinding> bindings;
+    NativePedBlendInitInput blendInput{bindInput, true, 28, tags}; // Explicit registered-interpolator fixture.
+    Check(NativePlanPedBlendInitialization(blendInput, bindings) == NativePedHierarchyStatus::Planned &&
+        bindings.size() == mesh.Bones.size() && bindings.front().Flags == 8 &&
+        bindings.back().Tag == mesh.Bones.back().Tag && bindings.back().KeyFrameByteOffset == (bindings.size() - 1) * 28,
+        "real source skin rest data binds frame indices without initializing a quaternion or live pose");
+    const auto previousBindings = bindings;
+    blendInput.InterpolatorKnown = false;
+    Check(NativePlanPedBlendInitialization(blendInput, bindings) == NativePedHierarchyStatus::UnknownInterpolator &&
+        bindings == previousBindings, "asset presence cannot invent an interpolator binding");
+    NativePedInterpolationFrame unknownBlendFrame;
+    NativePedHitMatrix untouched;
+    untouched.Value.Pos[0] = 777;
+    Check(NativeApplyPedBlendFrame(unknownBlendFrame, untouched) == NativePedHierarchyStatus::UnknownAppliedPose &&
+        untouched.Value.Pos[0] == 777, "frame-data initialization does not imply GTA interpolation callback execution");
     const auto previousRest = restPositions;
     bindBones.back().InverseKnown = false;
     Check(NativePlanPedBindPositions(bindInput, restPositions) == NativePedHierarchyStatus::UnknownInverseBind &&
